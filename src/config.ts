@@ -94,9 +94,10 @@ export function loadConfig(projectRoot: string = process.cwd()): ProbeConfig {
   const envCacheDir = asNonBlankString(process.env.PROBE_CACHE_DIR);
   const envExclude = parseEnvExclude();
 
-  const exclude = Array.from(
-    new Set([...DEFAULT_EXCLUDES, ...fileExclude, ...envExclude]),
-  );
+  const merged = [...DEFAULT_EXCLUDES, ...fileExclude, ...envExclude]
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const exclude = Array.from(new Set(merged));
   const cacheDirRaw = envCacheDir ?? fileCacheDir ?? join(root, '.probe', 'cache');
 
   const cfg: ProbeConfig = {

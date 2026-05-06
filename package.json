@@ -26,12 +26,14 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "picomatch": "^4.0.4",
     "web-tree-sitter": "^0.26.8",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@repomix/tree-sitter-wasms": "^0.1.17",
     "@types/node": "^25.6.0",
+    "@types/picomatch": "^4.0.3",
     "typescript": "^6.0.0",
     "vitest": "^4.1.0"
   }

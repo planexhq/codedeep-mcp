@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { loadConfig } from '../src/config.js';
+import { makeProjectDir } from './helpers.js';
 
 const EXPECTED_DEFAULT_EXCLUDES = [
   'node_modules',
@@ -23,10 +23,6 @@ const EXPECTED_DEFAULT_EXCLUDES = [
 
 const EXPECTED_DEFAULT_LANGUAGES = ['typescript', 'javascript', 'python'];
 
-function makeProjectDir(): string {
-  return mkdtempSync(join(tmpdir(), 'probe-config-test-'));
-}
-
 function writeConfig(root: string, contents: string): void {
   mkdirSync(join(root, '.probe'), { recursive: true });
   writeFileSync(join(root, '.probe', 'config.json'), contents, 'utf8');
@@ -36,7 +32,7 @@ describe('loadConfig', () => {
   let root: string;
 
   beforeEach(() => {
-    root = makeProjectDir();
+    root = makeProjectDir('probe-config-test-');
   });
 
   afterEach(() => {
@@ -158,6 +154,20 @@ describe('loadConfig', () => {
 
     const nodeModulesCount = cfg.exclude.filter((e) => e === 'node_modules').length;
     expect(nodeModulesCount).toBe(1);
+  });
+
+  it('drops blank and whitespace-only exclude entries from file config', () => {
+    writeConfig(
+      root,
+      JSON.stringify({ exclude: ['', '   ', 'vendor/**'] }),
+    );
+
+    const cfg = loadConfig(root);
+
+    expect(cfg.exclude).not.toContain('');
+    expect(cfg.exclude).not.toContain('   ');
+    expect(cfg.exclude).toContain('vendor/**');
+    expect(cfg.exclude).toContain('node_modules');
   });
 
   it('ignores unknown fields in the config file (e.g., gitWindow, lsp)', () => {
