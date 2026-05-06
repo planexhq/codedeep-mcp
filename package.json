@@ -1,18 +1,28 @@
 {
   "name": "probe-mcp",
-  "version": "0.0.0",
-  "private": true,
-  "description": "MCP server for structural codebase exploration (Step 0 spike)",
+  "version": "0.1.0",
+  "description": "MCP server for structural codebase exploration",
   "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "probe-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "grammars/"
+  ],
   "engines": {
     "node": ">=20.0.0"
   },
   "scripts": {
-    "copy:grammars": "node spike/copy-grammars.mjs",
-    "build:spike": "tsc -p tsconfig.json",
-    "spike:parse": "npm run copy:grammars && npm run build:spike && node dist-spike/spike/parse.js",
-    "spike:server": "npm run copy:grammars && npm run build:spike && node dist-spike/spike/server.js",
-    "spike:inspect": "npm run copy:grammars && npm run build:spike && npx @modelcontextprotocol/inspector node dist-spike/spike/server.js"
+    "copy:grammars": "node scripts/copy-grammars.mjs",
+    "prebuild": "npm run copy:grammars",
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "start": "node dist/index.js",
+    "test": "vitest run --passWithNoTests",
+    "inspect": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -20,8 +30,9 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.9.0",
     "@repomix/tree-sitter-wasms": "^0.1.17",
-    "typescript": "^5.6.3"
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.0",
+    "vitest": "^4.1.0"
   }
 }

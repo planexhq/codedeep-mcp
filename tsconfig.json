@@ -3,15 +3,14 @@
     "target": "ES2022",
     "module": "Node16",
     "moduleResolution": "Node16",
-    "outDir": "./dist-spike",
-    "rootDir": "./",
+    "outDir": "./dist",
+    "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,
-    "declaration": false,
-    "sourceMap": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "types": ["node"]
   },
-  "include": ["spike/**/*.ts"],
-  "exclude": ["node_modules", "dist", "dist-spike"]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "dist-spike", "spike", "scripts"]
 }

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./",
+    "outDir": "./dist-spike"
+  },
+  "include": ["spike/**/*.ts"],
+  "exclude": ["node_modules", "dist", "dist-spike", "src", "scripts"]
+}

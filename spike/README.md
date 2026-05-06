@@ -148,20 +148,18 @@ Resolved at the time of the spike: `@modelcontextprotocol/sdk@1.29.0`,
 ```bash
 cd /Users/dahn/Researchs/explore-mcp
 npm install
-npm run spike:parse                # 0a
-npm run build:spike && node spike/test-server.mjs   # 0b (no browser)
-npm run spike:inspect              # 0b via MCP Inspector UI (interactive)
+npm run copy:grammars                                      # populate grammars/
+npx tsc -p tsconfig.spike.json                             # compile to dist-spike/
+node dist-spike/spike/parse.js                             # 0a
+node spike/test-server.mjs                                 # 0b (no browser)
+npx @modelcontextprotocol/inspector node dist-spike/spike/server.js  # 0b via Inspector UI
 ```
 
 ## Files used by the spike
 
-- `package.json`, `tsconfig.json`, `.gitignore` — root config (compatible with Step 1)
-- `spike/copy-grammars.mjs` — populates `grammars/` from `node_modules/@repomix/tree-sitter-wasms/out`
+- `scripts/copy-grammars.mjs` — populates `grammars/` from `node_modules/@repomix/tree-sitter-wasms/out` (used by both spike and production builds)
+- `tsconfig.spike.json` — extends root `tsconfig.json` to compile `spike/` → `dist-spike/`
 - `spike/parse.ts` — 0a entry
 - `spike/server.ts` — 0b entry (real stdio server)
 - `spike/test-server.mjs` — 0b verifier (drives the server via JSON-RPC handshake)
 - `grammars/*.wasm` — generated, 4 files
-
-Step 1 will reorganize: `src/` is created, `dist-spike/` retired in favor of `dist/`,
-and `tsconfig.json` updated to compile from `src/`. The `grammars/` directory and
-the dependency pins survive intact.
