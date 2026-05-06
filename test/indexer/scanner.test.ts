@@ -36,7 +36,7 @@ describe('scanner helpers', () => {
   describe('detectLanguage', () => {
     it('maps known TypeScript/JavaScript/Python extensions', () => {
       expect(detectLanguage('a.ts')).toBe('typescript');
-      expect(detectLanguage('a.tsx')).toBe('typescript');
+      expect(detectLanguage('a.tsx')).toBe('tsx');
       expect(detectLanguage('a.js')).toBe('javascript');
       expect(detectLanguage('a.jsx')).toBe('javascript');
       expect(detectLanguage('a.mjs')).toBe('javascript');
@@ -143,7 +143,7 @@ describe('scanProject', () => {
 
     const byPath = new Map(files.map((f) => [f.path, f.language]));
     expect(byPath.get('a.ts')).toBe('typescript');
-    expect(byPath.get('b.tsx')).toBe('typescript');
+    expect(byPath.get('b.tsx')).toBe('tsx');
     expect(byPath.get('c.js')).toBe('javascript');
     expect(byPath.get('d.jsx')).toBe('javascript');
     expect(byPath.get('e.mjs')).toBe('javascript');

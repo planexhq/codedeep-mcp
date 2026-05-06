@@ -7,7 +7,7 @@ import { log } from '../logger.js';
 
 const LANGUAGE_BY_EXT: Record<string, string> = {
   '.ts': 'typescript',
-  '.tsx': 'typescript',
+  '.tsx': 'tsx',
   '.js': 'javascript',
   '.jsx': 'javascript',
   '.mjs': 'javascript',

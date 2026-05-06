@@ -21,7 +21,7 @@ const EXPECTED_DEFAULT_EXCLUDES = [
   '*.bundle.js',
 ];
 
-const EXPECTED_DEFAULT_LANGUAGES = ['typescript', 'javascript', 'python'];
+const EXPECTED_DEFAULT_LANGUAGES = ['typescript', 'tsx', 'javascript', 'python'];
 
 function writeConfig(root: string, contents: string): void {
   mkdirSync(join(root, '.probe'), { recursive: true });
