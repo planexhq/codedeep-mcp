@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "outDir": "./dist-spike",
+    "rootDir": "./",
+    "strict": true,
+    "esModuleInterop": true,
+    "declaration": false,
+    "sourceMap": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true
+  },
+  "include": ["spike/**/*.ts"],
+  "exclude": ["node_modules", "dist", "dist-spike"]
+}

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+dist-spike/
+grammars/
+.probe/
+*.log
+.DS_Store
