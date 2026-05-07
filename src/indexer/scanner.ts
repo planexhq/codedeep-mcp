@@ -27,7 +27,7 @@ const BINARY_EXT = new Set([
 
 const GLOB_CHARS = /[*?[\]{}!]/;
 
-function toPosix(p: string): string {
+export function toPosix(p: string): string {
   return sep === '/' ? p : p.split(sep).join('/');
 }
 
@@ -71,12 +71,17 @@ async function* walk(
   root: string,
   dir: string,
   matchExclude: (relPath: string) => boolean,
+  state: { complete: boolean },
 ): AsyncGenerator<{ absPath: string; relPath: string }> {
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch (err) {
     if (dir === root) throw err;
+    // A transient failure here (EACCES/EMFILE/network FS) hides files
+    // from this scan. Mark the scan incomplete so callers don't
+    // mistake the omission for a deletion.
+    state.complete = false;
     log.warn(`scanner: readdir failed for ${dir}: ${(err as Error).message}`);
     return;
   }
@@ -86,22 +91,32 @@ async function* walk(
     const relPath = toPosix(relative(root, absPath));
     if (entry.isDirectory()) {
       if (matchExclude(relPath)) continue;
-      yield* walk(root, absPath, matchExclude);
+      yield* walk(root, absPath, matchExclude, state);
     } else if (entry.isFile()) {
       yield { absPath, relPath };
     }
   }
 }
 
-export async function scanProject(config: ProbeConfig): Promise<FileInfo[]> {
+export interface ScanResult {
+  files: FileInfo[];
+  // False if any non-root readdir or per-file stat failed mid-scan,
+  // so callers can avoid pruning cached entries that may still exist.
+  // The maxFiles cap is intentional truncation and does NOT flip this.
+  complete: boolean;
+}
+
+export async function scanProject(config: ProbeConfig): Promise<ScanResult> {
   const matchExclude = compileExcludeMatcher(config.exclude);
   const langSet = new Set(config.languages);
   const root = config.projectRoot;
 
   const results: FileInfo[] = [];
+  const state = { complete: true };
 
-  for await (const { absPath, relPath } of walk(root, root, matchExclude)) {
-    if (results.length >= config.maxFiles) {
+  for await (const { absPath, relPath } of walk(root, root, matchExclude, state)) {
+    // 0 means unlimited per the documented schema (DESIGN.md, README).
+    if (config.maxFiles > 0 && results.length >= config.maxFiles) {
       log.warn(
         `scanner: reached maxFiles=${config.maxFiles}; remaining files skipped`,
       );
@@ -119,6 +134,7 @@ export async function scanProject(config: ProbeConfig): Promise<FileInfo[]> {
     try {
       stats = await stat(absPath);
     } catch (err) {
+      state.complete = false;
       log.warn(`scanner: stat failed for ${relPath}: ${(err as Error).message}`);
       continue;
     }
@@ -147,5 +163,5 @@ export async function scanProject(config: ProbeConfig): Promise<FileInfo[]> {
     return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
   });
 
-  return results;
+  return { files: results, complete: state.complete };
 }

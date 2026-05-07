@@ -2,35 +2,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { join, sep } from 'node:path';
 
-import { loadConfig } from '../../src/config.js';
 import {
   compileExcludeMatcher,
   depthOf,
   detectLanguage,
   isBinaryByExtension,
   scanProject,
+  toPosix,
 } from '../../src/indexer/scanner.js';
-import type { ProbeConfig } from '../../src/types.js';
-import { makeProjectDir, writeTree } from '../helpers.js';
-
-interface ConfigOverrides {
-  exclude?: string[];
-  languages?: string[];
-  maxFiles?: number;
-  maxFileSize?: number;
-}
-
-function makeConfig(root: string, overrides: ConfigOverrides = {}): ProbeConfig {
-  const base = loadConfig(root);
-  return Object.freeze({
-    projectRoot: base.projectRoot,
-    exclude: Object.freeze(overrides.exclude ?? [...base.exclude]),
-    languages: Object.freeze(overrides.languages ?? [...base.languages]),
-    maxFiles: overrides.maxFiles ?? base.maxFiles,
-    maxFileSize: overrides.maxFileSize ?? base.maxFileSize,
-    cacheDir: base.cacheDir,
-  }) as ProbeConfig;
-}
+import {
+  makeConfig,
+  makeProjectDir,
+  silenceStderr,
+  skipOnWindows,
+  writeTree,
+} from '../helpers.js';
 
 describe('scanner helpers', () => {
   describe('detectLanguage', () => {
@@ -76,6 +62,17 @@ describe('scanner helpers', () => {
       expect(depthOf('a.ts')).toBe(0);
       expect(depthOf('src/a.ts')).toBe(1);
       expect(depthOf('src/sub/a.ts')).toBe(2);
+    });
+  });
+
+  describe('toPosix', () => {
+    it('returns POSIX paths unchanged', () => {
+      // The Windows branch (sep === '\\' → split/join) isn't exercisable
+      // from POSIX without mocking node:path; this guards the export and
+      // contract for the platform we're on.
+      expect(toPosix('src/a.ts')).toBe('src/a.ts');
+      expect(toPosix('a')).toBe('a');
+      expect(toPosix('')).toBe('');
     });
   });
 
@@ -139,7 +136,7 @@ describe('scanProject', () => {
       'g.py': '',
     });
     const cfg = makeConfig(root);
-    const files = await scanProject(cfg);
+    const { files } = await scanProject(cfg);
 
     const byPath = new Map(files.map((f) => [f.path, f.language]));
     expect(byPath.get('a.ts')).toBe('typescript');
@@ -160,7 +157,7 @@ describe('scanProject', () => {
       'main.go': '',
       'lib.rs': '',
     });
-    const files = await scanProject(makeConfig(root));
+    const { files } = await scanProject(makeConfig(root));
     expect(files.map((f) => f.path)).toEqual(['a.ts']);
   });
 
@@ -170,7 +167,7 @@ describe('scanProject', () => {
       'logo.png': 'fake',
       'font.woff2': 'fake',
     });
-    const files = await scanProject(makeConfig(root));
+    const { files } = await scanProject(makeConfig(root));
     expect(files.map((f) => f.path)).toEqual(['a.ts']);
   });
 
@@ -180,7 +177,7 @@ describe('scanProject', () => {
       'big.ts': 'x'.repeat(2048),
     });
     const cfg = makeConfig(root, { maxFileSize: 1024 });
-    const files = await scanProject(cfg);
+    const { files } = await scanProject(cfg);
     expect(files.map((f) => f.path)).toEqual(['small.ts']);
   });
 
@@ -190,7 +187,7 @@ describe('scanProject', () => {
       'node_modules/foo/bar.ts': '',
       'packages/a/node_modules/dep/x.ts': '',
     });
-    const files = await scanProject(makeConfig(root));
+    const { files } = await scanProject(makeConfig(root));
     expect(files.map((f) => f.path)).toEqual(['src/index.ts']);
   });
 
@@ -200,7 +197,7 @@ describe('scanProject', () => {
       'app.min.js': '',
       'public/js/widget.min.js': '',
     });
-    const files = await scanProject(makeConfig(root));
+    const { files } = await scanProject(makeConfig(root));
     expect(files.map((f) => f.path).sort()).toEqual(['app.js']);
   });
 
@@ -211,7 +208,7 @@ describe('scanProject', () => {
       'vendor/sub/lib.ts': '',
     });
     const cfg = makeConfig(root, { exclude: ['vendor/**'] });
-    const files = await scanProject(cfg);
+    const { files } = await scanProject(cfg);
     expect(files.map((f) => f.path)).toEqual(['src/a.ts']);
   });
 
@@ -222,7 +219,7 @@ describe('scanProject', () => {
       'c.js': '',
     });
     const cfg = makeConfig(root, { languages: ['typescript'] });
-    const files = await scanProject(cfg);
+    const { files } = await scanProject(cfg);
     expect(files.map((f) => f.path)).toEqual(['a.ts']);
   });
 
@@ -239,7 +236,7 @@ describe('scanProject', () => {
       .mockImplementation(() => true);
 
     const cfg = makeConfig(root, { maxFiles: 2 });
-    const files = await scanProject(cfg);
+    const { files } = await scanProject(cfg);
 
     expect(files).toHaveLength(2);
     const warnCalls = stderr.mock.calls.filter((c) =>
@@ -250,9 +247,30 @@ describe('scanProject', () => {
     stderr.mockRestore();
   });
 
+  it('treats maxFiles=0 as unlimited (documented schema)', async () => {
+    writeTree(root, {
+      'a.ts': '',
+      'b.ts': '',
+      'c.ts': '',
+      'd.ts': '',
+      'e.ts': '',
+    });
+    const stderr = silenceStderr();
+
+    const cfg = makeConfig(root, { maxFiles: 0 });
+    const result = await scanProject(cfg);
+
+    expect(result.files).toHaveLength(5);
+    expect(result.complete).toBe(true);
+    const capWarns = stderr.mock.calls.filter((c) =>
+      String(c[0]).includes('reached maxFiles='),
+    );
+    expect(capWarns).toHaveLength(0);
+  });
+
   it('FileInfo.path uses forward slashes regardless of platform', async () => {
     writeTree(root, { 'src/sub/deep/a.ts': '' });
-    const files = await scanProject(makeConfig(root));
+    const { files } = await scanProject(makeConfig(root));
     expect(files).toHaveLength(1);
     expect(files[0].path).toBe('src/sub/deep/a.ts');
     expect(files[0].path).not.toContain('\\');
@@ -260,7 +278,7 @@ describe('scanProject', () => {
 
   it('FileInfo.path is relative to projectRoot with no leading slash', async () => {
     writeTree(root, { 'src/a.ts': '' });
-    const files = await scanProject(makeConfig(root));
+    const { files } = await scanProject(makeConfig(root));
     expect(files[0].path.startsWith('/')).toBe(false);
     expect(files[0].path.startsWith(sep)).toBe(false);
     expect(files[0].path).toBe('src/a.ts');
@@ -274,7 +292,7 @@ describe('scanProject', () => {
       'src/api/h.ts': '',
       'src/foo.ts': '',
     });
-    const files = await scanProject(makeConfig(root));
+    const { files } = await scanProject(makeConfig(root));
     expect(files.map((f) => f.path)).toEqual([
       'a.ts',
       'b.ts',
@@ -286,7 +304,7 @@ describe('scanProject', () => {
 
   it('populates FileInfo from stat with symbolCount=0 and lastIndexed=0', async () => {
     writeTree(root, { 'a.ts': 'hello' });
-    const files = await scanProject(makeConfig(root));
+    const { files } = await scanProject(makeConfig(root));
     expect(files).toHaveLength(1);
     const f = files[0];
     expect(f.symbolCount).toBe(0);
@@ -298,29 +316,29 @@ describe('scanProject', () => {
   });
 
   it('returns empty array for an empty project', async () => {
-    const files = await scanProject(makeConfig(root));
+    const { files } = await scanProject(makeConfig(root));
     expect(files).toEqual([]);
   });
 
   it('handles a single file at root', async () => {
     writeTree(root, { 'only.ts': '' });
-    const files = await scanProject(makeConfig(root));
+    const { files } = await scanProject(makeConfig(root));
     expect(files).toHaveLength(1);
     expect(files[0].path).toBe('only.ts');
   });
 
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(skipOnWindows)(
     'skips symlinks instead of following them',
     async () => {
       writeTree(root, { 'real.ts': 'export const x = 1;' });
       symlinkSync(join(root, 'real.ts'), join(root, 'link.ts'));
 
-      const files = await scanProject(makeConfig(root));
+      const { files } = await scanProject(makeConfig(root));
       expect(files.map((f) => f.path)).toEqual(['real.ts']);
     },
   );
 
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(skipOnWindows)(
     'prunes excluded directories instead of traversing them',
     async () => {
       writeTree(root, {
@@ -335,7 +353,7 @@ describe('scanProject', () => {
         .mockImplementation(() => true);
 
       try {
-        const files = await scanProject(makeConfig(root));
+        const { files } = await scanProject(makeConfig(root));
         expect(files.map((f) => f.path)).toEqual(['src/a.ts']);
 
         const readdirFailures = stderr.mock.calls.filter((c) => {
@@ -346,6 +364,34 @@ describe('scanProject', () => {
       } finally {
         chmodSync(blocked, originalMode);
         stderr.mockRestore();
+      }
+    },
+  );
+
+  it('reports complete:true on a clean scan', async () => {
+    writeTree(root, { 'src/a.ts': '' });
+    const result = await scanProject(makeConfig(root));
+    expect(result.complete).toBe(true);
+  });
+
+  it.skipIf(skipOnWindows)(
+    'reports complete:false when readdir fails on a non-excluded dir',
+    async () => {
+      writeTree(root, {
+        'src/a.ts': '',
+        'extra/b.ts': '',
+      });
+      const blocked = join(root, 'extra');
+      const originalMode = statSync(blocked).mode;
+      chmodSync(blocked, 0o000);
+      silenceStderr();
+
+      try {
+        const result = await scanProject(makeConfig(root));
+        expect(result.complete).toBe(false);
+        expect(result.files.map((f) => f.path)).toEqual(['src/a.ts']);
+      } finally {
+        chmodSync(blocked, originalMode);
       }
     },
   );

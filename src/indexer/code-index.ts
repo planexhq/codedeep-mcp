@@ -171,6 +171,10 @@ export class CodeIndex {
     return list ? [...list] : [];
   }
 
+  getAllFiles(): FileInfo[] {
+    return [...this.fileByPath.values()];
+  }
+
   getCallees(symbolId: string): Symbol[] {
     return this.resolveIds(this.callees.get(symbolId));
   }
