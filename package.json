@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "minisearch": "^7.1.2",
     "picomatch": "^4.0.4",
     "web-tree-sitter": "^0.26.8",
     "zod": "^4.0.0"

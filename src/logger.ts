@@ -13,3 +13,7 @@ export const log = {
     if (DEBUG_ENABLED) write('debug', msg);
   },
 } as const;
+
+export function errMsg(err: unknown): string {
+  return (err as Error)?.message ?? String(err);
+}
