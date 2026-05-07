@@ -15,10 +15,10 @@ import type {
 
 const SCHEMA_VERSION = 1;
 
-const ENTRY_POINT_FILENAME_RE =
-  /^(index|main|__main__|__init__)\.(ts|tsx|js|mjs|cjs|jsx|py)$/i;
+export const ENTRY_POINT_FILENAME_RE =
+  /^(index|main|app|server|cli|__main__|__init__)\.(ts|tsx|js|mjs|cjs|jsx|py)$/i;
 
-const ZERO_SYMBOLS_BY_KIND = (): Record<SymbolKind, number> => ({
+export const zeroSymbolsByKind = (): Record<SymbolKind, number> => ({
   function: 0,
   class: 0,
   interface: 0,
@@ -200,7 +200,7 @@ export class CodeIndex {
       filesByLanguage[fi.language] = (filesByLanguage[fi.language] ?? 0) + 1;
     }
 
-    const symbolsByKind = ZERO_SYMBOLS_BY_KIND();
+    const symbolsByKind = zeroSymbolsByKind();
     const entries: IndexStats['entryPoints'] = [];
     for (const sym of this.symbolById.values()) {
       symbolsByKind[sym.kind]++;

@@ -3,45 +3,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CodeIndex } from '../../src/indexer/code-index.js';
-import { symbolId } from '../../src/indexer/extractor.js';
-import type {
-  ImportInfo,
-  Reference,
-  Symbol,
-  SymbolKind,
-} from '../../src/types.js';
-import { makeFileInfo, makeProjectDir } from '../helpers.js';
-
-interface SymOpts {
-  name: string;
-  file?: string;
-  kind?: SymbolKind;
-  signature?: string;
-  exported?: boolean;
-  language?: string;
-  startLine?: number;
-  endLine?: number;
-  doc?: string | null;
-}
-
-function mkSym(opts: SymOpts): Symbol {
-  const file = opts.file ?? 'src/test.ts';
-  const kind = opts.kind ?? 'function';
-  const signature = opts.signature ?? '';
-  return {
-    id: symbolId(file, opts.name, kind, signature),
-    name: opts.name,
-    fqn: `${file}:${opts.name}`,
-    kind,
-    file,
-    startLine: opts.startLine ?? 1,
-    endLine: opts.endLine ?? 1,
-    signature,
-    doc: opts.doc ?? null,
-    exported: opts.exported ?? false,
-    language: opts.language ?? 'typescript',
-  };
-}
+import type { ImportInfo, Reference, Symbol } from '../../src/types.js';
+import { makeFileInfo, makeProjectDir, mkSym } from '../helpers.js';
 
 function mkRef(source: Symbol, target: Symbol): Reference {
   return {

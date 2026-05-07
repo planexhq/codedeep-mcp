@@ -4,7 +4,8 @@ import { dirname, join } from 'node:path';
 import { vi } from 'vitest';
 
 import { loadConfig } from '../src/config.js';
-import type { FileInfo, ProbeConfig } from '../src/types.js';
+import { symbolId } from '../src/indexer/extractor.js';
+import type { FileInfo, ProbeConfig, Symbol, SymbolKind } from '../src/types.js';
 
 export function makeProjectDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -41,4 +42,39 @@ export function makeConfig(
     maxFileSize: overrides.maxFileSize ?? base.maxFileSize,
     cacheDir: overrides.cacheDir ?? base.cacheDir,
   }) as ProbeConfig;
+}
+
+export interface SymOpts {
+  name: string;
+  file?: string;
+  kind?: SymbolKind;
+  signature?: string;
+  exported?: boolean;
+  language?: string;
+  startLine?: number;
+  endLine?: number;
+  doc?: string | null;
+  parent?: string;
+}
+
+export function mkSym(opts: SymOpts): Symbol {
+  const file = opts.file ?? 'src/test.ts';
+  const kind = opts.kind ?? 'function';
+  const signature = opts.signature ?? '';
+  const fqn = opts.parent
+    ? `${file}:${opts.parent}.${opts.name}`
+    : `${file}:${opts.name}`;
+  return {
+    id: symbolId(file, opts.name, kind, signature, opts.parent ?? ''),
+    name: opts.name,
+    fqn,
+    kind,
+    file,
+    startLine: opts.startLine ?? 1,
+    endLine: opts.endLine ?? 1,
+    signature,
+    doc: opts.doc ?? null,
+    exported: opts.exported ?? false,
+    language: opts.language ?? 'typescript',
+  };
 }

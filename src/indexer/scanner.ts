@@ -67,6 +67,16 @@ export function depthOf(relPath: string): number {
   return n;
 }
 
+export function compareShallowFirst<T extends { path: string }>(
+  a: T,
+  b: T,
+): number {
+  const da = depthOf(a.path);
+  const db = depthOf(b.path);
+  if (da !== db) return da - db;
+  return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+}
+
 async function* walk(
   root: string,
   dir: string,
@@ -156,12 +166,7 @@ export async function scanProject(config: ProbeConfig): Promise<ScanResult> {
     });
   }
 
-  results.sort((a, b) => {
-    const da = depthOf(a.path);
-    const db = depthOf(b.path);
-    if (da !== db) return da - db;
-    return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
-  });
+  results.sort(compareShallowFirst);
 
   return { files: results, complete: state.complete };
 }

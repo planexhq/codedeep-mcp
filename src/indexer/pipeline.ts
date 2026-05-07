@@ -22,6 +22,7 @@ export class Indexer {
   private indexing = false;
   private done = 0;
   private total = 0;
+  ready = false;
 
   constructor(
     private readonly config: ProbeConfig,
@@ -64,6 +65,7 @@ export class Indexer {
       }
 
       await this.persist();
+      this.ready = true;
     });
   }
 
@@ -105,12 +107,14 @@ export class Indexer {
 
       if (toIndex.length === 0 && deletedCount === 0) {
         log.debug('Indexer: indexChanged found no changes');
+        this.ready = true;
         return;
       }
 
       this.total = toIndex.length;
       await this.processBatched(toIndex);
       await this.persist();
+      this.ready = true;
     });
   }
 

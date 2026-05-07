@@ -27,5 +27,5 @@ indexingPromise.catch((err) => {
   log.error(`Indexer top-level failure: ${errMsg(err)}`);
 });
 
-const server = createServer();
+const server = createServer({ index, indexer, config });
 await server.connect(new StdioServerTransport());

@@ -4,12 +4,23 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+import type { CodeIndex } from "./indexer/code-index.js";
+import type { Indexer } from "./indexer/pipeline.js";
+import { runOverview } from "./tools/overview.js";
+import type { ProbeConfig } from "./types.js";
+
 const SHARED_ANNOTATIONS = {
   readOnlyHint: true,
   destructiveHint: false,
   idempotentHint: true,
   openWorldHint: false,
 } as const;
+
+export interface ServerDeps {
+  index: CodeIndex;
+  indexer: Indexer;
+  config: ProbeConfig;
+}
 
 function stub(toolName: string, args: unknown) {
   return {
@@ -22,7 +33,7 @@ function stub(toolName: string, args: unknown) {
   };
 }
 
-export function createServer(): McpServer {
+export function createServer(deps: ServerDeps): McpServer {
   const server = new McpServer({
     name: "probe-mcp",
     version: "0.1.0",
@@ -38,7 +49,7 @@ export function createServer(): McpServer {
       },
       annotations: SHARED_ANNOTATIONS,
     },
-    async (args) => stub("overview", args),
+    async (args) => runOverview(args, deps),
   );
 
   server.registerTool(
