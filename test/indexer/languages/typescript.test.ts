@@ -278,6 +278,7 @@ describe('typescript extractor — within-file call references', () => {
     expect(result.references[0]).toEqual({
       sourceId: caller.id,
       targetId: helper.id,
+      targetName: 'helper',
       kind: 'calls',
       file: 'src/test.ts',
       line: 2,
@@ -315,10 +316,19 @@ describe('typescript extractor — within-file call references', () => {
     expect(result.references[0]!.targetId).toBe(helper.id);
   });
 
-  it('does not match calls to undefined names', () => {
+  it('emits unresolved refs (targetId=null) for calls to undefined names', () => {
     const src = 'function caller() { undefinedThing(); }';
     const result = extract(src);
-    expect(result.references).toEqual([]);
+    const caller = result.symbols.find((s) => s.name === 'caller')!;
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]).toEqual({
+      sourceId: caller.id,
+      targetId: null,
+      targetName: 'undefinedThing',
+      kind: 'calls',
+      file: 'src/test.ts',
+      line: 1,
+    });
   });
 
   it('resolves forward references (callee defined after caller)', () => {
@@ -351,13 +361,259 @@ describe('typescript extractor — within-file call references', () => {
     expect(result.references[0]!.targetId).toBe(callable.id);
   });
 
-  it('does not resolve calls to interfaces or type aliases', () => {
+  it('does not resolve calls to interfaces or type aliases (targetId=null)', () => {
     const src = [
       'interface Helper { (x: number): number; }',
       'function caller() { Helper(1); }',
     ].join('\n');
     const result = extract(src);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetId).toBeNull();
+    expect(result.references[0]!.targetName).toBe('Helper');
+  });
+
+  it('emits a module-level reference (sourceId=null) for top-level calls', () => {
+    const src = "import { authenticate } from './auth';\nauthenticate(req);\n";
+    const result = extract(src);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]).toEqual({
+      sourceId: null,
+      targetId: null,
+      targetName: 'authenticate',
+      kind: 'calls',
+      file: 'src/test.ts',
+      line: 2,
+    });
+  });
+
+  it('does not double-emit a module-level call when caller is also a declaration', () => {
+    const src = 'function caller() { helper(); }\nfunction helper() {}';
+    const result = extract(src);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.sourceId).not.toBeNull();
+  });
+});
+
+describe('typescript extractor — decorator references', () => {
+  beforeAll(async () => {
+    await initParser();
+  });
+
+  it('emits a module-level reference for a class decorator', () => {
+    const src = 'function dec() { return () => {}; }\n@dec()\nclass Foo {}';
+    const result = extract(src);
+    const decRef = result.references.find((r) => r.targetName === 'dec');
+    expect(decRef).toBeDefined();
+    expect(decRef!.sourceId).toBeNull();
+    expect(decRef!.line).toBe(2);
+  });
+
+  it('emits a module-level reference for a method decorator', () => {
+    const src = [
+      'function methodDec() { return () => {}; }',
+      'class Foo {',
+      '  @methodDec()',
+      '  bar() {}',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const ref = result.references.find((r) => r.targetName === 'methodDec');
+    expect(ref).toBeDefined();
+    expect(ref!.sourceId).toBeNull();
+  });
+
+  it('emits a module-level reference for a field decorator', () => {
+    const src = [
+      'function fieldDec() { return () => {}; }',
+      'class Foo {',
+      '  @fieldDec()',
+      '  prop = 1;',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const ref = result.references.find((r) => r.targetName === 'fieldDec');
+    expect(ref).toBeDefined();
+    expect(ref!.sourceId).toBeNull();
+  });
+
+  it('finds decorators inside an exported class', () => {
+    const src = [
+      'function inner() { return () => {}; }',
+      'export class Baz {',
+      '  @inner()',
+      '  m() {}',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const ref = result.references.find((r) => r.targetName === 'inner');
+    expect(ref).toBeDefined();
+    expect(ref!.sourceId).toBeNull();
+  });
+
+  it('emits exactly one reference per decorator invocation', () => {
+    const src = 'function dec() { return () => {}; }\n@dec()\nclass Foo {}';
+    const result = extract(src);
+    const decRefs = result.references.filter((r) => r.targetName === 'dec');
+    expect(decRefs).toHaveLength(1);
+  });
+
+  // class_declaration is in TS_SKIP_TYPES, so walkCalls inside an enclosing
+  // function body never reaches a nested class. walkDecorators must run
+  // per-body too — otherwise the nested-class decorator's only ref comes
+  // from the moduleRoot pass with sourceId=null.
+  it('attributes a decorator on a nested class to the enclosing function', () => {
+    const src = [
+      'function dec() { return () => {}; }',
+      'function outer() {',
+      '  @dec()',
+      '  class Inner {}',
+      '  return Inner;',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const outer = result.symbols.find((s) => s.name === 'outer')!;
+    const decRef = result.references.find((r) => r.targetName === 'dec');
+    expect(decRef).toBeDefined();
+    expect(decRef!.sourceId).toBe(outer.id);
+  });
+
+  // Regression guard for the body-level walkDecorators pass: top-level
+  // classes/methods aren't in `bodies`, so their decorators must still
+  // attribute to module-level.
+  it('keeps a top-level class decorator attributed to module-level', () => {
+    const src = 'function dec() { return () => {}; }\n@dec()\nclass TopLevel {}';
+    const result = extract(src);
+    const decRef = result.references.find((r) => r.targetName === 'dec');
+    expect(decRef).toBeDefined();
+    expect(decRef!.sourceId).toBeNull();
+  });
+
+  // walkDecorators skips nested function bodies (mirroring walkCalls'
+  // skipTypes behavior). A decorator inside a nested function only fires
+  // when that function is invoked, so it must not attribute to the outer
+  // function — otherwise calling outer() would falsely register as a
+  // caller of dec.
+  it('does not attribute a decorator inside a nested function body to the outer function', () => {
+    const src = [
+      'function dec() { return () => {}; }',
+      'function outer() {',
+      '  function inner() {',
+      '    @dec()',
+      '    class Deepest {}',
+      '    return Deepest;',
+      '  }',
+      '  return inner;',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const outer = result.symbols.find((s) => s.name === 'outer')!;
+    const decRefsFromOuter = result.references.filter(
+      (r) => r.targetName === 'dec' && r.sourceId === outer.id,
+    );
+    expect(decRefsFromOuter).toHaveLength(0);
+  });
+});
+
+describe('typescript extractor — new expression references', () => {
+  beforeAll(async () => {
+    await initParser();
+  });
+
+  it('emits a reference for `new X()` to a same-file class', () => {
+    const src = 'class Service {}\nfunction boot() { const s = new Service(); return s; }';
+    const result = extract(src);
+    const cls = result.symbols.find((s) => s.kind === 'class')!;
+    const boot = result.symbols.find((s) => s.name === 'boot')!;
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]).toEqual({
+      sourceId: boot.id,
+      targetId: cls.id,
+      targetName: 'Service',
+      kind: 'calls',
+      file: 'src/test.ts',
+      line: 2,
+    });
+  });
+
+  it('emits a module-level reference for top-level `new X()`', () => {
+    const src = 'class Service {}\nconst s = new Service();';
+    const result = extract(src);
+    const cls = result.symbols.find((s) => s.kind === 'class')!;
+    const newRef = result.references.find((r) => r.targetName === 'Service');
+    expect(newRef).toBeDefined();
+    expect(newRef!.sourceId).toBeNull();
+    expect(newRef!.targetId).toBe(cls.id);
+  });
+
+  it('skips `new this.X()` (member-expression constructor)', () => {
+    const src = 'function f() { return new this.Service(); }';
+    const result = extract(src);
     expect(result.references).toEqual([]);
+  });
+
+  it('skips `new ns.X()` (member-expression constructor)', () => {
+    const src = 'function f() { return new ns.Service(); }';
+    const result = extract(src);
+    expect(result.references).toEqual([]);
+  });
+
+  it('emits unresolved ref for `new X()` to undefined name', () => {
+    const src = 'function f() { return new Unknown(); }';
+    const result = extract(src);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetName).toBe('Unknown');
+    expect(result.references[0]!.targetId).toBeNull();
+  });
+});
+
+describe('typescript extractor — JSX component references', () => {
+  beforeAll(async () => {
+    await initParser();
+  });
+
+  it('emits a reference for `<Cmp />` (self-closing) attributed to enclosing function', () => {
+    const src = 'function Cmp() { return null; }\nfunction App() { return <Cmp />; }';
+    const result = extract(src, 'tsx', 'src/test.tsx');
+    const cmp = result.symbols.find((s) => s.name === 'Cmp')!;
+    const app = result.symbols.find((s) => s.name === 'App')!;
+    const jsxRef = result.references.find((r) => r.targetName === 'Cmp');
+    expect(jsxRef).toBeDefined();
+    expect(jsxRef!.sourceId).toBe(app.id);
+    expect(jsxRef!.targetId).toBe(cmp.id);
+  });
+
+  it('emits exactly one reference for `<Cmp>hi</Cmp>` (paired element)', () => {
+    const src = 'function Cmp() { return null; }\nfunction App() { return <Cmp>hi</Cmp>; }';
+    const result = extract(src, 'tsx', 'src/test.tsx');
+    const refs = result.references.filter((r) => r.targetName === 'Cmp');
+    expect(refs).toHaveLength(1);
+  });
+
+  it('skips lowercase HTML tags (<div>, <span>)', () => {
+    const src = 'function App() { return <div><span>hi</span></div>; }';
+    const result = extract(src, 'tsx', 'src/test.tsx');
+    expect(result.references).toEqual([]);
+  });
+
+  it('skips namespaced JSX (<ns.Cmp />) — member-expression name', () => {
+    const src = 'function App() { return <ns.Cmp />; }';
+    const result = extract(src, 'tsx', 'src/test.tsx');
+    expect(result.references).toEqual([]);
+  });
+
+  it('emits a module-level JSX reference (sourceId=null) for top-level usage', () => {
+    const src = 'function Cmp() { return null; }\nconst x = <Cmp />;';
+    const result = extract(src, 'tsx', 'src/test.tsx');
+    const ref = result.references.find((r) => r.targetName === 'Cmp');
+    expect(ref).toBeDefined();
+    expect(ref!.sourceId).toBeNull();
+  });
+
+  it('does not double-emit between paired JSX and an inner self-closing of the same name', () => {
+    const src = 'function Cmp() { return null; }\nfunction App() { return <Cmp><Cmp /></Cmp>; }';
+    const result = extract(src, 'tsx', 'src/test.tsx');
+    const refs = result.references.filter((r) => r.targetName === 'Cmp');
+    expect(refs).toHaveLength(2);
   });
 });
 
@@ -450,5 +706,70 @@ describe('typescript extractor — class field members', () => {
     const sym = extract(src).symbols.find((s) => s.name === 'count')!;
     expect(sym.kind).toBe('variable');
     expect(sym.fqn).toBe('src/test.ts:A.count');
+  });
+});
+
+describe('typescript extractor — bare decorator references', () => {
+  beforeAll(async () => {
+    await initParser();
+  });
+
+  it('emits a module-level reference for a bare class decorator', () => {
+    const src = '@injectable\nclass Service {}';
+    const result = extract(src);
+    const refs = result.references.filter((r) => r.targetName === 'injectable');
+    expect(refs).toHaveLength(1);
+    expect(refs[0]!.sourceId).toBeNull();
+    expect(refs[0]!.kind).toBe('calls');
+    expect(refs[0]!.line).toBe(1);
+  });
+
+  it('does not double-emit when a decorator is parametrized', () => {
+    const src = 'function injectable() { return () => {}; }\n@injectable()\nclass Service {}';
+    const result = extract(src);
+    const refs = result.references.filter((r) => r.targetName === 'injectable');
+    expect(refs).toHaveLength(1);
+  });
+
+  it('emits no reference for a member-expression bare decorator (`@scope.cached`)', () => {
+    const src = '@scope.cached\nclass Service {}';
+    const result = extract(src);
+    expect(result.references).toEqual([]);
+  });
+
+  it('emits no reference for a member-expression parametrized decorator (`@scope.cached()`)', () => {
+    const src = '@scope.cached()\nclass Service {}';
+    const result = extract(src);
+    expect(result.references).toEqual([]);
+  });
+
+  it('emits a reference for a bare method decorator inside a class', () => {
+    const src = ['class C {', '  @bound', '  m() {}', '}'].join('\n');
+    const result = extract(src);
+    const refs = result.references.filter((r) => r.targetName === 'bound');
+    expect(refs).toHaveLength(1);
+    expect(refs[0]!.sourceId).toBeNull();
+  });
+
+  it('emits a reference for a bare field decorator', () => {
+    const src = ['class C {', '  @observable', '  count = 0;', '}'].join('\n');
+    const result = extract(src);
+    const refs = result.references.filter((r) => r.targetName === 'observable');
+    expect(refs).toHaveLength(1);
+    expect(refs[0]!.sourceId).toBeNull();
+  });
+
+  it('emits one ref per decorator when bare and parametrized are stacked', () => {
+    const src = [
+      'function b() { return () => {}; }',
+      '@a',
+      '@b()',
+      'class C {}',
+    ].join('\n');
+    const result = extract(src);
+    const aRefs = result.references.filter((r) => r.targetName === 'a');
+    const bRefs = result.references.filter((r) => r.targetName === 'b');
+    expect(aRefs).toHaveLength(1);
+    expect(bRefs).toHaveLength(1);
   });
 });

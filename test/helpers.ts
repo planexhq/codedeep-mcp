@@ -5,7 +5,15 @@ import { vi } from 'vitest';
 
 import { loadConfig } from '../src/config.js';
 import { symbolId } from '../src/indexer/extractor.js';
-import type { FileInfo, ProbeConfig, Symbol, SymbolKind } from '../src/types.js';
+import type {
+  FileInfo,
+  ImportedName,
+  ImportInfo,
+  ProbeConfig,
+  Reference,
+  Symbol,
+  SymbolKind,
+} from '../src/types.js';
 
 export function makeProjectDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -93,5 +101,60 @@ export function mkSym(opts: SymOpts): Symbol {
     doc: opts.doc ?? null,
     exported: opts.exported ?? false,
     language: opts.language ?? 'typescript',
+  };
+}
+
+export function mkRef(source: Symbol, target: Symbol): Reference {
+  return {
+    sourceId: source.id,
+    targetId: target.id,
+    targetName: target.name,
+    kind: 'calls',
+    file: source.file,
+    line: source.startLine,
+  };
+}
+
+// File-scope (module-level) call site: `sourceId === null`, target precisely
+// resolved to a same-file symbol id. Anchored at `target.file`.
+export function mkModuleRef(target: Symbol, line = 1): Reference {
+  return {
+    sourceId: null,
+    targetId: target.id,
+    targetName: target.name,
+    kind: 'calls',
+    file: target.file,
+    line,
+  };
+}
+
+// Cross-file call site whose target name failed to resolve to an id
+// (typical of imported names before/without LSP). Source symbol is known.
+export function mkUnresolvedRef(
+  source: Symbol,
+  targetName: string,
+  file = source.file,
+  line = 1,
+): Reference {
+  return {
+    sourceId: source.id,
+    targetId: null,
+    targetName,
+    kind: 'calls',
+    file,
+    line,
+  };
+}
+
+export function mkImport(
+  file: string,
+  sourceModule: string,
+  names: Array<string | ImportedName> = [],
+): ImportInfo {
+  return {
+    file,
+    sourceModule,
+    importedNames: names.map((n) => (typeof n === 'string' ? { name: n } : n)),
+    line: 1,
   };
 }

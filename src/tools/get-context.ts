@@ -1,12 +1,32 @@
 import { promises as fs } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { join, sep } from 'node:path';
 
-import { type CodeIndex, isClassMember } from '../indexer/code-index.js';
+import {
+  type CallerEdge,
+  type CodeIndex,
+  isCallerOf,
+  isClassMember,
+} from '../indexer/code-index.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
 import type { ImportInfo, ProbeConfig, Symbol } from '../types.js';
 
-import type { ToolResponse } from './overview.js';
+import {
+  MODULE_LEVEL,
+  NAME_MATCH_HEADER_QUALIFIER,
+  NAME_MATCH_TAG,
+  STRUCTURAL_TAG,
+  displaySignature,
+  normalizeFilePath,
+  pickByLine,
+  readinessBanner,
+  renderAmbiguous,
+  renderSuggestions,
+  sectionOrEmpty,
+  sectionOrNone,
+  textResponse,
+  type ToolResponse,
+} from './common.js';
 
 export interface GetContextArgs {
   file: string;
@@ -117,9 +137,7 @@ export async function runGetContext(
 
     const include = parseInclude(args.include);
     const maxTokens = args.max_tokens ?? DEFAULT_MAX_TOKENS;
-    const banner = deps.indexer.ready
-      ? ''
-      : '⏳ Indexing in progress. Results may be incomplete.\n\n';
+    const banner = readinessBanner(deps.indexer.ready);
 
     if (args.symbol !== undefined) {
       const trimmed = args.symbol.trim();
@@ -143,17 +161,6 @@ export async function runGetContext(
   } catch (err) {
     return textResponse(`Error: ${errMsg(err)}`);
   }
-}
-
-function normalizeFilePath(input: string, projectRoot: string): string | null {
-  // `resolve` collapses `..` segments so traversal attempts are caught below.
-  const cleaned = input.replace(/\\/g, '/');
-  const absolute = resolve(projectRoot, cleaned);
-  const rel = relative(projectRoot, absolute).replace(/\\/g, '/');
-  if (rel === '' || rel === '..' || rel.startsWith('../')) {
-    return null;
-  }
-  return rel;
 }
 
 function parseInclude(input?: string[]): Set<Section> {
@@ -203,58 +210,10 @@ function renderNoSymbol(
   file: string,
   suggestions: Symbol[],
 ): string {
-  const lines: string[] = [`No symbol '${name}' found in ${file}.`];
-  if (suggestions.length > 0) {
-    lines.push('', 'Did you mean:');
-    for (const s of suggestions) {
-      const tag = s.exported ? ' [exported]' : '';
-      lines.push(`- ${s.name} (${s.kind}, ${s.file}:${s.startLine})${tag}`);
-    }
-  }
-  return lines.join('\n');
-}
-
-function renderAmbiguous(
-  name: string,
-  file: string,
-  candidates: Symbol[],
-): string {
-  const lines: string[] = [
-    `Multiple symbols named '${name}' in ${file}:`,
-  ];
-  for (const c of candidates) {
-    const sig = c.signature || c.name;
-    lines.push(`- ${c.kind} ${c.startLine}-${c.endLine}: ${sig}`);
-  }
-  lines.push('', 'Pass `line` to disambiguate.');
-  return lines.join('\n');
-}
-
-function pickByLine(candidates: Symbol[], line: number): Symbol {
-  // Among ranges that contain the line, pick the smallest. This targets
-  // the innermost match (e.g. a method inside a same-named class) instead
-  // of returning whichever container appears first in extraction order.
-  let innermost: Symbol | null = null;
-  let innermostSize = Infinity;
-  for (const s of candidates) {
-    if (s.startLine > line || line > s.endLine) continue;
-    const size = s.endLine - s.startLine;
-    if (size < innermostSize) {
-      innermost = s;
-      innermostSize = size;
-    }
-  }
-  if (innermost) return innermost;
-  let best = candidates[0];
-  let bestDist = Math.abs(line - best.startLine);
-  for (let i = 1; i < candidates.length; i++) {
-    const d = Math.abs(line - candidates[i].startLine);
-    if (d < bestDist) {
-      best = candidates[i];
-      bestDist = d;
-    }
-  }
-  return best;
+  return [
+    `No symbol '${name}' found in ${file}.`,
+    ...renderSuggestions(suggestions),
+  ].join('\n');
 }
 
 async function renderSymbolBlock(
@@ -283,12 +242,12 @@ async function renderSymbolBlock(
     {
       name: 'callers',
       includeKey: 'callers',
-      render: () => renderEdges('Callers', deps.index.getCallers(target.id)),
+      render: () => renderCallerEdges(deps.index.getCallerEdges(target.id)),
     },
     {
       name: 'callees',
       includeKey: 'callees',
-      render: () => renderEdges('Callees', deps.index.getCallees(target.id)),
+      render: () => renderCalleeEdges(deps.index.getCallees(target.id)),
     },
     {
       name: 'imports',
@@ -317,27 +276,29 @@ async function renderBody(
   return `### Body\n\`\`\`${target.language}\n${slice}\n\`\`\``;
 }
 
-function renderEdges(
-  title: 'Callers' | 'Callees',
-  edges: Symbol[],
-): string {
-  if (edges.length === 0) return `### ${title}\n(none)`;
-  const lines: string[] = [`### ${title}`];
-  for (const e of edges) {
-    const sig = e.signature || e.name;
-    lines.push(`- ${e.file}:${e.startLine} — ${sig} [structural]`);
-  }
-  return lines.join('\n');
+function renderCallerEdges(edges: CallerEdge[]): string {
+  return sectionOrNone(
+    '### Callers',
+    edges.map((e) => {
+      const label = e.symbol ? displaySignature(e.symbol) : MODULE_LEVEL;
+      return `- ${e.file}:${e.line} — ${label} ${STRUCTURAL_TAG}`;
+    }),
+  );
+}
+
+function renderCalleeEdges(edges: Symbol[]): string {
+  return sectionOrNone(
+    '### Callees',
+    edges.map((e) => `- ${e.file}:${e.startLine} — ${displaySignature(e)} ${STRUCTURAL_TAG}`),
+  );
+}
+
+function renderImportLines(imports: ImportInfo[]): string[] {
+  return imports.map((imp) => `- ${imp.sourceModule}: ${formatImportNames(imp)}`);
 }
 
 function renderImports(file: string, index: CodeIndex): string {
-  const imports = index.getImports(file);
-  if (imports.length === 0) return '';
-  const lines: string[] = ['### Imports'];
-  for (const imp of imports) {
-    lines.push(`- ${imp.sourceModule}: ${formatImportNames(imp)}`);
-  }
-  return lines.join('\n');
+  return sectionOrEmpty('### Imports', renderImportLines(index.getImports(file)));
 }
 
 function formatImportNames(imp: ImportInfo): string {
@@ -385,72 +346,64 @@ async function renderFileMode(
     {
       name: 'Exports',
       includeKey: 'body',
-      render: () =>
-        exported.length > 0
-          ? ['### Exports', ...exported.map(formatFileSymbolLine)].join('\n')
-          : '### Exports\n(none)',
+      render: () => sectionOrNone('### Exports', exported.map(formatFileSymbolLine)),
     },
     {
       name: 'Internal',
       includeKey: 'body',
-      render: () =>
-        internal.length > 0
-          ? ['### Internal', ...internal.map(formatFileSymbolLine)].join('\n')
-          : '',
+      render: () => sectionOrEmpty('### Internal', internal.map(formatFileSymbolLine)),
     },
     {
       name: 'Imports',
       includeKey: 'imports',
-      render: () =>
-        imports.length > 0
-          ? [
-              '### Imports',
-              ...imports.map(
-                (imp) => `- ${imp.sourceModule}: ${formatImportNames(imp)}`,
-              ),
-            ].join('\n')
-          : '',
+      render: () => sectionOrEmpty('### Imports', renderImportLines(imports)),
     },
     {
       name: "Callers of this file's exports",
       includeKey: 'callers',
-      render: () => {
-        const callers = collectExportCallers(exported, deps.index);
-        return callers.length > 0
-          ? ["### Callers of this file's exports", ...callers].join('\n')
-          : "### Callers of this file's exports\n(none)";
-      },
+      render: () =>
+        sectionOrNone(
+          `### Callers of this file's exports ${NAME_MATCH_HEADER_QUALIFIER}`,
+          collectExportCallers(exported, deps.index),
+        ),
     },
   ];
 
   return renderBudgeted(header, items, include, maxTokens);
 }
 
+// Uses `getReferencesByNameOrAlias + isCallerOf` (same data path as
+// find_references) so cross-file callers — the common case for exported
+// symbols — are surfaced. `getCallerEdges` powers symbol-mode's strict
+// [structural] view; this file-mode summary aggregates per-file and
+// benefits from including import-scoped name-match refs. The
+// `[name match, unverified]` tag matches find_references's caller list
+// so consumers know the data is approximate (same precision tier).
 function collectExportCallers(
   exportedSyms: Symbol[],
   index: CodeIndex,
 ): string[] {
   const byFile = new Map<string, Set<string>>();
   for (const exp of exportedSyms) {
-    for (const c of index.getCallers(exp.id)) {
-      let set = byFile.get(c.file);
+    for (const ref of index.getReferencesByNameOrAlias(exp.name, exp.file)) {
+      if (!isCallerOf(ref, exp)) continue;
+      let set = byFile.get(ref.file);
       if (!set) {
         set = new Set();
-        byFile.set(c.file, set);
+        byFile.set(ref.file, set);
       }
       set.add(exp.name);
     }
   }
   const lines: string[] = [];
   for (const [f, names] of byFile) {
-    lines.push(`- ${f} — uses ${[...names].sort().join(', ')}`);
+    lines.push(`- ${f} — uses ${[...names].sort().join(', ')}  ${NAME_MATCH_TAG}`);
   }
   return lines.sort();
 }
 
 function formatFileSymbolLine(s: Symbol): string {
-  const sig = s.signature || s.name;
-  return `- ${s.name} (${s.kind}, line ${s.startLine}) — ${sig}`;
+  return `- ${s.name} (${s.kind}, line ${s.startLine}) — ${displaySignature(s)}`;
 }
 
 function estimate(text: string): number {
@@ -459,8 +412,4 @@ function estimate(text: string): number {
 
 function plural(word: string, count: number): string {
   return count === 1 ? word : `${word}s`;
-}
-
-function textResponse(text: string): ToolResponse {
-  return { content: [{ type: 'text', text }] };
 }

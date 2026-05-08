@@ -6,8 +6,8 @@ import {
   runFindSymbol,
   type FindSymbolDeps,
 } from '../../src/tools/find-symbol.js';
-import type { Reference, Symbol } from '../../src/types.js';
-import { makeConfig, makeFileInfo, makeProjectDir, mkSym } from '../helpers.js';
+import type { Symbol } from '../../src/types.js';
+import { makeConfig, makeFileInfo, makeProjectDir, mkRef, mkSym } from '../helpers.js';
 
 let tmpRoot: string;
 
@@ -25,16 +25,6 @@ function makeDeps(index: CodeIndex, ready = true): FindSymbolDeps {
     index,
     indexer: { ready },
     config: makeConfig(tmpRoot),
-  };
-}
-
-function mkRef(source: Symbol, target: Symbol): Reference {
-  return {
-    sourceId: source.id,
-    targetId: target.id,
-    kind: 'calls',
-    file: source.file,
-    line: source.startLine,
   };
 }
 
@@ -73,6 +63,23 @@ describe('runFindSymbol — exact match', () => {
     );
     expect(text).toContain('Validates the JWT token and attaches user to request');
     expect(text).toContain('References: ~1');
+  });
+
+  it('counts each call site individually so References: ~N matches find_references line count', async () => {
+    // One caller calling `target` three times: References: ~3, mirroring
+    // what find_references would print (one line per call site).
+    const idx = new CodeIndex(tmpRoot);
+    const target = mkSym({ name: 'target', file: 'src/a.ts', kind: 'function' });
+    const caller = mkSym({ name: 'caller', file: 'src/a.ts', kind: 'function' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [target, caller],
+      [mkRef(caller, target), mkRef(caller, target), mkRef(caller, target)],
+      [],
+    );
+
+    const result = await runFindSymbol({ name: 'target' }, makeDeps(idx));
+    expect(result.content[0].text).toContain('References: ~3');
   });
 
   it('omits the exported tag when symbol is not exported', async () => {

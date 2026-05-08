@@ -110,6 +110,22 @@ describe('python extractor — decorators', () => {
     expect(method.fqn).toBe('src/test.py:A.helper');
     expect(method.signature).toBe('@staticmethod def helper():');
   });
+
+  it('emits exactly one reference for a parametrized decorator (no double-emit)', () => {
+    const src = '@route("/")\ndef home():\n    pass\n';
+    const result = extract(src);
+    const refs = result.references.filter((r) => r.targetName === 'route');
+    expect(refs).toHaveLength(1);
+    expect(refs[0]!.sourceId).toBeNull();
+  });
+
+  it('emits exactly one reference for a parametrized class decorator', () => {
+    const src = '@register("svc")\nclass Svc:\n    pass\n';
+    const result = extract(src);
+    const refs = result.references.filter((r) => r.targetName === 'register');
+    expect(refs).toHaveLength(1);
+    expect(refs[0]!.sourceId).toBeNull();
+  });
 });
 
 describe('python extractor — __all__ and exports', () => {
@@ -227,6 +243,7 @@ describe('python extractor — within-file calls', () => {
     expect(result.references[0]).toEqual({
       sourceId: caller.id,
       targetId: helper.id,
+      targetName: 'helper',
       kind: 'calls',
       file: 'src/test.py',
       line: 3,
@@ -285,6 +302,20 @@ describe('python extractor — within-file calls', () => {
     const result = extract(src);
     expect(result.references).toEqual([]);
   });
+
+  it('emits a module-level reference (sourceId=null) for top-level calls', () => {
+    const src = 'from auth import authenticate\nauthenticate(req)\n';
+    const result = extract(src);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]).toEqual({
+      sourceId: null,
+      targetId: null,
+      targetName: 'authenticate',
+      kind: 'calls',
+      file: 'src/test.py',
+      line: 2,
+    });
+  });
 });
 
 describe('python extractor — method ID stability across classes', () => {
@@ -304,5 +335,72 @@ describe('python extractor — method ID stability across classes', () => {
     const inits = result.symbols.filter((s) => s.name === '__init__');
     expect(inits).toHaveLength(2);
     expect(inits[0]!.id).not.toBe(inits[1]!.id);
+  });
+});
+
+describe('python extractor — bare decorator references', () => {
+  beforeAll(async () => {
+    await initParser();
+  });
+
+  it('emits a module-level reference for a bare class decorator', () => {
+    const src = '@dataclass\nclass Foo:\n    pass\n';
+    const result = extract(src);
+    const refs = result.references.filter((r) => r.targetName === 'dataclass');
+    expect(refs).toHaveLength(1);
+    expect(refs[0]!.sourceId).toBeNull();
+    expect(refs[0]!.kind).toBe('calls');
+    expect(refs[0]!.line).toBe(1);
+  });
+
+  it('emits a module-level reference for a bare function decorator', () => {
+    const src = '@login_required\ndef view():\n    pass\n';
+    const result = extract(src);
+    const refs = result.references.filter((r) => r.targetName === 'login_required');
+    expect(refs).toHaveLength(1);
+    expect(refs[0]!.sourceId).toBeNull();
+  });
+
+  it('does not double-emit when a decorator is parametrized', () => {
+    const src = 'def dataclass(): pass\n@dataclass()\nclass Foo:\n    pass\n';
+    const result = extract(src);
+    const refs = result.references.filter((r) => r.targetName === 'dataclass');
+    expect(refs).toHaveLength(1);
+  });
+
+  it('emits no reference for an attribute-form decorator (`@my.dec`)', () => {
+    const src = '@my.dec\ndef f():\n    pass\n';
+    const result = extract(src);
+    expect(result.references).toEqual([]);
+  });
+
+  it('emits a reference for a bare method decorator inside a class', () => {
+    const src = ['class C:', '    @staticmethod', '    def m(): pass', ''].join('\n');
+    const result = extract(src);
+    const refs = result.references.filter((r) => r.targetName === 'staticmethod');
+    expect(refs).toHaveLength(1);
+    expect(refs[0]!.sourceId).toBeNull();
+  });
+
+  // walkDecorators skips nested function bodies (and lambdas). A
+  // decorator inside a nested def only fires when that def is invoked,
+  // so attributing it to the enclosing function would falsely register
+  // outer() as a caller of dataclass.
+  it('does not attribute a decorator inside a nested def to the outer function', () => {
+    const src = [
+      'def outer():',
+      '    def inner():',
+      '        @dataclass',
+      '        class Deepest: pass',
+      '        return Deepest',
+      '    return inner',
+      '',
+    ].join('\n');
+    const result = extract(src);
+    const outer = result.symbols.find((s) => s.name === 'outer')!;
+    const refsFromOuter = result.references.filter(
+      (r) => r.targetName === 'dataclass' && r.sourceId === outer.id,
+    );
+    expect(refsFromOuter).toHaveLength(0);
   });
 });

@@ -13,6 +13,7 @@ import {
 import { CodeIndex } from '../src/indexer/code-index.js';
 import * as parserModule from '../src/indexer/parser.js';
 import { Indexer } from '../src/indexer/pipeline.js';
+import { runFindReferences } from '../src/tools/find-references.js';
 import { runFindSymbol } from '../src/tools/find-symbol.js';
 import { runGetContext } from '../src/tools/get-context.js';
 import { runOverview } from '../src/tools/overview.js';
@@ -199,6 +200,53 @@ describe('integration: end-to-end pipeline + tools', () => {
     expect(exports).toContain('authorize');
     expect(sectionAfter(text, '### Internal')).toContain('extractToken');
     expect(text).toContain('### Imports');
+  });
+
+  it('find_references surfaces cross-file callers from AST name matching', async () => {
+    // The fixture's auth.ts calls hash() (defined in utils.ts) — a real
+    // cross-file call edge that exercises Reference.targetId=null storage
+    // and the name-keyed lookup in find_references.
+    const deps = await setup('small-ts');
+    const text = (
+      await runFindReferences(
+        { file: 'src/utils.ts', symbol: 'hash' },
+        deps,
+      )
+    ).content[0].text;
+
+    expect(text).toContain('## References for `hash` (src/utils.ts:1)');
+    expect(text).toContain('### Callers (approximate — from AST name matching)');
+    expect(sectionAfter(text, '### Callers')).toContain('src/auth.ts:');
+    expect(text).toContain('[name match, unverified]');
+  });
+
+  it('find_references returns Phase-2 placeholder for kind=implementations', async () => {
+    const deps = await setup('small-ts');
+    const text = (
+      await runFindReferences(
+        {
+          file: 'src/auth.ts',
+          symbol: 'authenticate',
+          kind: 'implementations',
+        },
+        deps,
+      )
+    ).content[0].text;
+
+    expect(text).toContain('### Implementations');
+    expect(text).toContain('(none — ships with LSP in Phase 2)');
+  });
+
+  it('find_references errors when symbol is unknown in file', async () => {
+    const deps = await setup('small-ts');
+    const text = (
+      await runFindReferences(
+        { file: 'src/auth.ts', symbol: 'doesNotExist' },
+        deps,
+      )
+    ).content[0].text;
+
+    expect(text).toContain("Error: no symbol 'doesNotExist' in 'src/auth.ts'.");
   });
 
   it('indexes the Python fixture and respects __all__ + underscore privacy', async () => {

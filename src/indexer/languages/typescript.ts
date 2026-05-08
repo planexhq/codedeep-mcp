@@ -1,20 +1,49 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
-import type { FileInfo, ImportInfo, Symbol, SymbolKind } from '../../types.js';
-import { resolveCalls, symbolId } from '../extractor.js';
-import type { ExtractResult, PendingBody } from '../extractor.js';
+import { IMPORT_DEFAULT, IMPORT_NAMESPACE } from '../../types.js';
+import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
+import { bareDecoratorIdentifier, resolveCalls, symbolId } from '../extractor.js';
+import type { CallSelector, ExtractResult, PendingBody } from '../extractor.js';
 
 const WS_REGEX = /\s+/g;
 
-const TS_SKIP_TYPES: ReadonlySet<string> = new Set([
+// Function-like nodes whose bodies contain calls that shouldn't attribute
+// to an enclosing body. walkDecorators uses this subset (NOT the full
+// SKIP_TYPES) so it still descends through class bodies — top-level
+// decorators on inner classes attribute to the enclosing function — but
+// stops at nested function bodies, where decorator firing is gated on the
+// nested function being called.
+const TS_FUNCTION_BODY_SKIP_TYPES: ReadonlySet<string> = new Set([
   'function_declaration',
   'function_expression',
   'arrow_function',
   'method_definition',
+]);
+
+const TS_SKIP_TYPES: ReadonlySet<string> = new Set([
+  ...TS_FUNCTION_BODY_SKIP_TYPES,
   'class_declaration',
   'class_expression',
   'abstract_class_declaration',
 ]);
+
+const TS_SELECTORS: ReadonlyArray<CallSelector> = [
+  { nodeType: 'call_expression', getCallee: (n) => n.childForFieldName('function') },
+  { nodeType: 'new_expression', getCallee: (n) => n.childForFieldName('constructor') },
+  { nodeType: 'jsx_opening_element', getCallee: jsxComponentName },
+  { nodeType: 'jsx_self_closing_element', getCallee: jsxComponentName },
+  { nodeType: 'decorator', getCallee: bareDecoratorIdentifier },
+];
+
+// JSX components are PascalCase by convention; lowercase first char is an
+// HTML element (`<div>`, `<span>`) which we don't track as a symbol ref.
+function jsxComponentName(node: Node): Node | null {
+  const name = node.childForFieldName('name');
+  if (!name || name.type !== 'identifier') return null;
+  const ch = name.text.charAt(0);
+  if (ch >= 'a' && ch <= 'z') return null;
+  return name;
+}
 
 export function extractTypeScript(
   tree: Tree,
@@ -41,7 +70,15 @@ export function extractTypeScript(
     extractTopLevel(target, child, content, fileInfo, exported, symbols, imports, bodies);
   }
 
-  const references = resolveCalls(bodies, symbols, fileInfo, 'call_expression', TS_SKIP_TYPES);
+  const references = resolveCalls(
+    bodies,
+    tree.rootNode,
+    symbols,
+    fileInfo,
+    TS_SELECTORS,
+    TS_SKIP_TYPES,
+    TS_FUNCTION_BODY_SKIP_TYPES,
+  );
   return { symbols, references, imports };
 }
 
@@ -205,17 +242,17 @@ function extractImport(stmt: Node, fileInfo: FileInfo, out: ImportInfo[]): void 
   const sourceNode = stmt.childForFieldName('source');
   if (!sourceNode) return;
   const sourceModule = sourceNode.text.replace(/^['"`]|['"`]$/g, '');
-  const importedNames: Array<{ name: string; alias?: string }> = [];
+  const importedNames: ImportedName[] = [];
 
   for (const child of stmt.namedChildren) {
     if (child.type !== 'import_clause') continue;
     for (const item of child.namedChildren) {
       if (item.type === 'identifier') {
-        importedNames.push({ name: 'default', alias: item.text });
+        importedNames.push({ name: IMPORT_DEFAULT, alias: item.text });
       } else if (item.type === 'namespace_import') {
         for (const nsChild of item.namedChildren) {
           if (nsChild.type === 'identifier') {
-            importedNames.push({ name: '*', alias: nsChild.text });
+            importedNames.push({ name: IMPORT_NAMESPACE, alias: nsChild.text });
           }
         }
       } else if (item.type === 'named_imports') {

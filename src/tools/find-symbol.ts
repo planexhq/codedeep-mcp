@@ -4,7 +4,12 @@ import { depthOf } from '../indexer/scanner.js';
 import { errMsg } from '../logger.js';
 import type { ProbeConfig, Symbol, SymbolKind } from '../types.js';
 
-import type { ToolResponse } from './overview.js';
+import {
+  readinessBanner,
+  renderSuggestions,
+  textResponse,
+  type ToolResponse,
+} from './common.js';
 
 export interface FindSymbolArgs {
   name: string;
@@ -49,9 +54,7 @@ export async function runFindSymbol(
       }
     }
 
-    const banner = deps.indexer.ready
-      ? ''
-      : '⏳ Indexing in progress. Results may be incomplete.\n\n';
+    const banner = readinessBanner(deps.indexer.ready);
 
     if (merged.length === 0) {
       const filtered = deps.index.suggest(trimmed, SUGGEST_LIMIT, kind, scope);
@@ -111,19 +114,5 @@ function renderMatch(sym: Symbol, index: CodeIndex): string {
 }
 
 function renderNoMatch(name: string, suggestions: Symbol[]): string {
-  if (suggestions.length === 0) {
-    return `No symbol '${name}' found.`;
-  }
-  const lines: string[] = [`No symbol '${name}' found.`, '', 'Did you mean:'];
-  for (const sym of suggestions) {
-    const exportedTag = sym.exported ? ' [exported]' : '';
-    lines.push(
-      `- ${sym.name} (${sym.kind}, ${sym.file}:${sym.startLine})${exportedTag}`,
-    );
-  }
-  return lines.join('\n');
-}
-
-function textResponse(text: string): ToolResponse {
-  return { content: [{ type: 'text', text }] };
+  return [`No symbol '${name}' found.`, ...renderSuggestions(suggestions)].join('\n');
 }

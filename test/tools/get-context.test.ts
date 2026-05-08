@@ -7,12 +7,16 @@ import {
   runGetContext,
   type GetContextDeps,
 } from '../../src/tools/get-context.js';
-import type { ImportInfo, Reference, Symbol } from '../../src/types.js';
+import type { ImportInfo, Symbol } from '../../src/types.js';
 import {
   makeConfig,
   makeFileInfo,
   makeProjectDir,
+  mkImport,
+  mkModuleRef,
+  mkRef,
   mkSym,
+  mkUnresolvedRef,
   skipOnWindows,
   writeTree,
 } from '../helpers.js';
@@ -33,16 +37,6 @@ function makeDeps(index: CodeIndex, ready = true): GetContextDeps {
     index,
     indexer: { ready },
     config: makeConfig(tmpRoot),
-  };
-}
-
-function mkRef(source: Symbol, target: Symbol): Reference {
-  return {
-    sourceId: source.id,
-    targetId: target.id,
-    kind: 'calls',
-    file: source.file,
-    line: source.startLine,
   };
 }
 
@@ -262,6 +256,40 @@ describe('runGetContext — symbol mode happy path', () => {
 
     expect(text).not.toContain('### Exported by');
     expect(text).not.toContain('src/b.ts');
+  });
+
+  it('renders same-file module-level callers as `(module-level) [structural]`', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const source = [
+      'function helper() {}',
+      '',
+      'helper();',
+      '',
+    ].join('\n');
+    writeTree(tmpRoot, { 'src/u.ts': source });
+    const target = mkSym({
+      name: 'helper',
+      file: 'src/u.ts',
+      kind: 'function',
+      signature: 'function helper()',
+      startLine: 1,
+      endLine: 1,
+    });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/u.ts'),
+      [target],
+      [mkModuleRef(target, 3)],
+      [],
+    );
+
+    const result = await runGetContext(
+      { file: 'src/u.ts', symbol: 'helper' },
+      makeDeps(idx),
+    );
+    const text = result.content[0].text;
+
+    expect(text).toContain('### Callers');
+    expect(text).toContain('- src/u.ts:3 — (module-level) [structural]');
   });
 });
 
@@ -820,6 +848,127 @@ describe('runGetContext — file mode', () => {
 
     expect(text).toContain("### Callers of this file's exports");
     expect(text).toContain('- src/a.ts — uses api');
+  });
+
+  it("lists same-file module-level uses under Callers of this file's exports", async () => {
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, {
+      'src/u.ts': 'export function helper() {}\n\nhelper();\n',
+    });
+    const helper = mkSym({
+      name: 'helper',
+      file: 'src/u.ts',
+      exported: true,
+      signature: 'function helper()',
+      startLine: 1,
+      endLine: 1,
+    });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/u.ts'),
+      [helper],
+      [mkModuleRef(helper, 3)],
+      [],
+    );
+
+    const result = await runGetContext({ file: 'src/u.ts' }, makeDeps(idx));
+    const text = result.content[0].text;
+
+    expect(text).toContain("### Callers of this file's exports");
+    expect(text).toContain('- src/u.ts — uses helper');
+  });
+
+  it("lists cross-file callers under Callers of this file's exports", async () => {
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, {
+      'src/utils.ts': 'export function hash() {}\n',
+      'src/foo.ts':
+        "import { hash } from './utils.js';\n\nfunction caller() { hash(); }\n",
+    });
+    const hash = mkSym({
+      name: 'hash',
+      file: 'src/utils.ts',
+      exported: true,
+      signature: 'function hash()',
+      startLine: 1,
+      endLine: 1,
+    });
+    const caller = mkSym({
+      name: 'caller',
+      file: 'src/foo.ts',
+      exported: false,
+      signature: 'function caller()',
+      startLine: 3,
+      endLine: 3,
+    });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/utils.ts'),
+      [hash],
+      [],
+      [],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/foo.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'hash', 'src/foo.ts', 3)],
+      [mkImport('src/foo.ts', './utils.js', [{ name: 'hash' }])],
+    );
+
+    const result = await runGetContext(
+      { file: 'src/utils.ts' },
+      makeDeps(idx),
+    );
+    const text = result.content[0].text;
+
+    expect(text).toContain("### Callers of this file's exports");
+    expect(text).toContain('- src/foo.ts — uses hash');
+  });
+
+  it("Callers of this file's exports excludes precise-homonym mismatches", async () => {
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, {
+      'src/a.ts':
+        'export function hash() {}\n\nfunction otherHash() {}\n\nfunction inner() { otherHash(); }\n',
+    });
+    const hash = mkSym({
+      name: 'hash',
+      file: 'src/a.ts',
+      exported: true,
+      signature: 'function hash()',
+      startLine: 1,
+      endLine: 1,
+    });
+    const otherHash = mkSym({
+      name: 'hash',
+      file: 'src/a.ts',
+      exported: false,
+      signature: 'function hash() // shadow',
+      startLine: 3,
+      endLine: 3,
+    });
+    const inner = mkSym({
+      name: 'inner',
+      file: 'src/a.ts',
+      exported: false,
+      signature: 'function inner()',
+      startLine: 5,
+      endLine: 5,
+    });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [hash, otherHash, inner],
+      [mkRef(inner, otherHash)],
+      [],
+    );
+
+    const result = await runGetContext({ file: 'src/a.ts' }, makeDeps(idx));
+    const text = result.content[0].text;
+
+    // inner() calls the second `hash` (otherHash); isCallerOf rejects it
+    // for the exported `hash` (precise targetId mismatch). Section should
+    // be (none).
+    expect(text).toContain(
+      "### Callers of this file's exports (approximate — from AST name matching)\n(none)",
+    );
   });
 
   it('renders Exports (none) when the file has no exported symbols', async () => {

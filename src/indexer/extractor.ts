@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type { Node, Tree } from 'web-tree-sitter';
 
 import { log } from '../logger.js';
-import type { FileInfo, ImportInfo, Reference, Symbol, SymbolKind } from '../types.js';
+import { NON_CALLABLE_KINDS } from '../types.js';
+import type { FileInfo, ImportInfo, Reference, Symbol } from '../types.js';
 import { extractPython } from './languages/python.js';
 import { extractTypeScript } from './languages/typescript.js';
 
@@ -15,6 +16,24 @@ export interface ExtractResult {
 export interface PendingBody {
   symbolId: string;
   body: Node;
+}
+
+// Maps a call-like AST node to the identifier being "called" — function call,
+// constructor in `new X()`, JSX component in `<X />`. Returning null skips the
+// node (member-expression callees, lowercase JSX HTML tags).
+export interface CallSelector {
+  nodeType: string;
+  getCallee: (node: Node) => Node | null;
+}
+
+// Selector for bare decorator forms (`@foo`, `@dataclass`). For `@foo()` the
+// child is `call_expression`/`call` and the call selector emits the ref via
+// walkCalls; for `@foo.bar` the child is `member_expression`/`attribute` and
+// is correctly skipped as member access. Shared by TS and Python — both use
+// `identifier` as the node type for plain names.
+export function bareDecoratorIdentifier(node: Node): Node | null {
+  const child = node.firstNamedChild;
+  return child?.type === 'identifier' ? child : null;
 }
 
 export function extractSymbols(
@@ -49,53 +68,99 @@ export function symbolId(
     .slice(0, 16);
 }
 
-const NON_CALLABLE_KINDS: ReadonlySet<SymbolKind> = new Set<SymbolKind>([
-  'method',
-  'interface',
-  'type',
-]);
-
 export function resolveCalls(
   bodies: PendingBody[],
+  moduleRoot: Node | null,
   symbols: Symbol[],
   fileInfo: FileInfo,
-  callNodeType: 'call_expression' | 'call',
+  selectors: ReadonlyArray<CallSelector>,
   skipTypes: ReadonlySet<string>,
+  functionBodySkipTypes: ReadonlySet<string>,
 ): Reference[] {
   const nameToId = new Map<string, string>();
   for (const sym of symbols) {
     if (NON_CALLABLE_KINDS.has(sym.kind)) continue;
     if (!nameToId.has(sym.name)) nameToId.set(sym.name, sym.id);
   }
+  const calleeByType = new Map(selectors.map((s) => [s.nodeType, s.getCallee]));
 
   const references: Reference[] = [];
-  for (const { symbolId: sourceId, body } of bodies) {
-    walkCalls(body, callNodeType, skipTypes, (call) => {
-      const fn = call.childForFieldName('function');
-      if (!fn || fn.type !== 'identifier') return;
-      const targetId = nameToId.get(fn.text);
-      if (!targetId) return;
-      references.push({
-        sourceId,
-        targetId,
-        kind: 'calls',
-        file: fileInfo.path,
-        line: call.startPosition.row + 1,
-      });
+  const seenCallNodeIds = new Set<number>();
+  const emit = (node: Node, sourceId: string | null): void => {
+    if (seenCallNodeIds.has(node.id)) return;
+    const getCallee = calleeByType.get(node.type);
+    if (!getCallee) return;
+    const callee = getCallee(node);
+    // Skip member-expression callees (`obj.method()`, `new x.y()`,
+    // `<ns.Cmp />`) and HTML JSX tags (filtered to null by the selector).
+    if (!callee || callee.type !== 'identifier') return;
+    seenCallNodeIds.add(node.id);
+    const targetName = callee.text;
+    references.push({
+      sourceId,
+      targetId: nameToId.get(targetName) ?? null,
+      targetName,
+      kind: 'calls',
+      file: fileInfo.path,
+      line: node.startPosition.row + 1,
     });
+  };
+
+  // Body walks first so a function-nested decorator gets attributed to the
+  // enclosing body when reachable; the seen-set then drops the (null-sourced)
+  // module-root duplicate.
+  for (const { symbolId: sourceId, body } of bodies) {
+    walkCalls(body, calleeByType, skipTypes, (call) => emit(call, sourceId));
+    // TS decorators sit under skip-typed parents (class_declaration etc.)
+    // that walkCalls can't enter — walkDecorators descends through them
+    // so nested decorated classes attribute to the enclosing body.
+    walkDecorators(body, calleeByType, skipTypes, functionBodySkipTypes, (call) =>
+      emit(call, sourceId),
+    );
+  }
+  if (moduleRoot) {
+    walkCalls(moduleRoot, calleeByType, skipTypes, (call) => emit(call, null));
+    walkDecorators(moduleRoot, calleeByType, skipTypes, functionBodySkipTypes, (call) =>
+      emit(call, null),
+    );
   }
   return references;
 }
 
+type CalleeByType = ReadonlyMap<string, (n: Node) => Node | null>;
+
 function walkCalls(
   node: Node,
-  callType: 'call_expression' | 'call',
+  calleeByType: CalleeByType,
   skipTypes: ReadonlySet<string>,
   onCall: (n: Node) => void,
 ): void {
-  if (node.type === callType) onCall(node);
+  if (calleeByType.has(node.type)) onCall(node);
   for (const child of node.namedChildren) {
     if (skipTypes.has(child.type)) continue;
-    walkCalls(child, callType, skipTypes, onCall);
+    walkCalls(child, calleeByType, skipTypes, onCall);
+  }
+}
+
+function walkDecorators(
+  node: Node,
+  calleeByType: CalleeByType,
+  skipTypes: ReadonlySet<string>,
+  functionBodySkipTypes: ReadonlySet<string>,
+  onCall: (n: Node) => void,
+): void {
+  if (node.type === 'decorator') {
+    walkCalls(node, calleeByType, skipTypes, onCall);
+    return;
+  }
+  for (const child of node.namedChildren) {
+    // Skip nested function bodies — decorators inside a nested function
+    // only fire when that function is invoked, so they shouldn't
+    // attribute to the enclosing body. Class types stay descended so
+    // top-level decorators on inner classes still attribute correctly
+    // (the original walkDecorators rationale, mirrored by walkCalls
+    // skipping classes via skipTypes).
+    if (functionBodySkipTypes.has(child.type)) continue;
+    walkDecorators(child, calleeByType, skipTypes, functionBodySkipTypes, onCall);
   }
 }

@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import type { CodeIndex } from "./indexer/code-index.js";
 import type { Indexer } from "./indexer/pipeline.js";
+import { runFindReferences } from "./tools/find-references.js";
 import { runFindSymbol } from "./tools/find-symbol.js";
 import { runGetContext } from "./tools/get-context.js";
 import { runOverview } from "./tools/overview.js";
@@ -110,6 +111,41 @@ export function createServer(deps: ServerDeps): McpServer {
       annotations: SHARED_ANNOTATIONS,
     },
     async (args) => runGetContext(args, deps),
+  );
+
+  server.registerTool(
+    "find_references",
+    {
+      description:
+        "Cross-file usage navigation. Returns approximate AST name-matched callers for a symbol, ranked by directory and import proximity. LSP-precise tiers ship in Phase 2.",
+      inputSchema: {
+        file: z.string().describe("File containing the symbol (relative to project root)"),
+        symbol: z.string().describe("Symbol name"),
+        line: z
+          .number()
+          .int()
+          .optional()
+          .describe("Disambiguate when multiple symbols share a name"),
+        kind: z
+          .enum([
+            "callers",
+            "callees",
+            "implementations",
+            "type_references",
+            "all",
+          ])
+          .optional()
+          .describe("Result kind (default: 'all')"),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max results per section (default: 20, max: 100)"),
+      },
+      annotations: SHARED_ANNOTATIONS,
+    },
+    async (args) => runFindReferences(args, deps),
   );
 
   return server;

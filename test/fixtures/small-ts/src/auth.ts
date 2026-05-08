@@ -4,7 +4,8 @@ import type { User, AuthToken } from './types';
 /** Validates the JWT and attaches user to request */
 export async function authenticate(req: Request): Promise<User> {
   const token = extractToken(req);
-  const payload = verify(token);
+  const fingerprint = hash(token);
+  const payload = verify(fingerprint);
   return payload as User;
 }
 

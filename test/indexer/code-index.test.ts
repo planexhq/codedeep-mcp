@@ -2,27 +2,17 @@ import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { CodeIndex } from '../../src/indexer/code-index.js';
-import type { ImportInfo, Reference, Symbol } from '../../src/types.js';
-import { makeFileInfo, makeProjectDir, mkSym } from '../helpers.js';
-
-function mkRef(source: Symbol, target: Symbol): Reference {
-  return {
-    sourceId: source.id,
-    targetId: target.id,
-    kind: 'calls',
-    file: source.file,
-    line: 1,
-  };
-}
-
-function mkImport(
-  file: string,
-  sourceModule: string,
-  importedNames: ImportInfo['importedNames'] = [],
-): ImportInfo {
-  return { file, sourceModule, importedNames, line: 1 };
-}
+import { CodeIndex, isCallerOf } from '../../src/indexer/code-index.js';
+import type { Reference, SymbolKind } from '../../src/types.js';
+import {
+  makeFileInfo,
+  makeProjectDir,
+  mkImport,
+  mkModuleRef,
+  mkRef,
+  mkSym,
+  mkUnresolvedRef,
+} from '../helpers.js';
 
 let tmpRoot: string;
 let cachePath: string;
@@ -658,6 +648,29 @@ describe('CodeIndex persistence', () => {
     expect(idx.getStats().totalFiles).toBe(0);
     expect(idx.getStats().totalSymbols).toBe(0);
   });
+
+  it('returns false on malformed reference entries and unlinks cache', async () => {
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        version: 2,
+        createdAt: 0,
+        projectRoot: '',
+        symbols: [],
+        files: [],
+        imports: [],
+        callees: [],
+        callers: [],
+        // Missing required `file`, `line`, `kind` — would crash downstream
+        // at `dirname(ref.file)`.
+        references: [{ targetName: 'foo' }],
+      }),
+    );
+    const idx = new CodeIndex();
+    const ok = await idx.load(cachePath);
+    expect(ok).toBe(false);
+    expect(existsSync(cachePath)).toBe(false);
+  });
 });
 
 describe('CodeIndex edge cases', () => {
@@ -723,12 +736,1222 @@ describe('CodeIndex edge cases', () => {
     await idx.save(cachePath);
 
     const data = JSON.parse(readFileSync(cachePath, 'utf8'));
-    expect(data.version).toBe(1);
+    expect(data.version).toBe(2);
     expect(data.projectRoot).toBe(tmpRoot);
     expect(Array.isArray(data.symbols)).toBe(true);
     expect(Array.isArray(data.files)).toBe(true);
     expect(Array.isArray(data.imports)).toBe(true);
     expect(Array.isArray(data.callees)).toBe(true);
     expect(Array.isArray(data.callers)).toBe(true);
+    expect(Array.isArray(data.references)).toBe(true);
   });
+});
+
+describe('CodeIndex.getReferencesByName', () => {
+  it('returns refs whose targetName matches (resolved within-file)', () => {
+    const idx = new CodeIndex();
+    const a = mkSym({ name: 'caller', file: 'src/a.ts' });
+    const b = mkSym({ name: 'helper', file: 'src/a.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [a, b],
+      [mkRef(a, b)],
+      [],
+    );
+
+    const refs = idx.getReferencesByName('helper');
+    expect(refs).toHaveLength(1);
+    expect(refs[0].sourceId).toBe(a.id);
+    expect(refs[0].targetId).toBe(b.id);
+    expect(refs[0].targetName).toBe('helper');
+  });
+
+  it('returns cross-file unresolved refs (targetId=null)', () => {
+    const idx = new CodeIndex();
+    const caller = mkSym({ name: 'caller', file: 'src/a.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'externalFn', 'src/a.ts', 5)],
+      [],
+    );
+
+    const refs = idx.getReferencesByName('externalFn');
+    expect(refs).toHaveLength(1);
+    expect(refs[0].targetId).toBeNull();
+    expect(refs[0].targetName).toBe('externalFn');
+    expect(refs[0].file).toBe('src/a.ts');
+    expect(refs[0].line).toBe(5);
+  });
+
+  it('returns module-level refs (sourceId=null) without polluting callers adjacency', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'authenticate', file: 'src/auth.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/auth.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/api.ts'),
+      [],
+      [
+        {
+          sourceId: null,
+          targetId: target.id,
+          targetName: 'authenticate',
+          kind: 'calls',
+          file: 'src/api.ts',
+          line: 2,
+        },
+      ],
+      [],
+    );
+
+    const refs = idx.getReferencesByName('authenticate');
+    expect(refs).toHaveLength(1);
+    expect(refs[0].sourceId).toBeNull();
+    expect(refs[0].targetId).toBe(target.id);
+    // adjacency must reject null sourceId so getCallers stays clean.
+    expect(idx.getCallers(target.id)).toEqual([]);
+  });
+
+  it('returns [] for unknown name', () => {
+    const idx = new CodeIndex();
+    expect(idx.getReferencesByName('nope')).toEqual([]);
+  });
+
+  it('returns a copy — mutation does not affect the index', () => {
+    const idx = new CodeIndex();
+    const a = mkSym({ name: 'a' });
+    const b = mkSym({ name: 'b' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [a, b],
+      [mkRef(a, b)],
+      [],
+    );
+
+    const first = idx.getReferencesByName('b');
+    first.length = 0;
+    expect(idx.getReferencesByName('b')).toHaveLength(1);
+  });
+});
+
+describe('CodeIndex cross-file ref cleanup on removeFile', () => {
+  it('drops refs originating in the removed file', () => {
+    const idx = new CodeIndex();
+    const callerA = mkSym({ name: 'callerA', file: 'src/a.ts' });
+    const callerB = mkSym({ name: 'callerB', file: 'src/b.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [callerA],
+      [mkUnresolvedRef(callerA, 'shared', 'src/a.ts', 1)],
+      [],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/b.ts'),
+      [callerB],
+      [mkUnresolvedRef(callerB, 'shared', 'src/b.ts', 1)],
+      [],
+    );
+
+    expect(idx.getReferencesByName('shared')).toHaveLength(2);
+
+    idx.removeFile('src/a.ts');
+
+    const remaining = idx.getReferencesByName('shared');
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].file).toBe('src/b.ts');
+  });
+
+  it('preserves refs whose target was in the removed file', () => {
+    // updateFile/removeFile must not orphan-delete refs from other files
+    // pointing at names defined in the removed file. The cross-file caller
+    // stays in the index — its targetId is still valid only as long as
+    // the original symbol object is still in symbolById; but the ref by
+    // *name* survives.
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'shared', file: 'src/target.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/caller.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/target.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/caller.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'shared', 'src/caller.ts', 7)],
+      [],
+    );
+
+    idx.removeFile('src/target.ts');
+
+    const refs = idx.getReferencesByName('shared');
+    expect(refs).toHaveLength(1);
+    expect(refs[0].file).toBe('src/caller.ts');
+  });
+});
+
+describe('CodeIndex.getReferencesByNameOrAlias', () => {
+  it('includes refs whose targetName is a local alias of the target', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'authenticate', file: 'src/auth.ts' });
+    const caller = mkSym({ name: 'handler', file: 'src/api.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/auth.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/api.ts'),
+      [caller],
+      // Call site uses the alias `auth`; targetName matches the alias.
+      [mkUnresolvedRef(caller, 'auth', 'src/api.ts', 12)],
+      [mkImport('src/api.ts', './auth', [{ name: 'authenticate', alias: 'auth' }])],
+    );
+
+    const refs = idx.getReferencesByNameOrAlias('authenticate');
+    expect(refs).toHaveLength(1);
+    expect(refs[0].targetName).toBe('auth');
+    expect(refs[0].file).toBe('src/api.ts');
+  });
+
+  it('skips imports whose alias equals the original name (no double count)', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'foo', file: 'src/a.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/b.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/b.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'foo', 'src/b.ts', 1)],
+      [mkImport('src/b.ts', './a', [{ name: 'foo', alias: 'foo' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('foo')).toHaveLength(1);
+  });
+
+  it('excludes alias refs that originate in a different file from the import', () => {
+    // src/api.ts imports `authenticate as auth`. src/other.ts has its own
+    // unrelated `auth(...)` call. Only refs from src/api.ts should be picked
+    // up via the alias mapping.
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'authenticate', file: 'src/auth.ts' });
+    const apiCaller = mkSym({ name: 'apiHandler', file: 'src/api.ts' });
+    const otherCaller = mkSym({ name: 'otherHandler', file: 'src/other.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/auth.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/api.ts'),
+      [apiCaller],
+      [mkUnresolvedRef(apiCaller, 'auth', 'src/api.ts', 5)],
+      [mkImport('src/api.ts', './auth', [{ name: 'authenticate', alias: 'auth' }])],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/other.ts'),
+      [otherCaller],
+      [mkUnresolvedRef(otherCaller, 'auth', 'src/other.ts', 8)],
+      [],
+    );
+
+    const refs = idx.getReferencesByNameOrAlias('authenticate');
+    expect(refs).toHaveLength(1);
+    expect(refs[0].file).toBe('src/api.ts');
+  });
+
+  it('returns [] for unknown name with no aliases', () => {
+    expect(new CodeIndex().getReferencesByNameOrAlias('nope')).toEqual([]);
+  });
+
+  it('scopes alias refs to imports whose sourceModule resolves to targetFile', () => {
+    // Two same-named symbols in different files; a third file imports one of
+    // them under an alias and calls the alias. Without targetFile scoping the
+    // alias call leaks into both targets.
+    const idx = new CodeIndex();
+    const aService = mkSym({ name: 'Service', kind: 'class', file: 'src/a/Service.ts' });
+    const bService = mkSym({ name: 'Service', kind: 'class', file: 'src/b/Service.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/a/Service.ts'), [aService], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/b/Service.ts'), [bService], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'MyService', 'src/app.ts', 5)],
+      [mkImport('src/app.ts', './b/Service', [{ name: 'Service', alias: 'MyService' }])],
+    );
+
+    const aRefs = idx.getReferencesByNameOrAlias('Service', aService.file);
+    expect(aRefs).toHaveLength(0);
+
+    const bRefs = idx.getReferencesByNameOrAlias('Service', bService.file);
+    expect(bRefs).toHaveLength(1);
+    expect(bRefs[0].targetName).toBe('MyService');
+
+    const noScope = idx.getReferencesByNameOrAlias('Service');
+    expect(noScope).toHaveLength(1);
+  });
+
+  // Bare specifiers (workspace packages, TS path aliases) can't be resolved
+  // without project config. The alias loop falls through to best-effort
+  // include so codebases that rely on path aliases still surface callers.
+  it('includes alias refs from files with bare-specifier imports as best-effort', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'Service', kind: 'class', file: 'src/svc.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/svc.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'MyService', 'src/app.ts', 3)],
+      [mkImport('src/app.ts', 'shared-pkg', [{ name: 'Service', alias: 'MyService' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', target.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('Service')).toHaveLength(1);
+  });
+
+  it('resolves an import to a directory index file', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'Service', kind: 'class', file: 'src/lib/index.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/lib/index.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'MyService', 'src/app.ts', 4)],
+      [mkImport('src/app.ts', './lib', [{ name: 'Service', alias: 'MyService' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', target.file)).toHaveLength(1);
+  });
+
+  // Node ESM/CJS layouts can place the entry at index.mjs / index.cjs.
+  // The scanner indexes both, so directory imports must include them in
+  // the candidate suffix lists or aliased refs are dropped.
+  it.each([
+    ['typescript', 'src/lib/index.mjs', 'javascript'],
+    ['typescript', 'src/lib/index.cjs', 'javascript'],
+    ['javascript', 'src/lib/index.mjs', 'javascript'],
+    ['javascript', 'src/lib/index.cjs', 'javascript'],
+  ])(
+    'resolves a directory import from %s importer to %s',
+    (importerLang, indexFile, indexLang) => {
+      const idx = new CodeIndex();
+      const target = mkSym({
+        name: 'Service',
+        kind: 'class',
+        file: indexFile,
+        language: indexLang,
+      });
+      const importerFile =
+        importerLang === 'typescript' ? 'src/app.ts' : 'src/app.js';
+      const caller = mkSym({ name: 'caller', file: importerFile, language: importerLang });
+      idx.addFile(makeFileInfo(indexLang, indexFile), [target], [], []);
+      idx.addFile(
+        makeFileInfo(importerLang, importerFile),
+        [caller],
+        [mkUnresolvedRef(caller, 'MyService', importerFile, 4)],
+        [mkImport(importerFile, './lib', [{ name: 'Service', alias: 'MyService' }])],
+      );
+
+      expect(
+        idx.getReferencesByNameOrAlias('Service', target.file),
+      ).toHaveLength(1);
+    },
+  );
+
+  it('resolves a parent-relative import (`../shared/B`)', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'Service', kind: 'class', file: 'src/shared/B.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/sub/c.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/shared/B.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/sub/c.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'MyService', 'src/sub/c.ts', 7)],
+      [mkImport('src/sub/c.ts', '../shared/B', [{ name: 'Service', alias: 'MyService' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', target.file)).toHaveLength(1);
+  });
+
+  // Node16/NodeNext: `./foo.js` is the import form for `foo.ts`.
+  it('resolves a Node16 `.js` specifier to its `.ts` source', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'Service', kind: 'class', file: 'src/b/Service.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/b/Service.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'MyService', 'src/app.ts', 5)],
+      [mkImport('src/app.ts', './b/Service.js', [{ name: 'Service', alias: 'MyService' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', target.file)).toHaveLength(1);
+  });
+
+  it('resolves a Node16 `.mjs` specifier to its `.mjs` source', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'Service', kind: 'class', file: 'src/lib/Service.mjs' });
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(makeFileInfo('javascript', 'src/lib/Service.mjs'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'MyService', 'src/app.ts', 3)],
+      [mkImport('src/app.ts', './lib/Service.mjs', [{ name: 'Service', alias: 'MyService' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', target.file)).toHaveLength(1);
+  });
+
+  it('resolves a Python same-package relative import (`from .b`)', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'Service', kind: 'class', file: 'src/pkg/b.py', language: 'python' });
+    const other = mkSym({ name: 'Service', kind: 'class', file: 'src/other/b.py', language: 'python' });
+    const caller = mkSym({ name: 'caller', file: 'src/pkg/c.py', language: 'python' });
+    idx.addFile(makeFileInfo('python', 'src/pkg/b.py'), [target], [], []);
+    idx.addFile(makeFileInfo('python', 'src/other/b.py'), [other], [], []);
+    idx.addFile(
+      makeFileInfo('python', 'src/pkg/c.py'),
+      [caller],
+      [mkUnresolvedRef(caller, 'MyService', 'src/pkg/c.py', 4)],
+      [mkImport('src/pkg/c.py', '.b', [{ name: 'Service', alias: 'MyService' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', target.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('Service', other.file)).toHaveLength(0);
+  });
+
+  it('resolves a Python parent-package relative import (`from ..shared.b`)', () => {
+    // 2 dots = parent package of `src/pkg/sub/` is `src/pkg/`, so
+    // `..shared.b` resolves to `src/pkg/shared/b.py`.
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'Service', kind: 'class', file: 'src/pkg/shared/b.py', language: 'python' });
+    const caller = mkSym({ name: 'caller', file: 'src/pkg/sub/c.py', language: 'python' });
+    idx.addFile(makeFileInfo('python', 'src/pkg/shared/b.py'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('python', 'src/pkg/sub/c.py'),
+      [caller],
+      [mkUnresolvedRef(caller, 'MyService', 'src/pkg/sub/c.py', 6)],
+      [mkImport('src/pkg/sub/c.py', '..shared.b', [{ name: 'Service', alias: 'MyService' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', target.file)).toHaveLength(1);
+  });
+
+  it('resolves a Python relative import to a package `__init__.py`', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'Service', kind: 'class', file: 'src/pkg/__init__.py', language: 'python' });
+    const caller = mkSym({ name: 'caller', file: 'src/main.py', language: 'python' });
+    idx.addFile(makeFileInfo('python', 'src/pkg/__init__.py'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('python', 'src/main.py'),
+      [caller],
+      [mkUnresolvedRef(caller, 'MyService', 'src/main.py', 2)],
+      [mkImport('src/main.py', '.pkg', [{ name: 'Service', alias: 'MyService' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', target.file)).toHaveLength(1);
+  });
+
+  // CPython's FileFinder picks the package directory before falling
+  // through to the suffix loop, so `from .b import Service` binds to
+  // `pkg/b/__init__.py` even when `pkg/b.py` exists at the same stem.
+  it('Python package `__init__.py` wins over sibling `.py` when both exist', () => {
+    const idx = new CodeIndex();
+    const pkgService = mkSym({
+      name: 'Service',
+      kind: 'class',
+      file: 'pkg/b/__init__.py',
+      language: 'python',
+    });
+    const siblingService = mkSym({
+      name: 'Service',
+      kind: 'class',
+      file: 'pkg/b.py',
+      language: 'python',
+    });
+    const caller = mkSym({ name: 'caller', file: 'pkg/c.py', language: 'python' });
+    idx.addFile(makeFileInfo('python', 'pkg/b/__init__.py'), [pkgService], [], []);
+    idx.addFile(makeFileInfo('python', 'pkg/b.py'), [siblingService], [], []);
+    idx.addFile(
+      makeFileInfo('python', 'pkg/c.py'),
+      [caller],
+      [mkUnresolvedRef(caller, 'Service', 'pkg/c.py', 2)],
+      [mkImport('pkg/c.py', '.b', [{ name: 'Service' }])],
+    );
+
+    expect(
+      idx.getReferencesByNameOrAlias('Service', 'pkg/b/__init__.py'),
+    ).toHaveLength(1);
+    expect(
+      idx.getReferencesByNameOrAlias('Service', 'pkg/b.py'),
+    ).toHaveLength(0);
+  });
+
+  // Python absolute imports (no leading dot) can't be resolved without
+  // project config — but the file has positive evidence (it imports `join`),
+  // so the alias loop falls through to best-effort include.
+  it('includes alias refs from Python absolute imports as best-effort', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'join', kind: 'function', file: 'src/utils.py', language: 'python' });
+    const caller = mkSym({ name: 'caller', file: 'src/app.py', language: 'python' });
+    idx.addFile(makeFileInfo('python', 'src/utils.py'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('python', 'src/app.py'),
+      [caller],
+      [mkUnresolvedRef(caller, 'MyJoin', 'src/app.py', 3)],
+      [mkImport('src/app.py', 'os.path', [{ name: 'join', alias: 'MyJoin' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('join', target.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('join')).toHaveLength(1);
+  });
+
+  // `from . import x` resolves to the package's __init__.py via the
+  // imported NAME, not via sourceModule alone — normalizeImportSpecifier
+  // returns null for the bare-`.` form, so this falls through to
+  // best-effort include like other unresolvable specifiers.
+  it('includes alias refs from Python bare-`.` imports as best-effort', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'utils', kind: 'function', file: 'src/pkg/utils.py', language: 'python' });
+    const caller = mkSym({ name: 'caller', file: 'src/pkg/c.py', language: 'python' });
+    idx.addFile(makeFileInfo('python', 'src/pkg/utils.py'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('python', 'src/pkg/c.py'),
+      [caller],
+      [mkUnresolvedRef(caller, 'u', 'src/pkg/c.py', 2)],
+      [mkImport('src/pkg/c.py', '.', [{ name: 'utils', alias: 'u' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('utils', target.file)).toHaveLength(1);
+  });
+
+  it('resolves a JS importer with explicit `.js` to its `.js` source', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'Service', kind: 'class', file: 'src/foo.js' });
+    const caller = mkSym({ name: 'caller', file: 'src/bar.js' });
+    idx.addFile(makeFileInfo('javascript', 'src/foo.js'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('javascript', 'src/bar.js'),
+      [caller],
+      [mkUnresolvedRef(caller, 'S', 'src/bar.js', 2)],
+      [mkImport('src/bar.js', './foo.js', [{ name: 'Service', alias: 'S' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', target.file)).toHaveLength(1);
+  });
+
+  // JS files cannot import TS source at runtime; explicit `.js` must be
+  // literal. Without this scoping the alias call leaks to the TS sibling.
+  it('does not leak a JS-imported alias to a TS sibling at the same path stem', () => {
+    const idx = new CodeIndex();
+    const jsTarget = mkSym({ name: 'Service', kind: 'class', file: 'src/foo.js' });
+    const tsTarget = mkSym({ name: 'Service', kind: 'class', file: 'src/foo.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/bar.js' });
+    idx.addFile(makeFileInfo('javascript', 'src/foo.js'), [jsTarget], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/foo.ts'), [tsTarget], [], []);
+    idx.addFile(
+      makeFileInfo('javascript', 'src/bar.js'),
+      [caller],
+      [mkUnresolvedRef(caller, 'S', 'src/bar.js', 2)],
+      [mkImport('src/bar.js', './foo.js', [{ name: 'Service', alias: 'S' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', jsTarget.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('Service', tsTarget.file)).toHaveLength(0);
+  });
+
+  // Explicit `.js` specifier in a TS importer is a strong user signal —
+  // the `.js` sibling wins over a `.ts` sibling at the same stem
+  // (hand-written JS in mixed repos). The Node16/NodeNext emit case
+  // where only the `.ts` is indexed still falls back to the source.
+  it('prefers a `.js` sibling over a `.ts` sibling for a TS importer with explicit `.js` specifier', () => {
+    const idx = new CodeIndex();
+    const tsTarget = mkSym({ name: 'Service', kind: 'class', file: 'src/foo.ts' });
+    const jsTarget = mkSym({ name: 'Service', kind: 'class', file: 'src/foo.js' });
+    const caller = mkSym({ name: 'caller', file: 'src/bar.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/foo.ts'), [tsTarget], [], []);
+    idx.addFile(makeFileInfo('javascript', 'src/foo.js'), [jsTarget], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/bar.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'S', 'src/bar.ts', 2)],
+      [mkImport('src/bar.ts', './foo.js', [{ name: 'Service', alias: 'S' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', jsTarget.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('Service', tsTarget.file)).toHaveLength(0);
+  });
+
+  // `.mjs`/`.cjs` are emitted forms of `.mts`/`.cts`, which the scanner
+  // doesn't index — so they're always literal JS targets, not stems to
+  // re-extension. Stripping would misroute to a TS sibling at the same stem.
+  it('does not leak a TS importer\'s explicit `.mjs` to a TS sibling at the same stem', () => {
+    const idx = new CodeIndex();
+    const mjsTarget = mkSym({ name: 'Service', kind: 'class', file: 'src/foo.mjs' });
+    const tsTarget = mkSym({ name: 'Service', kind: 'class', file: 'src/foo.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/bar.ts' });
+    idx.addFile(makeFileInfo('javascript', 'src/foo.mjs'), [mjsTarget], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/foo.ts'), [tsTarget], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/bar.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'S', 'src/bar.ts', 2)],
+      [mkImport('src/bar.ts', './foo.mjs', [{ name: 'Service', alias: 'S' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', mjsTarget.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('Service', tsTarget.file)).toHaveLength(0);
+  });
+
+  it('does not leak a TS importer\'s explicit `.cjs` to a TS sibling at the same stem', () => {
+    const idx = new CodeIndex();
+    const cjsTarget = mkSym({ name: 'Service', kind: 'class', file: 'src/foo.cjs' });
+    const tsTarget = mkSym({ name: 'Service', kind: 'class', file: 'src/foo.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/bar.ts' });
+    idx.addFile(makeFileInfo('javascript', 'src/foo.cjs'), [cjsTarget], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/foo.ts'), [tsTarget], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/bar.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'S', 'src/bar.ts', 2)],
+      [mkImport('src/bar.ts', './foo.cjs', [{ name: 'Service', alias: 'S' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', cjsTarget.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('Service', tsTarget.file)).toHaveLength(0);
+  });
+
+  // Non-aliased named imports must scope by import resolution too — otherwise
+  // a bare `Service()` call from a file that imports Service from `./b`
+  // attributes to every same-named symbol, including the one in `./a`.
+  it('does not leak a non-aliased named import to a same-named symbol in another file', () => {
+    const idx = new CodeIndex();
+    const aSrv = mkSym({ name: 'Service', file: 'src/a.ts' });
+    const bSrv = mkSym({ name: 'Service', file: 'src/b.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/c.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [aSrv], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/b.ts'), [bSrv], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'Service', 'src/c.ts', 2)],
+      [mkImport('src/c.ts', './b', [{ name: 'Service' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', aSrv.file)).toHaveLength(0);
+    expect(idx.getReferencesByNameOrAlias('Service', bSrv.file)).toHaveLength(1);
+    expect(idx.getCallerCount(aSrv.id)).toBe(0);
+    expect(idx.getCallerCount(bSrv.id)).toBe(1);
+  });
+
+  // A bare `Service()` call in a file with NO matching named import binds
+  // to a parameter, local, nested-function, or global — not to an exported
+  // `Service` in another file. Attributing it to every homonym overcounts
+  // (e.g., the parameter shadow `function wrapper(Service) { Service() }`
+  // would inflate every same-named export's References count).
+  it('drops unresolved refs from files with no matching named import', () => {
+    const idx = new CodeIndex();
+    const aSrv = mkSym({ name: 'Service', file: 'src/a.ts' });
+    const bSrv = mkSym({ name: 'Service', file: 'src/b.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/c.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [aSrv], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/b.ts'), [bSrv], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'Service', 'src/c.ts', 2)],
+      [],
+    );
+
+    expect(idx.getCallerCount(aSrv.id)).toBe(0);
+    expect(idx.getCallerCount(bSrv.id)).toBe(0);
+  });
+
+  // Python imports cannot resolve to non-Python — the candidate list for a
+  // Python importer must not even try `.ts`/`.tsx`. Otherwise a TS sibling
+  // at the same stem steals the alias attribution.
+  it('resolves a Python alias to its `.py` source even when a `.ts` sibling exists', () => {
+    const idx = new CodeIndex();
+    const pyTarget = mkSym({ name: 'Service', kind: 'function', file: 'pkg/b.py', language: 'python' });
+    const tsTarget = mkSym({ name: 'Service', kind: 'function', file: 'pkg/b.ts' });
+    const caller = mkSym({ name: 'caller', file: 'pkg/c.py', language: 'python' });
+    idx.addFile(makeFileInfo('python', 'pkg/b.py'), [pyTarget], [], []);
+    idx.addFile(makeFileInfo('typescript', 'pkg/b.ts'), [tsTarget], [], []);
+    idx.addFile(
+      makeFileInfo('python', 'pkg/c.py'),
+      [caller],
+      [mkUnresolvedRef(caller, 'S', 'pkg/c.py', 2)],
+      [mkImport('pkg/c.py', '.b', [{ name: 'Service', alias: 'S' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', pyTarget.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('Service', tsTarget.file)).toHaveLength(0);
+  });
+
+  // JS importer with extensionless specifier should prefer JS-native source
+  // over a TS sibling at the same stem. The TS fallback in JS_CANDIDATES
+  // applies only when no JS sibling is indexed.
+  it('prefers a `.js` sibling over a `.ts` sibling for an extensionless JS import', () => {
+    const idx = new CodeIndex();
+    const jsTarget = mkSym({ name: 'Service', kind: 'function', file: 'src/foo.js', language: 'javascript' });
+    const tsTarget = mkSym({ name: 'Service', kind: 'function', file: 'src/foo.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/bar.js', language: 'javascript' });
+    idx.addFile(makeFileInfo('javascript', 'src/foo.js'), [jsTarget], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/foo.ts'), [tsTarget], [], []);
+    idx.addFile(
+      makeFileInfo('javascript', 'src/bar.js'),
+      [caller],
+      [mkUnresolvedRef(caller, 'S', 'src/bar.js', 2)],
+      [mkImport('src/bar.js', './foo', [{ name: 'Service', alias: 'S' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', jsTarget.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('Service', tsTarget.file)).toHaveLength(0);
+  });
+
+  // Node16/NodeNext emits `.jsx` for `.tsx` source — a TSX importer using
+  // the `.jsx` specifier must resolve to `.tsx`, not `.ts`.
+  it('prefers `.tsx` over `.ts` for a TSX importer with `.jsx` specifier', () => {
+    const idx = new CodeIndex();
+    const tsxTarget = mkSym({ name: 'Widget', kind: 'function', file: 'src/Widget.tsx', language: 'tsx' });
+    const tsTarget = mkSym({ name: 'Widget', kind: 'function', file: 'src/Widget.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/Foo.tsx', language: 'tsx' });
+    idx.addFile(makeFileInfo('tsx', 'src/Widget.tsx'), [tsxTarget], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/Widget.ts'), [tsTarget], [], []);
+    idx.addFile(
+      makeFileInfo('tsx', 'src/Foo.tsx'),
+      [caller],
+      [mkUnresolvedRef(caller, 'W', 'src/Foo.tsx', 2)],
+      [mkImport('src/Foo.tsx', './Widget.jsx', [{ name: 'Widget', alias: 'W' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Widget', tsxTarget.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('Widget', tsTarget.file)).toHaveLength(0);
+  });
+
+  // Explicit `.jsx` extension is a strong user signal — when only `.jsx`
+  // and `.ts` siblings are indexed (no `.tsx`), the `.jsx` target wins.
+  // Otherwise an unrelated TS sibling steals attribution from the actual
+  // user-written JSX file.
+  it('prefers `.jsx` over `.ts` for a TSX importer with `.jsx` specifier when no `.tsx` exists', () => {
+    const idx = new CodeIndex();
+    const jsxTarget = mkSym({ name: 'Widget', kind: 'function', file: 'src/Widget.jsx' });
+    const tsTarget = mkSym({ name: 'Widget', kind: 'function', file: 'src/Widget.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/Foo.tsx', language: 'tsx' });
+    idx.addFile(makeFileInfo('javascript', 'src/Widget.jsx'), [jsxTarget], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/Widget.ts'), [tsTarget], [], []);
+    idx.addFile(
+      makeFileInfo('tsx', 'src/Foo.tsx'),
+      [caller],
+      [mkUnresolvedRef(caller, 'W', 'src/Foo.tsx', 2)],
+      [mkImport('src/Foo.tsx', './Widget.jsx', [{ name: 'Widget', alias: 'W' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Widget', jsxTarget.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('Widget', tsTarget.file)).toHaveLength(0);
+  });
+
+  // A renaming alias (`import { X as name }`) binds bare `name()` calls
+  // to X, not name. The primary loop must not attribute these refs to
+  // any same-named (but unrelated) target — the alias loop already
+  // attributes them to the X-named target via importResolvesTo.
+  it('does not leak a renaming alias to a same-named symbol in another file', () => {
+    const idx = new CodeIndex();
+    const utilsHash = mkSym({ name: 'hash', file: 'src/utils.ts' });
+    const utilsAuth = mkSym({ name: 'authenticate', file: 'src/utils.ts' });
+    const otherAuth = mkSym({ name: 'authenticate', file: 'src/other.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/c.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/utils.ts'), [utilsHash, utilsAuth], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/other.ts'), [otherAuth], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'authenticate', 'src/c.ts', 2)],
+      [mkImport('src/c.ts', './utils', [{ name: 'hash', alias: 'authenticate' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('authenticate', utilsAuth.file)).toHaveLength(0);
+    expect(idx.getReferencesByNameOrAlias('authenticate', otherAuth.file)).toHaveLength(0);
+    expect(idx.getReferencesByNameOrAlias('hash', utilsHash.file)).toHaveLength(1);
+  });
+
+  // Default imports (`import name from './m'`) bind bare `name()` calls
+  // to `./m`'s default export. The primary path scopes by resolution:
+  // the call attributes only to a same-named target whose file the
+  // import resolves to.
+  it('scopes a default import to the resolved target file', () => {
+    const idx = new CodeIndex();
+    const aAuth = mkSym({ name: 'authenticate', file: 'src/a.ts' });
+    const bAuth = mkSym({ name: 'authenticate', file: 'src/b.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/c.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [aAuth], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/b.ts'), [bAuth], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'authenticate', 'src/c.ts', 2)],
+      [mkImport('src/c.ts', './a', [{ name: 'default', alias: 'authenticate' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('authenticate', aAuth.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('authenticate', bAuth.file)).toHaveLength(0);
+  });
+
+  // `import { name as name }` is an identity alias — the local binding
+  // equals the export name, so the renaming-alias short-circuit must
+  // not fire. Behavior matches a non-aliased named import: scope by
+  // resolution.
+  it('treats an identity alias (`import { Service as Service }`) as non-aliased', () => {
+    const idx = new CodeIndex();
+    const aSrv = mkSym({ name: 'Service', file: 'src/a.ts' });
+    const bSrv = mkSym({ name: 'Service', file: 'src/b.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/c.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [aSrv], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/b.ts'), [bSrv], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'Service', 'src/c.ts', 2)],
+      [mkImport('src/c.ts', './b', [{ name: 'Service', alias: 'Service' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('Service', bSrv.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('Service', aSrv.file)).toHaveLength(0);
+  });
+
+  it('scopes a Python wildcard import to its source module', () => {
+    const idx = new CodeIndex();
+    const helpersSym = mkSym({ name: 'helper', file: 'pkg/helpers.py', language: 'python' });
+    const otherSym = mkSym({ name: 'helper', file: 'pkg/other.py', language: 'python' });
+    const caller = mkSym({ name: 'caller', file: 'pkg/c.py', language: 'python' });
+    idx.addFile(makeFileInfo('python', 'pkg/helpers.py'), [helpersSym], [], []);
+    idx.addFile(makeFileInfo('python', 'pkg/other.py'), [otherSym], [], []);
+    idx.addFile(
+      makeFileInfo('python', 'pkg/c.py'),
+      [caller],
+      [mkUnresolvedRef(caller, 'helper', 'pkg/c.py', 3)],
+      [mkImport('pkg/c.py', '.helpers', [{ name: '*' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('helper', helpersSym.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('helper', otherSym.file)).toHaveLength(0);
+    expect(idx.getReferencesByNameOrAlias('helper')).toHaveLength(1);
+  });
+
+  it('attributes a multi-wildcard call to every imported source module', () => {
+    const idx = new CodeIndex();
+    const aSym = mkSym({ name: 'helper', file: 'pkg/a.py', language: 'python' });
+    const bSym = mkSym({ name: 'helper', file: 'pkg/b.py', language: 'python' });
+    const dSym = mkSym({ name: 'helper', file: 'pkg/d.py', language: 'python' });
+    const caller = mkSym({ name: 'caller', file: 'pkg/c.py', language: 'python' });
+    idx.addFile(makeFileInfo('python', 'pkg/a.py'), [aSym], [], []);
+    idx.addFile(makeFileInfo('python', 'pkg/b.py'), [bSym], [], []);
+    idx.addFile(makeFileInfo('python', 'pkg/d.py'), [dSym], [], []);
+    idx.addFile(
+      makeFileInfo('python', 'pkg/c.py'),
+      [caller],
+      [mkUnresolvedRef(caller, 'helper', 'pkg/c.py', 4)],
+      [
+        mkImport('pkg/c.py', '.a', [{ name: '*' }]),
+        mkImport('pkg/c.py', '.b', [{ name: '*' }]),
+      ],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('helper', aSym.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('helper', bSym.file)).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('helper', dSym.file)).toHaveLength(0);
+  });
+
+  it('does not treat a TS namespace import (`import * as ns`) as a wildcard binding', () => {
+    const idx = new CodeIndex();
+    const aSym = mkSym({ name: 'helper', file: 'src/a.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/c.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [aSym], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'helper', 'src/c.ts', 2)],
+      [mkImport('src/c.ts', './x', [{ name: '*', alias: 'ns' }])],
+    );
+
+    // TS `import * as ns` exposes member access only — bare `helper()` does
+    // not bind through it, so the file has no matching named import for
+    // `helper`. The ref is dropped (parameter/local/global), not admitted
+    // as a wildcard caller.
+    expect(idx.getReferencesByNameOrAlias('helper', aSym.file)).toHaveLength(0);
+  });
+});
+
+describe('CodeIndex.getCallerEdges', () => {
+  it('returns symbol callers from the id-keyed adjacency', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'target', file: 'src/u.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/u.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/u.ts'),
+      [target, caller],
+      [mkRef(caller, target)],
+      [],
+    );
+
+    const edges = idx.getCallerEdges(target.id);
+    expect(edges).toHaveLength(1);
+    expect(edges[0]).toEqual({ file: caller.file, line: caller.startLine, symbol: caller });
+  });
+
+  it('returns same-file resolved module-level callers', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'target', file: 'src/u.ts', startLine: 5 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/u.ts'),
+      [target],
+      [mkModuleRef(target, 1)],
+      [],
+    );
+
+    expect(idx.getCallerEdges(target.id)).toEqual([
+      { file: 'src/u.ts', line: 1 },
+    ]);
+  });
+
+  it('combines symbol callers and module-level entries', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'target', file: 'src/u.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/u.ts', startLine: 4 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/u.ts'),
+      [target, caller],
+      [mkRef(caller, target), mkModuleRef(target, 8)],
+      [],
+    );
+
+    const edges = idx.getCallerEdges(target.id);
+    expect(edges).toEqual(
+      expect.arrayContaining([
+        { file: caller.file, line: caller.startLine, symbol: caller },
+        { file: 'src/u.ts', line: 8 },
+      ]),
+    );
+    expect(edges).toHaveLength(2);
+  });
+
+  it('dedupes module-level callers per file using the earliest line', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'target', file: 'src/u.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/u.ts'),
+      [target],
+      [mkModuleRef(target, 12), mkModuleRef(target, 5)],
+      [],
+    );
+
+    expect(idx.getCallerEdges(target.id)).toEqual([
+      { file: 'src/u.ts', line: 5 },
+    ]);
+  });
+
+  it('excludes cross-file unresolved name-match refs', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'target', file: 'src/u.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/u.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/api.ts'),
+      [],
+      // sourceId=null AND targetId=null: cross-file module-level approximation.
+      [{
+        sourceId: null,
+        targetId: null,
+        targetName: 'target',
+        kind: 'calls',
+        file: 'src/api.ts',
+        line: 2,
+      }],
+      [],
+    );
+
+    expect(idx.getCallerEdges(target.id)).toEqual([]);
+  });
+
+  it('returns [] for an unknown symbol id', () => {
+    expect(new CodeIndex().getCallerEdges('deadbeef')).toEqual([]);
+  });
+});
+
+describe('CodeIndex.getCallerCount with cross-file refs', () => {
+  it('counts within-file callers plus name-matching cross-file refs', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'authenticate', file: 'src/auth.ts' });
+    const localCaller = mkSym({ name: 'wrap', file: 'src/auth.ts' });
+    const remoteCaller = mkSym({ name: 'handler', file: 'src/api.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/auth.ts'),
+      [target, localCaller],
+      [mkRef(localCaller, target)],
+      [],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/api.ts'),
+      [remoteCaller],
+      [mkUnresolvedRef(remoteCaller, 'authenticate', 'src/api.ts', 12)],
+      [mkImport('src/api.ts', './auth', [{ name: 'authenticate' }])],
+    );
+
+    expect(idx.getCallerCount(target.id)).toBe(2);
+  });
+
+  it('does not count self-references in the cross-file tally', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'recur', file: 'src/a.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [target],
+      [mkUnresolvedRef(target, 'recur', 'src/a.ts', 5)],
+      [],
+    );
+
+    expect(idx.getCallerCount(target.id)).toBe(0);
+  });
+
+  it('short-circuits for short names (<4 chars) to within-file only', () => {
+    // Mirror the suppression find_references applies for names like `do`/`is`,
+    // so the `References: ~N` line in find_symbol agrees.
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'do', file: 'src/x.ts' });
+    const remoteCaller = mkSym({ name: 'caller', file: 'src/y.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/x.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/y.ts'),
+      [remoteCaller],
+      [mkUnresolvedRef(remoteCaller, 'do', 'src/y.ts', 3)],
+      [],
+    );
+
+    expect(idx.getCallerCount(target.id)).toBe(0);
+  });
+
+  it('counts a cross-file caller that imports the target under an alias', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'authenticate', file: 'src/auth.ts' });
+    const aliasCaller = mkSym({ name: 'handler', file: 'src/api.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/auth.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/api.ts'),
+      [aliasCaller],
+      [mkUnresolvedRef(aliasCaller, 'auth', 'src/api.ts', 12)],
+      [mkImport('src/api.ts', './auth', [{ name: 'authenticate', alias: 'auth' }])],
+    );
+
+    expect(idx.getCallerCount(target.id)).toBe(1);
+  });
+
+  it('returns 0 for unknown symbol id', () => {
+    const idx = new CodeIndex();
+    expect(idx.getCallerCount('unknown-id')).toBe(0);
+  });
+
+  it('counts module-level same-file resolved calls (sourceId=null, targetId=symbolId)', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'boot', file: 'src/main.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/main.ts'),
+      [target],
+      [mkModuleRef(target, 5)],
+      [],
+    );
+
+    expect(idx.getCallerCount(target.id)).toBe(1);
+  });
+
+  it('counts module-level same-file resolved calls even for short names', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'run', file: 'src/main.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/main.ts'),
+      [target],
+      [mkModuleRef(target, 5)],
+      [],
+    );
+
+    expect(idx.getCallerCount(target.id)).toBe(1);
+  });
+
+  it('counts multi-call same-file and cross-file callers at the same granularity', () => {
+    // One caller invoking `target` three times must produce the same count
+    // whether the caller is in the same file or another file. Reference
+    // granularity matches what renderCallers prints (one line per call site),
+    // so find_symbol's `~N` and find_references's caller list agree.
+    const idxSame = new CodeIndex();
+    const targetSame = mkSym({ name: 'target', file: 'src/a.ts' });
+    const callerSame = mkSym({ name: 'caller', file: 'src/a.ts' });
+    idxSame.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [targetSame, callerSame],
+      [
+        mkRef(callerSame, targetSame),
+        mkRef(callerSame, targetSame),
+        mkRef(callerSame, targetSame),
+      ],
+      [],
+    );
+
+    const idxCross = new CodeIndex();
+    const targetCross = mkSym({ name: 'target', file: 'src/a.ts' });
+    const remoteCaller = mkSym({ name: 'caller', file: 'src/b.ts' });
+    idxCross.addFile(makeFileInfo('typescript', 'src/a.ts'), [targetCross], [], []);
+    idxCross.addFile(
+      makeFileInfo('typescript', 'src/b.ts'),
+      [remoteCaller],
+      [
+        mkUnresolvedRef(remoteCaller, 'target', 'src/b.ts', 1),
+        mkUnresolvedRef(remoteCaller, 'target', 'src/b.ts', 2),
+        mkUnresolvedRef(remoteCaller, 'target', 'src/b.ts', 3),
+      ],
+      [mkImport('src/b.ts', './a', [{ name: 'target' }])],
+    );
+
+    expect(idxSame.getCallerCount(targetSame.id)).toBe(3);
+    expect(idxCross.getCallerCount(targetCross.id)).toBe(3);
+  });
+
+  // The lazy rebuild caches results until an index update marks them
+  // dirty; back-to-back queries must return the same value.
+  it('returns a stable count across repeated queries with no index changes', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'authenticate', file: 'src/auth.ts' });
+    const caller = mkSym({ name: 'handler', file: 'src/api.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/auth.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/api.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'authenticate', 'src/api.ts', 12)],
+      [mkImport('src/api.ts', './auth', [{ name: 'authenticate' }])],
+    );
+
+    const first = idx.getCallerCount(target.id);
+    const second = idx.getCallerCount(target.id);
+    expect(first).toBe(1);
+    expect(second).toBe(first);
+  });
+
+  // updateFile must mark the cache dirty so a subsequent query sees the
+  // new ref count instead of the stale cached value.
+  it('reflects new refs after updateFile invalidates the cache', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'authenticate', file: 'src/auth.ts' });
+    const caller = mkSym({ name: 'handler', file: 'src/api.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/auth.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/api.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'authenticate', 'src/api.ts', 12)],
+      [mkImport('src/api.ts', './auth', [{ name: 'authenticate' }])],
+    );
+    expect(idx.getCallerCount(target.id)).toBe(1);
+
+    // Add a second call site by re-adding the file with two refs.
+    idx.updateFile(
+      makeFileInfo('typescript', 'src/api.ts'),
+      [caller],
+      [
+        mkUnresolvedRef(caller, 'authenticate', 'src/api.ts', 12),
+        mkUnresolvedRef(caller, 'authenticate', 'src/api.ts', 18),
+      ],
+      [mkImport('src/api.ts', './auth', [{ name: 'authenticate' }])],
+    );
+    expect(idx.getCallerCount(target.id)).toBe(2);
+  });
+});
+
+describe('CodeIndex persistence — references round-trip', () => {
+  it('persists and restores cross-file (unresolved) references', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const caller = mkSym({ name: 'caller', file: 'src/a.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'externalFn', 'src/a.ts', 9)],
+      [],
+    );
+    await idx.save(cachePath);
+
+    const loaded = new CodeIndex(tmpRoot);
+    expect(await loaded.load(cachePath)).toBe(true);
+
+    const refs = loaded.getReferencesByName('externalFn');
+    expect(refs).toHaveLength(1);
+    expect(refs[0].targetId).toBeNull();
+    expect(refs[0].targetName).toBe('externalFn');
+    expect(refs[0].line).toBe(9);
+  });
+
+  it('invalidates v1 caches written by Phase 1a', async () => {
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        version: 1,
+        createdAt: 0,
+        projectRoot: tmpRoot,
+        symbols: [],
+        files: [],
+        imports: [],
+        callees: [],
+        callers: [],
+      }),
+    );
+    const idx = new CodeIndex(tmpRoot);
+    expect(await idx.load(cachePath)).toBe(false);
+    expect(existsSync(cachePath)).toBe(false);
+  });
+
+  it('rejects v2 cache that is missing the references field', async () => {
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        version: 2,
+        createdAt: 0,
+        projectRoot: tmpRoot,
+        symbols: [],
+        files: [],
+        imports: [],
+        callees: [],
+        callers: [],
+        // references field intentionally missing
+      }),
+    );
+    const idx = new CodeIndex(tmpRoot);
+    expect(await idx.load(cachePath)).toBe(false);
+  });
+});
+
+describe('isCallerOf', () => {
+  // Methods, interfaces, and types are excluded from the extractor's precise
+  // call resolution (NON_CALLABLE_KINDS). A name-only match for these kinds
+  // is by definition spurious — bare `save()` calls a top-level function,
+  // not `C.prototype.save`; `AuthToken()` calls a function, not the
+  // interface; `type X` is never invoked at runtime.
+  it.each<SymbolKind>(['method', 'interface', 'type'])(
+    'rejects name-only matches for %s targets',
+    (kind) => {
+      const target = mkSym({ name: 'AuthToken', kind, parent: kind === 'method' ? 'C' : undefined });
+      const ref: Reference = {
+        sourceId: 'sourceid0000000a',
+        targetId: null,
+        targetName: 'AuthToken',
+        kind: 'calls',
+        file: 'src/other.ts',
+        line: 10,
+      };
+      expect(isCallerOf(ref, target)).toBe(false);
+    },
+  );
+
+  // Callable kinds still accept name-only matches — regression guard.
+  it.each<SymbolKind>(['function', 'class', 'variable'])(
+    'accepts name-only matches for %s targets',
+    (kind) => {
+      const target = mkSym({ name: 'AuthToken', kind });
+      const ref: Reference = {
+        sourceId: 'sourceid0000000a',
+        targetId: null,
+        targetName: 'AuthToken',
+        kind: 'calls',
+        file: 'src/other.ts',
+        line: 10,
+      };
+      expect(isCallerOf(ref, target)).toBe(true);
+    },
+  );
 });

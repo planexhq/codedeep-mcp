@@ -18,6 +18,8 @@ import {
   type SymbolKind,
 } from '../types.js';
 
+import { INDEXING_BANNER, textResponse, type ToolResponse } from './common.js';
+
 export interface OverviewArgs {
   path?: string;
 }
@@ -26,12 +28,6 @@ export interface OverviewDeps {
   index: CodeIndex;
   indexer: Pick<Indexer, 'ready'>;
   config: ProbeConfig;
-}
-
-// Index signature required to satisfy the MCP SDK's CallToolResult shape.
-export interface ToolResponse {
-  [x: string]: unknown;
-  content: Array<{ type: 'text'; text: string }>;
 }
 
 const MAX_DIR_GROUPS = 7;
@@ -69,14 +65,9 @@ export async function runOverview(
   try {
     const projectRoot = deps.config.projectRoot;
     if (args.path && resolve(args.path) !== projectRoot) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Error: path "${args.path}" does not match configured project root "${projectRoot}". Multi-root workspaces are not yet supported.`,
-          },
-        ],
-      };
+      return textResponse(
+        `Error: path "${args.path}" does not match configured project root "${projectRoot}". Multi-root workspaces are not yet supported.`,
+      );
     }
 
     const stats = deps.index.getStats();
@@ -85,7 +76,7 @@ export async function runOverview(
     const lines: string[] = [];
 
     if (!deps.indexer.ready) {
-      lines.push('⏳ Indexing in progress. Results may be incomplete.', '');
+      lines.push(INDEXING_BANNER, '');
     }
 
     lines.push(`## Project: ${basename(projectRoot)}`, '');
@@ -160,11 +151,9 @@ export async function runOverview(
       `- ${stats.totalFiles} ${plural('file', stats.totalFiles)} indexed, ${stats.totalSymbols} total ${plural('symbol', stats.totalSymbols)}`,
     );
 
-    return { content: [{ type: 'text', text: lines.join('\n') }] };
+    return textResponse(lines.join('\n'));
   } catch (err) {
-    return {
-      content: [{ type: 'text', text: `Error: ${errMsg(err)}` }],
-    };
+    return textResponse(`Error: ${errMsg(err)}`);
   }
 }
 

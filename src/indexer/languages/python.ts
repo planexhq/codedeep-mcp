@@ -1,16 +1,30 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
-import type { FileInfo, ImportInfo, Symbol, SymbolKind } from '../../types.js';
-import { resolveCalls, symbolId } from '../extractor.js';
-import type { ExtractResult, PendingBody } from '../extractor.js';
+import { IMPORT_NAMESPACE } from '../../types.js';
+import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
+import { bareDecoratorIdentifier, resolveCalls, symbolId } from '../extractor.js';
+import type { CallSelector, ExtractResult, PendingBody } from '../extractor.js';
 
 const WS_REGEX = /\s+/g;
 
-const PY_SKIP_TYPES: ReadonlySet<string> = new Set([
+// Function-like nodes whose bodies contain calls that shouldn't attribute
+// to an enclosing body. walkDecorators uses this subset so it still
+// descends through class bodies but stops at nested function bodies and
+// lambdas — see the matching TS_FUNCTION_BODY_SKIP_TYPES in typescript.ts.
+const PY_FUNCTION_BODY_SKIP_TYPES: ReadonlySet<string> = new Set([
   'function_definition',
-  'class_definition',
   'lambda',
 ]);
+
+const PY_SKIP_TYPES: ReadonlySet<string> = new Set([
+  ...PY_FUNCTION_BODY_SKIP_TYPES,
+  'class_definition',
+]);
+
+const PY_SELECTORS: ReadonlyArray<CallSelector> = [
+  { nodeType: 'call', getCallee: (n) => n.childForFieldName('function') },
+  { nodeType: 'decorator', getCallee: bareDecoratorIdentifier },
+];
 
 export function extractPython(
   tree: Tree,
@@ -27,7 +41,15 @@ export function extractPython(
     extractTopLevel(child, content, fileInfo, allNames, symbols, imports, bodies);
   }
 
-  const references = resolveCalls(bodies, symbols, fileInfo, 'call', PY_SKIP_TYPES);
+  const references = resolveCalls(
+    bodies,
+    tree.rootNode,
+    symbols,
+    fileInfo,
+    PY_SELECTORS,
+    PY_SKIP_TYPES,
+    PY_FUNCTION_BODY_SKIP_TYPES,
+  );
   return { symbols, references, imports };
 }
 
@@ -229,11 +251,11 @@ function extractImportFrom(stmt: Node, fileInfo: FileInfo, out: ImportInfo[]): v
   const moduleNode = stmt.childForFieldName('module_name');
   if (!moduleNode) return;
   const sourceModule = moduleNode.text;
-  const importedNames: Array<{ name: string; alias?: string }> = [];
+  const importedNames: ImportedName[] = [];
 
   const hasWildcard = stmt.namedChildren.some((c) => c.type === 'wildcard_import');
   if (hasWildcard) {
-    importedNames.push({ name: '*' });
+    importedNames.push({ name: IMPORT_NAMESPACE });
   } else {
     for (const nameNode of stmt.childrenForFieldName('name')) {
       if (nameNode.type === 'aliased_import') {
