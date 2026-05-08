@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, extname, join, resolve } from 'node:path';
 
 import {
   type CodeIndex,
@@ -10,7 +10,13 @@ import {
 import type { Indexer } from '../indexer/pipeline.js';
 import { compareShallowFirst } from '../indexer/scanner.js';
 import { errMsg, log } from '../logger.js';
-import type { FileInfo, ProbeConfig, Symbol, SymbolKind } from '../types.js';
+import {
+  LANGUAGE_UNKNOWN,
+  type FileInfo,
+  type ProbeConfig,
+  type Symbol,
+  type SymbolKind,
+} from '../types.js';
 
 export interface OverviewArgs {
   path?: string;
@@ -31,6 +37,7 @@ export interface ToolResponse {
 const MAX_DIR_GROUPS = 7;
 const MAX_KINDS_PER_GROUP = 3;
 const MAX_ENTRY_POINTS = 15;
+const MAX_OTHER_EXTENSIONS = 5;
 
 // Without this, monorepos with many packages/*/index.ts (or many
 // __init__.py) saturate MAX_ENTRY_POINTS alphabetically and hide the real
@@ -83,21 +90,34 @@ export async function runOverview(
 
     lines.push(`## Project: ${basename(projectRoot)}`, '');
 
+    const unknownCount = stats.filesByLanguage[LANGUAGE_UNKNOWN] ?? 0;
+    const recognizedTotal = stats.totalFiles - unknownCount;
+
     lines.push('### Languages');
-    if (stats.totalFiles === 0) {
-      lines.push('- (no files indexed)');
+    if (recognizedTotal === 0) {
+      lines.push('- (no source files indexed)');
     } else {
-      const langs = Object.entries(stats.filesByLanguage).sort(
-        (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
-      );
+      const langs = Object.entries(stats.filesByLanguage)
+        .filter(([lang]) => lang !== LANGUAGE_UNKNOWN)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
       for (const [lang, count] of langs) {
-        const pct = Math.round((count / stats.totalFiles) * 100);
+        const pct = Math.round((count / recognizedTotal) * 100);
         lines.push(
           `- ${displayLanguage(lang)}: ${count} ${plural('file', count)} (${pct}%)`,
         );
       }
     }
     lines.push('');
+
+    if (unknownCount > 0) {
+      lines.push('### Other files');
+      const topExts = topUnknownExtensions(allFiles, MAX_OTHER_EXTENSIONS);
+      const detail = topExts.length > 0 ? ` (${topExts.join(', ')})` : '';
+      lines.push(
+        `- ${unknownCount} ${plural('file', unknownCount)} not parsed${detail}`,
+      );
+      lines.push('');
+    }
 
     lines.push('### Structure');
     const groups = groupFilesByDirectory(allFiles, deps.index);
@@ -150,6 +170,20 @@ export async function runOverview(
 
 function displayLanguage(lang: string): string {
   return LANGUAGE_DISPLAY[lang] ?? capitalize(lang);
+}
+
+function topUnknownExtensions(files: FileInfo[], limit: number): string[] {
+  const counts = new Map<string, number>();
+  for (const f of files) {
+    if (f.language !== LANGUAGE_UNKNOWN) continue;
+    const ext = extname(f.path).toLowerCase();
+    const key = ext === '' ? '(no ext)' : ext;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([ext]) => ext);
 }
 
 function capitalize(s: string): string {
@@ -311,15 +345,10 @@ async function collectEntryPoints(
   projectRoot: string,
 ): Promise<EntryPoint[]> {
   const candidates = new Map<string, EntryPoint>();
-  const indexed = new Set(allFiles.map((f) => f.path));
 
-  // package.json entries are inserted first so they survive cap-clipping
-  // in barrel-heavy monorepos.
-  const pkgPaths = await readPackageJsonEntries(projectRoot);
-  const resolvedPkg = pkgPaths
-    .map((p) => resolveIndexedPath(p, indexed))
-    .filter((r): r is string => r !== undefined);
-  insertCandidates(candidates, resolvedPkg, index);
+  // Restrict to parseable files so package.json self-export patterns like
+  // `"./package.json": "./package.json"` don't resolve and pollute the list.
+  const indexed = new Set<string>();
 
   // Split entry-name files: non-barrels (main.py, server.ts) take
   // precedence over barrels (__init__.py, index.ts). Without the split,
@@ -329,6 +358,7 @@ async function collectEntryPoints(
   const nonBarrelEntries: FileInfo[] = [];
   const barrelEntries: FileInfo[] = [];
   for (const f of allFiles) {
+    if (f.language !== LANGUAGE_UNKNOWN) indexed.add(f.path);
     const name = basename(f.path);
     if (!ENTRY_POINT_FILENAME_RE.test(name)) continue;
     if (BARREL_ENTRY_RE.test(name)) barrelEntries.push(f);
@@ -336,6 +366,14 @@ async function collectEntryPoints(
   }
   nonBarrelEntries.sort(compareShallowFirst);
   barrelEntries.sort(compareShallowFirst);
+
+  // package.json entries are inserted first so they survive cap-clipping
+  // in barrel-heavy monorepos.
+  const pkgPaths = await readPackageJsonEntries(projectRoot);
+  const resolvedPkg = pkgPaths
+    .map((p) => resolveIndexedPath(p, indexed))
+    .filter((r): r is string => r !== undefined);
+  insertCandidates(candidates, resolvedPkg, index);
 
   if (candidates.size < MAX_ENTRY_POINTS) {
     insertCandidates(candidates, nonBarrelEntries.map((f) => f.path), index);

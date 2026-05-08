@@ -16,6 +16,11 @@ export type SymbolKind =
 
 export type RefKind = 'calls' | 'imports' | 'implements' | 'type_ref';
 
+// Sentinel language tag for files whose extension we don't recognize.
+// They're recorded as FileInfo (so overview can report them) but skipped
+// at parse/extract time.
+export const LANGUAGE_UNKNOWN = 'unknown' as const;
+
 export interface Symbol {
   id: string;
   name: string;

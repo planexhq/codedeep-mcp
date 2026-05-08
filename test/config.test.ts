@@ -1,13 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 
-import { loadConfig } from '../src/config.js';
-import { makeProjectDir } from './helpers.js';
+import {
+  defaultCacheDir,
+  fallbackCacheDir,
+  loadConfig,
+  resolveCacheDir,
+} from '../src/config.js';
+import {
+  makeProjectDir,
+  silenceStderr,
+  skipOnWindows,
+  withChmod,
+} from './helpers.js';
 
+// The last two entries (`.probe/cache`, `.probe/cache/**`) are derived by
+// loadConfig from the default cacheDir, not hard-coded in DEFAULT_EXCLUDES.
 const EXPECTED_DEFAULT_EXCLUDES = [
   'node_modules',
   '.git',
+  '.probe',
   '__pycache__',
   '.venv',
   'dist',
@@ -19,6 +34,8 @@ const EXPECTED_DEFAULT_EXCLUDES = [
   '__generated__',
   '*.min.js',
   '*.bundle.js',
+  '.probe/cache',
+  '.probe/cache/**',
 ];
 
 const EXPECTED_DEFAULT_LANGUAGES = ['typescript', 'tsx', 'javascript', 'python'];
@@ -242,4 +259,208 @@ describe('loadConfig', () => {
 
     expect(cfg.cacheDir).toBe(resolve('/custom/cache'));
   });
+
+  it('PROBE_CACHE_DIR inside projectRoot is added to the exclude list', () => {
+    vi.stubEnv('PROBE_CACHE_DIR', 'cache');
+    const cfg = loadConfig(root);
+    expect(cfg.exclude).toContain('cache');
+    expect(cfg.exclude).toContain('cache/**');
+  });
+
+  it('nested in-project cacheDir produces both literal and /** patterns', () => {
+    vi.stubEnv('PROBE_CACHE_DIR', 'tmp/probe-cache');
+    const cfg = loadConfig(root);
+    expect(cfg.exclude).toContain('tmp/probe-cache');
+    expect(cfg.exclude).toContain('tmp/probe-cache/**');
+  });
+
+  it('outside-root cacheDir does not pollute the exclude list', () => {
+    vi.stubEnv('PROBE_CACHE_DIR', '/tmp/elsewhere');
+    const cfg = loadConfig(root);
+    expect(cfg.exclude).not.toContain('/tmp/elsewhere');
+    expect(cfg.exclude).not.toContain('/tmp/elsewhere/**');
+    expect(cfg.exclude.filter((e) => e.startsWith('/'))).toEqual([]);
+  });
+
+  it('throws when PROBE_CACHE_DIR resolves to projectRoot', () => {
+    vi.stubEnv('PROBE_CACHE_DIR', '.');
+    expect(() => loadConfig(root)).toThrow(/resolves to the project root/);
+  });
+
+  it('throws when cacheDir in config file resolves to projectRoot', () => {
+    writeConfig(root, JSON.stringify({ cacheDir: '.' }));
+    expect(() => loadConfig(root)).toThrow(/resolves to the project root/);
+  });
+});
+
+describe('resolveCacheDir', () => {
+  let root: string;
+  let createdFallbacks: string[] = [];
+
+  beforeEach(() => {
+    root = makeProjectDir('probe-resolvecache-');
+    createdFallbacks = [];
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    for (const dir of createdFallbacks) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    vi.unstubAllEnvs();
+  });
+
+  it('returns the configured cacheDir when it is writable', async () => {
+    const cfg = loadConfig(root);
+    const resolved = await resolveCacheDir(cfg);
+    expect(resolved).toBe(cfg.cacheDir);
+    expect(existsSync(cfg.cacheDir)).toBe(true);
+  });
+
+  it('exposes a stable hash-based fallback path for the project', () => {
+    const expected = join(
+      homedir(),
+      '.cache',
+      'probe',
+      createHash('sha1').update(resolve(root)).digest('hex').slice(0, 16),
+    );
+    expect(fallbackCacheDir(resolve(root))).toBe(expected);
+  });
+
+  it.skipIf(skipOnWindows)(
+    'falls back to ~/.cache/probe/<hash>/ when the default path is not writable',
+    async () => {
+      const probeDir = join(root, '.probe');
+      mkdirSync(probeDir, { recursive: true });
+      silenceStderr();
+
+      // Read+execute but NOT write — mkdir of cache/ subdir will fail.
+      await withChmod(probeDir, 0o500, async () => {
+        const cfg = loadConfig(root);
+        expect(cfg.cacheDir).toBe(defaultCacheDir(resolve(root)));
+
+        const resolved = await resolveCacheDir(cfg);
+        const expectedFallback = fallbackCacheDir(resolve(root));
+        createdFallbacks.push(expectedFallback);
+
+        expect(resolved).toBe(expectedFallback);
+        expect(existsSync(expectedFallback)).toBe(true);
+      });
+    },
+  );
+
+  it.skipIf(skipOnWindows)(
+    'throws when an explicit PROBE_CACHE_DIR override is not writable',
+    async () => {
+      const blocked = join(root, 'blocked');
+      mkdirSync(blocked, { recursive: true });
+      vi.stubEnv('PROBE_CACHE_DIR', join(blocked, 'cache'));
+      silenceStderr();
+
+      await withChmod(blocked, 0o500, async () => {
+        const cfg = loadConfig(root);
+        await expect(resolveCacheDir(cfg)).rejects.toMatchObject({
+          code: expect.stringMatching(/^EACCES|EROFS|EPERM$/),
+        });
+      });
+    },
+  );
+
+  it('rethrows non-permission errors unchanged for explicit overrides', async () => {
+    // Pointing cacheDir at a path under an existing FILE makes mkdir fail
+    // with ENOTDIR. For an explicit PROBE_CACHE_DIR override, this must
+    // surface so the user notices their misconfig — not silently fall back.
+    const blockingFile = join(root, 'not-a-dir');
+    writeFileSync(blockingFile, 'x', 'utf8');
+    vi.stubEnv('PROBE_CACHE_DIR', join(blockingFile, 'cache'));
+
+    const cfg = loadConfig(root);
+    await expect(resolveCacheDir(cfg)).rejects.toMatchObject({
+      code: 'ENOTDIR',
+    });
+  });
+
+  it('falls back when the default .probe path is a regular file (ENOTDIR)', async () => {
+    // `.probe` as a regular file produces ENOTDIR; default-path policy
+    // is to fall back rather than die.
+    writeFileSync(join(root, '.probe'), 'i-am-a-file', 'utf8');
+    silenceStderr();
+
+    const cfg = loadConfig(root);
+    expect(cfg.cacheDir).toBe(defaultCacheDir(resolve(root)));
+
+    const resolved = await resolveCacheDir(cfg);
+    const expectedFallback = fallbackCacheDir(resolve(root));
+    createdFallbacks.push(expectedFallback);
+
+    expect(resolved).toBe(expectedFallback);
+    expect(existsSync(expectedFallback)).toBe(true);
+  });
+
+  it.skipIf(skipOnWindows)(
+    'falls back when the default cacheDir already exists but is not writable',
+    async () => {
+      // mkdir({ recursive: true }) is idempotent — without an explicit
+      // writability probe it returns success on a pre-existing 0o500
+      // directory and the next save() fails. Cover that case.
+      const cacheDir = defaultCacheDir(resolve(root));
+      mkdirSync(cacheDir, { recursive: true });
+      silenceStderr();
+
+      await withChmod(cacheDir, 0o500, async () => {
+        const cfg = loadConfig(root);
+        const resolved = await resolveCacheDir(cfg);
+        const expectedFallback = fallbackCacheDir(resolve(root));
+        createdFallbacks.push(expectedFallback);
+
+        expect(resolved).toBe(expectedFallback);
+        expect(existsSync(expectedFallback)).toBe(true);
+      });
+    },
+  );
+
+  it.skipIf(skipOnWindows)(
+    'falls back when the default cacheDir exists with write but no search permission',
+    async () => {
+      // POSIX requires X on a dir to create files inside it. A W-only dir
+      // (mode 0o200) passes a bare W_OK probe but fails open(O_CREAT) in
+      // CodeIndex.save. resolveCacheDir must probe both bits.
+      const cacheDir = defaultCacheDir(resolve(root));
+      mkdirSync(cacheDir, { recursive: true });
+      silenceStderr();
+
+      await withChmod(cacheDir, 0o200, async () => {
+        const cfg = loadConfig(root);
+        const resolved = await resolveCacheDir(cfg);
+        const expectedFallback = fallbackCacheDir(resolve(root));
+        createdFallbacks.push(expectedFallback);
+
+        expect(resolved).toBe(expectedFallback);
+        expect(existsSync(expectedFallback)).toBe(true);
+      });
+    },
+  );
+
+  it.skipIf(skipOnWindows)(
+    'wraps the error when the fallback path exists but is not writable',
+    async () => {
+      const probeDir = join(root, '.probe');
+      mkdirSync(probeDir, { recursive: true });
+
+      const fallback = fallbackCacheDir(resolve(root));
+      mkdirSync(fallback, { recursive: true });
+      createdFallbacks.push(fallback);
+      silenceStderr();
+
+      await withChmod(probeDir, 0o500, async () => {
+        await withChmod(fallback, 0o500, async () => {
+          const cfg = loadConfig(root);
+          await expect(resolveCacheDir(cfg)).rejects.toMatchObject({
+            message: expect.stringContaining('Cache fallback'),
+            code: expect.stringMatching(/^EACCES|EROFS|EPERM$/),
+          });
+        });
+      });
+    },
+  );
 });

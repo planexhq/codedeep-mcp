@@ -1,9 +1,11 @@
-import { readdir, stat } from 'node:fs/promises';
+import { open, readdir, stat } from 'node:fs/promises';
 import { join, relative, sep, posix } from 'node:path';
 import picomatch from 'picomatch';
 
-import type { FileInfo, ProbeConfig } from '../types.js';
+import { LANGUAGE_UNKNOWN, type FileInfo, type ProbeConfig } from '../types.js';
 import { log } from '../logger.js';
+
+const BYTE_CHECK_BUF_SIZE = 8192;
 
 const LANGUAGE_BY_EXT: Record<string, string> = {
   '.ts': 'typescript',
@@ -38,6 +40,23 @@ export function detectLanguage(filename: string): string | null {
 
 export function isBinaryByExtension(filename: string): boolean {
   return BINARY_EXT.has(posix.extname(toPosix(filename)).toLowerCase());
+}
+
+// Reads up to 8KB from absPath and returns true on the first null byte.
+// Mirrors git's "any NUL in the prefix means binary" heuristic. Used only
+// for unknown-extension files; trusted source extensions skip this I/O.
+export async function isBinaryByContent(absPath: string): Promise<boolean> {
+  const fh = await open(absPath, 'r');
+  try {
+    const buf = Buffer.alloc(BYTE_CHECK_BUF_SIZE);
+    const { bytesRead } = await fh.read(buf, 0, BYTE_CHECK_BUF_SIZE, 0);
+    for (let i = 0; i < bytesRead; i++) {
+      if (buf[i] === 0) return true;
+    }
+    return false;
+  } finally {
+    await fh.close();
+  }
 }
 
 export function compileExcludeMatcher(
@@ -120,15 +139,20 @@ export async function scanProject(config: ProbeConfig): Promise<ScanResult> {
   const matchExclude = compileExcludeMatcher(config.exclude);
   const langSet = new Set(config.languages);
   const root = config.projectRoot;
+  const cap =
+    config.maxFiles > 0 ? config.maxFiles : Number.MAX_SAFE_INTEGER;
 
-  const results: FileInfo[] = [];
+  // parseable claims every cap slot first; unknowns fill residual budget.
+  // Without this split, readdir order alone could let overview-only files
+  // exhaust a tight maxFiles before src/ is even walked.
+  const parseable: FileInfo[] = [];
+  const unknown: FileInfo[] = [];
   const state = { complete: true };
 
   for await (const { absPath, relPath } of walk(root, root, matchExclude, state)) {
-    // 0 means unlimited per the documented schema (DESIGN.md, README).
-    if (config.maxFiles > 0 && results.length >= config.maxFiles) {
+    if (parseable.length >= cap) {
       log.warn(
-        `scanner: reached maxFiles=${config.maxFiles}; remaining files skipped`,
+        `scanner: reached maxFiles=${cap}; remaining files skipped`,
       );
       break;
     }
@@ -136,9 +160,23 @@ export async function scanProject(config: ProbeConfig): Promise<ScanResult> {
     if (matchExclude(relPath)) continue;
     if (isBinaryByExtension(relPath)) continue;
 
-    const language = detectLanguage(relPath);
-    if (language === null) continue;
-    if (!langSet.has(language)) continue;
+    const language = detectLanguage(relPath) ?? LANGUAGE_UNKNOWN;
+    // Recognized-but-unconfigured languages are dropped; unknown files are
+    // kept (subject to residual budget) so overview can surface them.
+    if (language !== LANGUAGE_UNKNOWN && !langSet.has(language)) continue;
+
+    if (language === LANGUAGE_UNKNOWN) {
+      if (unknown.length >= cap - parseable.length) continue;
+      try {
+        if (await isBinaryByContent(absPath)) continue;
+      } catch (err) {
+        state.complete = false;
+        log.warn(
+          `scanner: byte check failed for ${relPath}: ${(err as Error).message}`,
+        );
+        continue;
+      }
+    }
 
     let stats;
     try {
@@ -156,16 +194,20 @@ export async function scanProject(config: ProbeConfig): Promise<ScanResult> {
       continue;
     }
 
-    results.push({
+    const fileInfo: FileInfo = {
       path: relPath,
       language,
       size: stats.size,
       lastModified: stats.mtimeMs,
       lastIndexed: 0,
       symbolCount: 0,
-    });
+    };
+    if (language === LANGUAGE_UNKNOWN) unknown.push(fileInfo);
+    else parseable.push(fileInfo);
   }
 
+  const remaining = Math.max(0, cap - parseable.length);
+  const results = parseable.concat(unknown.slice(0, remaining));
   results.sort(compareShallowFirst);
 
   return { files: results, complete: state.complete };

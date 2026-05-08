@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { vi } from 'vitest';
@@ -11,11 +11,14 @@ export function makeProjectDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
-export function writeTree(root: string, files: Record<string, string>): void {
+export function writeTree(
+  root: string,
+  files: Record<string, string | Buffer>,
+): void {
   for (const [relPath, content] of Object.entries(files)) {
     const abs = join(root, relPath);
     mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, content, 'utf8');
+    writeFileSync(abs, content);
   }
 }
 
@@ -27,6 +30,20 @@ export const skipOnWindows = process.platform === 'win32';
 
 export function silenceStderr() {
   return vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+}
+
+export async function withChmod<T>(
+  path: string,
+  mode: number,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const original = statSync(path).mode;
+  chmodSync(path, mode);
+  try {
+    return await fn();
+  } finally {
+    chmodSync(path, original);
+  }
 }
 
 export function makeConfig(

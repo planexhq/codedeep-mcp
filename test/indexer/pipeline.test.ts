@@ -98,6 +98,33 @@ describe('Indexer.indexAll', () => {
     expect(index.getAllFiles().map((f) => f.path)).toEqual(['src/b.ts']);
   });
 
+  it('records unknown-language files but extracts no symbols', async () => {
+    writeTree(root, {
+      'src/a.ts': 'export function foo() {}\n',
+      'README.md': '# Hello\n',
+      'package.json': '{"name": "test"}\n',
+    });
+    const parseSpy = vi.spyOn(parserModule, 'parseFile');
+
+    await indexer.indexAll();
+
+    const files = index.getAllFiles();
+    const byPath = new Map(files.map((f) => [f.path, f]));
+    expect(byPath.get('README.md')?.language).toBe('unknown');
+    expect(byPath.get('package.json')?.language).toBe('unknown');
+    expect(byPath.get('README.md')?.symbolCount).toBe(0);
+    expect(byPath.get('README.md')?.lastIndexed).toBeGreaterThan(0);
+    expect(index.getSymbolsInFile('README.md')).toEqual([]);
+    expect(index.getStats().filesByLanguage).toMatchObject({
+      typescript: 1,
+      unknown: 2,
+    });
+
+    // Parser must NOT have been invoked for unknown-language files.
+    const parsedLangs = parseSpy.mock.calls.map((c) => c[1]);
+    expect(parsedLangs).not.toContain('unknown');
+  });
+
   it('save() failure is non-fatal and isIndexing returns to false', async () => {
     writeTree(root, { 'src/a.ts': 'export function foo() {}\n' });
     vi.spyOn(index, 'save').mockRejectedValue(new Error('disk full'));
@@ -391,16 +418,49 @@ describe('Indexer.indexFile', () => {
     expect(index.findSymbolByName('foo')).toHaveLength(1);
   });
 
-  it('skips unsupported extensions and binaries', async () => {
-    writeTree(root, {
-      'README.md': '# hi',
-      'logo.png': 'fake',
-    });
+  it('skips files with binary extensions', async () => {
+    writeTree(root, { 'logo.png': 'fake' });
 
-    await indexer.indexFile('README.md');
     await indexer.indexFile('logo.png');
 
     expect(index.getStats().totalFiles).toBe(0);
+  });
+
+  it('records an unknown-language text file as language=unknown', async () => {
+    writeTree(root, { 'README.md': '# hi' });
+
+    await indexer.indexFile('README.md');
+
+    const files = index.getAllFiles();
+    expect(files).toHaveLength(1);
+    expect(files[0].path).toBe('README.md');
+    expect(files[0].language).toBe('unknown');
+    expect(index.getStats().totalSymbols).toBe(0);
+  });
+
+  it('removes an unknown-language file mutated to a binary blob', async () => {
+    writeTree(root, { 'NOTES.txt': 'hello world\n' });
+    await indexer.indexFile('NOTES.txt');
+    expect(index.getAllFiles().map((f) => f.path)).toContain('NOTES.txt');
+
+    writeFileSync(
+      join(root, 'NOTES.txt'),
+      Buffer.from([0x00, 0x01, 0x02, 0x00, 0x03]),
+    );
+    await indexer.indexFile('NOTES.txt');
+
+    expect(index.getAllFiles().some((f) => f.path === 'NOTES.txt')).toBe(false);
+  });
+
+  it('treats a missing unknown-language file as a deletion', async () => {
+    writeTree(root, { 'README.md': '# hi' });
+    await indexer.indexFile('README.md');
+    expect(index.getAllFiles().map((f) => f.path)).toContain('README.md');
+
+    rmSync(join(root, 'README.md'));
+    await indexer.indexFile('README.md');
+
+    expect(index.getAllFiles().some((f) => f.path === 'README.md')).toBe(false);
   });
 
   it('drops stale symbols when extractSymbols throws', async () => {

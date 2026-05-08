@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 
 import {
   compileExcludeMatcher,
   depthOf,
   detectLanguage,
+  isBinaryByContent,
   isBinaryByExtension,
   scanProject,
   toPosix,
@@ -15,6 +16,7 @@ import {
   makeProjectDir,
   silenceStderr,
   skipOnWindows,
+  withChmod,
   writeTree,
 } from '../helpers.js';
 
@@ -40,6 +42,41 @@ describe('scanner helpers', () => {
       expect(detectLanguage('a.rs')).toBeNull();
       expect(detectLanguage('Makefile')).toBeNull();
       expect(detectLanguage('LICENSE')).toBeNull();
+    });
+  });
+
+  describe('isBinaryByContent', () => {
+    let root: string;
+
+    beforeEach(() => {
+      root = makeProjectDir('probe-isbinary-test-');
+    });
+
+    afterEach(() => {
+      rmSync(root, { recursive: true, force: true });
+    });
+
+    it('returns true when the first 8KB contains a null byte', async () => {
+      const buf = Buffer.from('hello\0world');
+      writeFileSync(join(root, 'fake.bin'), buf);
+      expect(await isBinaryByContent(join(root, 'fake.bin'))).toBe(true);
+    });
+
+    it('returns false for plain UTF-8 text', async () => {
+      writeFileSync(join(root, 'plain.txt'), 'hello world\n');
+      expect(await isBinaryByContent(join(root, 'plain.txt'))).toBe(false);
+    });
+
+    it('returns false for an empty file', async () => {
+      writeFileSync(join(root, 'empty.txt'), '');
+      expect(await isBinaryByContent(join(root, 'empty.txt'))).toBe(false);
+    });
+
+    it('only inspects the first 8KB; null bytes past the prefix are ignored', async () => {
+      const head = Buffer.alloc(8192, 0x61); // 8KB of 'a'
+      const tail = Buffer.from([0]);
+      writeFileSync(join(root, 'late-null.txt'), Buffer.concat([head, tail]));
+      expect(await isBinaryByContent(join(root, 'late-null.txt'))).toBe(false);
     });
   });
 
@@ -149,7 +186,7 @@ describe('scanProject', () => {
     expect(files).toHaveLength(7);
   });
 
-  it('skips files with no extension or unknown extension', async () => {
+  it("records unknown-extension files with language='unknown'", async () => {
     writeTree(root, {
       'a.ts': '',
       'Makefile': '',
@@ -158,7 +195,34 @@ describe('scanProject', () => {
       'lib.rs': '',
     });
     const { files } = await scanProject(makeConfig(root));
-    expect(files.map((f) => f.path)).toEqual(['a.ts']);
+    const byPath = new Map(files.map((f) => [f.path, f.language]));
+    expect(byPath.get('a.ts')).toBe('typescript');
+    expect(byPath.get('Makefile')).toBe('unknown');
+    expect(byPath.get('README')).toBe('unknown');
+    expect(byPath.get('main.go')).toBe('unknown');
+    expect(byPath.get('lib.rs')).toBe('unknown');
+    expect(files).toHaveLength(5);
+  });
+
+  it('skips unknown-extension files containing a null byte', async () => {
+    writeTree(root, {
+      'a.ts': '',
+      'image.bin': Buffer.from('he\0llo'),
+    });
+    const { files } = await scanProject(makeConfig(root));
+    const paths = files.map((f) => f.path).sort();
+    expect(paths).toEqual(['a.ts']);
+  });
+
+  it('records non-binary unknown files alongside null-byte files being skipped', async () => {
+    writeTree(root, {
+      'README.md': '# Hello\n',
+      'data.bin': Buffer.from([0x00, 0xff, 0xff]),
+    });
+    const { files } = await scanProject(makeConfig(root));
+    const paths = files.map((f) => f.path).sort();
+    expect(paths).toEqual(['README.md']);
+    expect(files[0].language).toBe('unknown');
   });
 
   it('skips files with binary extensions', async () => {
@@ -268,6 +332,44 @@ describe('scanProject', () => {
     expect(capWarns).toHaveLength(0);
   });
 
+  it('prefers parseable files over unknowns when maxFiles is tight', async () => {
+    // Mixed unknowns at root + a parseable nested in src/ — regardless of
+    // readdir order, the one budget slot must go to the parseable source.
+    writeTree(root, {
+      'README.md': '# hello\n',
+      'NOTICE': 'note\n',
+      'CHANGELOG': 'log\n',
+      'src/a.ts': 'export const x = 1;\n',
+    });
+    silenceStderr();
+    const cfg = makeConfig(root, { maxFiles: 1 });
+    const { files } = await scanProject(cfg);
+    expect(files.map((f) => f.path)).toEqual(['src/a.ts']);
+  });
+
+  it('admits unknowns into remaining budget after parseable', async () => {
+    writeTree(root, {
+      'src/a.ts': 'export const x = 1;\n',
+      'README.md': '# hi\n',
+    });
+    const cfg = makeConfig(root, { maxFiles: 2 });
+    const { files } = await scanProject(cfg);
+    expect(files.map((f) => f.path)).toEqual(['README.md', 'src/a.ts']);
+  });
+
+  it('caps total when parseable is small but unknown count is large', async () => {
+    const tree: Record<string, string> = {
+      'src/a.ts': 'export const x = 1;\n',
+    };
+    for (let i = 0; i < 10; i++) tree[`unknown${i}.txt`] = 'text';
+    writeTree(root, tree);
+    silenceStderr();
+    const cfg = makeConfig(root, { maxFiles: 5 });
+    const { files } = await scanProject(cfg);
+    expect(files).toHaveLength(5);
+    expect(files.map((f) => f.path)).toContain('src/a.ts');
+  });
+
   it('FileInfo.path uses forward slashes regardless of platform', async () => {
     writeTree(root, { 'src/sub/deep/a.ts': '' });
     const { files } = await scanProject(makeConfig(root));
@@ -345,14 +447,9 @@ describe('scanProject', () => {
         'src/a.ts': '',
         'node_modules/foo.ts': '',
       });
-      const blocked = join(root, 'node_modules');
-      const originalMode = statSync(blocked).mode;
-      chmodSync(blocked, 0o000);
-      const stderr = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
+      const stderr = silenceStderr();
 
-      try {
+      await withChmod(join(root, 'node_modules'), 0o000, async () => {
         const { files } = await scanProject(makeConfig(root));
         expect(files.map((f) => f.path)).toEqual(['src/a.ts']);
 
@@ -361,10 +458,7 @@ describe('scanProject', () => {
           return s.includes('readdir failed') && s.includes('node_modules');
         });
         expect(readdirFailures).toHaveLength(0);
-      } finally {
-        chmodSync(blocked, originalMode);
-        stderr.mockRestore();
-      }
+      });
     },
   );
 
@@ -375,24 +469,58 @@ describe('scanProject', () => {
   });
 
   it.skipIf(skipOnWindows)(
+    'reports complete:false when byte check fails on an unknown-extension file',
+    async () => {
+      writeTree(root, {
+        'a.ts': '',
+        'unreadable.bin': Buffer.from('plain'),
+      });
+      silenceStderr();
+
+      await withChmod(join(root, 'unreadable.bin'), 0o000, async () => {
+        const result = await scanProject(makeConfig(root));
+        expect(result.complete).toBe(false);
+        expect(result.files.map((f) => f.path)).toEqual(['a.ts']);
+      });
+    },
+  );
+
+  it.skipIf(skipOnWindows)(
     'reports complete:false when readdir fails on a non-excluded dir',
     async () => {
       writeTree(root, {
         'src/a.ts': '',
         'extra/b.ts': '',
       });
-      const blocked = join(root, 'extra');
-      const originalMode = statSync(blocked).mode;
-      chmodSync(blocked, 0o000);
       silenceStderr();
 
-      try {
+      await withChmod(join(root, 'extra'), 0o000, async () => {
         const result = await scanProject(makeConfig(root));
         expect(result.complete).toBe(false);
         expect(result.files.map((f) => f.path)).toEqual(['src/a.ts']);
-      } finally {
-        chmodSync(blocked, originalMode);
-      }
+      });
     },
   );
+
+  it('does not index files inside an in-project cacheDir', async () => {
+    // Without auto-excluding the configured cacheDir, scanProject admits
+    // cache/index.json as an unknown-language file. The indexer would then
+    // record its mtime, persist() would bump that mtime, and every later
+    // indexChanged() would re-index the cache forever.
+    writeTree(root, {
+      'src/a.ts': 'export const x = 1;\n',
+      'cache/index.json': '{"junk":true}\n',
+      'cache/index.json.tmp.123.456': '{}\n',
+    });
+    vi.stubEnv('PROBE_CACHE_DIR', 'cache');
+    try {
+      const cfg = makeConfig(root);
+      const { files } = await scanProject(cfg);
+      const paths = files.map((f) => f.path);
+      expect(paths).toContain('src/a.ts');
+      expect(paths.find((p) => p.startsWith('cache/'))).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });

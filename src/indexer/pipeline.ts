@@ -2,13 +2,14 @@ import { promises as fs } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 
 import { errMsg, log } from '../logger.js';
-import type { FileInfo, ProbeConfig } from '../types.js';
+import { LANGUAGE_UNKNOWN, type FileInfo, type ProbeConfig } from '../types.js';
 import { CodeIndex } from './code-index.js';
 import { extractSymbols } from './extractor.js';
 import { initParser, parseFile, type Tree } from './parser.js';
 import {
   compileExcludeMatcher,
   detectLanguage,
+  isBinaryByContent,
   isBinaryByExtension,
   scanProject,
   toPosix,
@@ -142,10 +143,9 @@ export class Indexer {
         this.index.removeFile(relPath);
         return;
       }
-      const language = detectLanguage(relPath);
-      if (!language) return;
-      if (!this.config.languages.includes(language)) return;
 
+      // Stat before language detection so deletions and size-cap rejections
+      // remove cached entries even for unknown-language files.
       const absPath = join(this.config.projectRoot, relPath);
       let stats;
       try {
@@ -168,6 +168,29 @@ export class Indexer {
           `Indexer.indexFile: skip ${relPath} (size ${stats.size} > maxFileSize ${this.config.maxFileSize})`,
         );
         return;
+      }
+
+      const language = detectLanguage(relPath) ?? LANGUAGE_UNKNOWN;
+      if (
+        language !== LANGUAGE_UNKNOWN &&
+        !this.config.languages.includes(language)
+      ) {
+        this.index.removeFile(relPath);
+        return;
+      }
+      if (language === LANGUAGE_UNKNOWN) {
+        try {
+          if (await isBinaryByContent(absPath)) {
+            this.index.removeFile(relPath);
+            return;
+          }
+        } catch (err) {
+          this.index.removeFile(relPath);
+          log.warn(
+            `Indexer.indexFile: byte check failed for ${relPath}: ${errMsg(err)}`,
+          );
+          return;
+        }
       }
 
       const file: FileInfo = {
@@ -213,6 +236,18 @@ export class Indexer {
   }
 
   private async processFile(file: FileInfo): Promise<void> {
+    // Recorded for audit but never parsed — keeps overview's "Other files"
+    // count accurate without invoking the parser on unsupported grammars.
+    if (file.language === LANGUAGE_UNKNOWN) {
+      this.index.updateFile(
+        { ...file, lastIndexed: Date.now() },
+        [],
+        [],
+        [],
+      );
+      return;
+    }
+
     const absPath = join(this.config.projectRoot, file.path);
 
     let content: string;

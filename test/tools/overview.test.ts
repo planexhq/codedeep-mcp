@@ -87,6 +87,56 @@ describe('runOverview — basic rendering', () => {
     expect(text).toContain('- 3 files indexed, 4 total symbols');
   });
 
+  it("excludes 'unknown' files from language percentages and reports them in Other files", async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [mkSym({ name: 'foo', file: 'src/a.ts' })],
+      [],
+      [],
+    );
+    idx.addFile(makeFileInfo('python', 'pkg/main.py'), [], [], []);
+    idx.addFile(makeFileInfo('unknown', 'README.md'), [], [], []);
+    idx.addFile(makeFileInfo('unknown', 'package.json'), [], [], []);
+    idx.addFile(makeFileInfo('unknown', 'pnpm-lock.yaml'), [], [], []);
+
+    const result = await runOverview({}, makeDeps(idx));
+    const text = result.content[0].text;
+
+    // % computed over recognized files only (1 ts + 1 py = 2 source files).
+    expect(text).toContain('- TypeScript: 1 file (50%)');
+    expect(text).toContain('- Python: 1 file (50%)');
+    expect(text).not.toMatch(/Unknown:/);
+
+    expect(text).toContain('### Other files');
+    expect(text).toMatch(/- 3 files not parsed \(.+\)/);
+    expect(text).toContain('.md');
+    expect(text).toContain('.json');
+    expect(text).toContain('.yaml');
+  });
+
+  it('omits the Other files section when no unknown-language files exist', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+
+    const result = await runOverview({}, makeDeps(idx));
+    expect(result.content[0].text).not.toContain('### Other files');
+  });
+
+  it("renders '(no source files indexed)' when only unknown files exist", async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('unknown', 'README.md'), [], [], []);
+    idx.addFile(makeFileInfo('unknown', 'LICENSE'), [], [], []);
+
+    const result = await runOverview({}, makeDeps(idx));
+    const text = result.content[0].text;
+
+    expect(text).toContain('- (no source files indexed)');
+    expect(text).toContain('### Other files');
+    expect(text).toMatch(/- 2 files not parsed/);
+    expect(text).toContain('(no ext)');
+  });
+
   it('uses singular forms when counts are 1', async () => {
     const idx = new CodeIndex(tmpRoot);
     idx.addFile(
@@ -630,6 +680,31 @@ describe('runOverview — package.json exports field', () => {
     const text = result.content[0].text;
     const matches = text.match(/src\/index\.ts/g) ?? [];
     expect(matches.length).toBe(1);
+  });
+
+  it('does not surface package.json itself when exports self-reference it', async () => {
+    // Common Node pattern: `"./package.json": "./package.json"` lets
+    // consumers `require('pkg/package.json')`. The resolver must not
+    // match package.json against itself and list it as an entry point.
+    writeFileSync(
+      join(tmpRoot, 'package.json'),
+      JSON.stringify({
+        main: './src/index.ts',
+        exports: {
+          '.': './src/index.ts',
+          './package.json': './package.json',
+        },
+      }),
+      'utf8',
+    );
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('unknown', 'package.json'), [], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/index.ts'), [], [], []);
+
+    const result = await runOverview({}, makeDeps(idx));
+    const bullets = entryBullets(result.content[0].text);
+    expect(bullets.some((b) => b.includes('package.json'))).toBe(false);
+    expect(bullets.some((b) => b.includes('src/index.ts'))).toBe(true);
   });
 });
 

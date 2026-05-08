@@ -1,13 +1,28 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-import { loadConfig } from "./config.js";
+import { loadConfig, resolveCacheDir } from "./config.js";
 import { CodeIndex } from "./indexer/code-index.js";
 import { Indexer } from "./indexer/pipeline.js";
 import { errMsg, log } from "./logger.js";
 import { createServer } from "./server.js";
+import type { ProbeConfig } from "./types.js";
 
-const config = loadConfig();
+let initial: ProbeConfig;
+try {
+  initial = loadConfig();
+} catch (err) {
+  log.error(`probe-mcp: invalid config: ${errMsg(err)}`);
+  process.exit(1);
+}
+let cacheDir: string;
+try {
+  cacheDir = await resolveCacheDir(initial);
+} catch (err) {
+  log.error(`probe-mcp: failed to resolve cache directory: ${errMsg(err)}`);
+  process.exit(1);
+}
+const config = Object.freeze({ ...initial, cacheDir });
 const index = new CodeIndex(config.projectRoot);
 const indexer = new Indexer(config, index);
 
