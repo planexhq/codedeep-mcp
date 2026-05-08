@@ -175,15 +175,33 @@ describe('CodeIndex.findSymbolByName', () => {
     expect(idx.findSymbolByName('X', 'function')).toEqual([fn]);
   });
 
-  it('filters by scope (file path prefix)', () => {
+  it('filters by scope (directory prefix when scope ends with /)', () => {
     const idx = new CodeIndex();
     const a = mkSym({ name: 'X', file: 'src/foo/a.ts' });
     const b = mkSym({ name: 'X', file: 'src/bar/b.ts' });
     idx.addFile(makeFileInfo('typescript', 'src/foo/a.ts'), [a], [], []);
     idx.addFile(makeFileInfo('typescript', 'src/bar/b.ts'), [b], [], []);
 
-    expect(idx.findSymbolByName('X', undefined, 'src/foo')).toEqual([a]);
-    expect(idx.findSymbolByName('X', undefined, 'src/bar')).toEqual([b]);
+    expect(idx.findSymbolByName('X', undefined, 'src/foo/')).toEqual([a]);
+    expect(idx.findSymbolByName('X', undefined, 'src/bar/')).toEqual([b]);
+  });
+
+  it('treats file-shaped scope as exact path in findSymbolByName', () => {
+    const idx = new CodeIndex();
+    idx.addFile(
+      makeFileInfo('typescript', 'src/foo.ts'),
+      [mkSym({ name: 'shared', file: 'src/foo.ts' })],
+      [],
+      [],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/foo.tsx'),
+      [mkSym({ name: 'shared', file: 'src/foo.tsx' })],
+      [],
+      [],
+    );
+    const hits = idx.findSymbolByName('shared', undefined, 'src/foo.ts');
+    expect(hits.map((s) => s.file)).toEqual(['src/foo.ts']);
   });
 
   it('returns [] for unknown name', () => {
@@ -222,6 +240,94 @@ describe('CodeIndex.findSymbolsByPrefix', () => {
     expect(idx.findSymbolsByPrefix('', 10)).toEqual([]);
     expect(idx.findSymbolsByPrefix('foo', 0)).toEqual([]);
   });
+
+  it('applies kind and scope filters during the prefix walk', () => {
+    const idx = new CodeIndex();
+    idx.addFile(
+      makeFileInfo('typescript', 'src/auth/a.ts'),
+      [mkSym({ name: 'authA', file: 'src/auth/a.ts', kind: 'function' })],
+      [],
+      [],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/auth/b.ts'),
+      [mkSym({ name: 'authB', file: 'src/auth/b.ts', kind: 'class' })],
+      [],
+      [],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/other/c.ts'),
+      [mkSym({ name: 'authC', file: 'src/other/c.ts', kind: 'function' })],
+      [],
+      [],
+    );
+
+    expect(
+      idx.findSymbolsByPrefix('auth', 10, 'function').map((s) => s.name),
+    ).toEqual(['authA', 'authC']);
+    expect(
+      idx
+        .findSymbolsByPrefix('auth', 10, undefined, 'src/auth/')
+        .map((s) => s.name),
+    ).toEqual(['authA', 'authB']);
+    expect(
+      idx
+        .findSymbolsByPrefix('auth', 10, 'function', 'src/auth/')
+        .map((s) => s.name),
+    ).toEqual(['authA']);
+  });
+
+  it('matches case-insensitively against PascalCase symbols for a lowercase prefix', () => {
+    const idx = new CodeIndex();
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [
+        mkSym({ name: 'authenticate', file: 'src/a.ts', kind: 'function' }),
+        mkSym({ name: 'AuthToken', file: 'src/a.ts', kind: 'type' }),
+        mkSym({ name: 'Authentication', file: 'src/a.ts', kind: 'class' }),
+      ],
+      [],
+      [],
+    );
+    const names = idx.findSymbolsByPrefix('auth', 10).map((s) => s.name).sort();
+    expect(names).toEqual(['AuthToken', 'Authentication', 'authenticate']);
+  });
+
+  it('matches case-insensitively for an uppercase prefix', () => {
+    const idx = new CodeIndex();
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [
+        mkSym({ name: 'authenticate', file: 'src/a.ts', kind: 'function' }),
+        mkSym({ name: 'AuthToken', file: 'src/a.ts', kind: 'type' }),
+      ],
+      [],
+      [],
+    );
+    const names = idx.findSymbolsByPrefix('AUTH', 10).map((s) => s.name).sort();
+    expect(names).toEqual(['AuthToken', 'authenticate']);
+  });
+
+  it('treats file-shaped scope as exact path, not prefix', () => {
+    const idx = new CodeIndex();
+    idx.addFile(
+      makeFileInfo('typescript', 'src/foo.ts'),
+      [mkSym({ name: 'fooA', file: 'src/foo.ts' })],
+      [],
+      [],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/foo.tsx'),
+      [mkSym({ name: 'fooB', file: 'src/foo.tsx' })],
+      [],
+      [],
+    );
+    expect(
+      idx
+        .findSymbolsByPrefix('foo', 10, undefined, 'src/foo.ts')
+        .map((s) => s.name),
+    ).toEqual(['fooA']);
+  });
 });
 
 describe('CodeIndex.suggest', () => {
@@ -255,6 +361,54 @@ describe('CodeIndex.suggest', () => {
     );
     expect(idx.suggest('', 10)).toEqual([]);
   });
+
+  it('filters by kind so an in-kind match surfaces past higher-ranked out-of-kind hits', () => {
+    const idx = new CodeIndex();
+    // 30 functions named 'authentcate' (exact-name MiniSearch match,
+    // highest score) outrank the single fuzzy 'authenticte' class. With
+    // the prior implementation, the limit budget was spent on the 30
+    // functions and the class never surfaced under kind='class'.
+    for (let i = 0; i < 30; i++) {
+      const file = `src/funcs/${i}.ts`;
+      idx.addFile(
+        makeFileInfo('typescript', file),
+        [mkSym({ name: 'authentcate', file, kind: 'function' })],
+        [],
+        [],
+      );
+    }
+    idx.addFile(
+      makeFileInfo('typescript', 'src/cls.ts'),
+      [mkSym({ name: 'authenticte', file: 'src/cls.ts', kind: 'class' })],
+      [],
+      [],
+    );
+
+    const results = idx.suggest('authentcate', 5, 'class');
+    expect(results.map((s) => s.kind)).toEqual(['class']);
+  });
+
+  it('filters by scope so an in-scope match surfaces past higher-ranked out-of-scope hits', () => {
+    const idx = new CodeIndex();
+    for (let i = 0; i < 30; i++) {
+      const file = `src/other/${i}/auth.ts`;
+      idx.addFile(
+        makeFileInfo('typescript', file),
+        [mkSym({ name: 'authentcate', file, kind: 'function' })],
+        [],
+        [],
+      );
+    }
+    idx.addFile(
+      makeFileInfo('typescript', 'src/auth/main.ts'),
+      [mkSym({ name: 'authenticte', file: 'src/auth/main.ts', kind: 'function' })],
+      [],
+      [],
+    );
+
+    const results = idx.suggest('authentcate', 5, undefined, 'src/auth/');
+    expect(results.map((s) => s.file)).toEqual(['src/auth/main.ts']);
+  });
 });
 
 describe('CodeIndex query helpers', () => {
@@ -265,6 +419,17 @@ describe('CodeIndex query helpers', () => {
     const got = idx.getSymbolsInFile('src/test.ts');
     got.push(mkSym({ name: 'leak' }));
     expect(idx.getSymbolsInFile('src/test.ts')).toHaveLength(1);
+  });
+
+  it('hasFile reports true only for files added to the index', () => {
+    const idx = new CodeIndex();
+    idx.addFile(makeFileInfo('typescript', 'src/foo.ts'), [], [], []);
+    expect(idx.hasFile('src/foo.ts')).toBe(true);
+    expect(idx.hasFile('src/foo.tsx')).toBe(false);
+    expect(idx.hasFile('.storybook')).toBe(false);
+
+    idx.removeFile('src/foo.ts');
+    expect(idx.hasFile('src/foo.ts')).toBe(false);
   });
 
   it('getCallees / getCallers return [] for unknown id', () => {

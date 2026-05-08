@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import type { CodeIndex } from "./indexer/code-index.js";
 import type { Indexer } from "./indexer/pipeline.js";
+import { runFindSymbol } from "./tools/find-symbol.js";
 import { runOverview } from "./tools/overview.js";
 import type { ProbeConfig } from "./types.js";
 
@@ -84,7 +85,7 @@ export function createServer(deps: ServerDeps): McpServer {
       },
       annotations: SHARED_ANNOTATIONS,
     },
-    async (args) => stub("find_symbol", args),
+    async (args) => runFindSymbol(args, deps),
   );
 
   server.registerTool(

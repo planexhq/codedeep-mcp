@@ -50,6 +50,7 @@ export class CodeIndex {
   private callers = new Map<string, Set<string>>();
 
   private sortedNames: string[] = [];
+  private sortedNamesLower: string[] = [];
   private namesDirty = true;
   private searchIndex: MiniSearch<Symbol> | null = null;
 
@@ -127,32 +128,39 @@ export class CodeIndex {
   findSymbolByName(name: string, kind?: SymbolKind, scope?: string): Symbol[] {
     const list = this.symbolsByName.get(name);
     if (!list) return [];
-    return list.filter((s) => {
-      if (kind && s.kind !== kind) return false;
-      if (scope && !s.file.startsWith(scope)) return false;
-      return true;
-    });
+    return list.filter((s) => matchesKindScope(s, kind, scope));
   }
 
-  findSymbolsByPrefix(prefix: string, limit: number): Symbol[] {
+  findSymbolsByPrefix(
+    prefix: string,
+    limit: number,
+    kind?: SymbolKind,
+    scope?: string,
+  ): Symbol[] {
     if (!prefix || limit <= 0) return [];
     this.rebuildIndexesIfDirty();
-    const start = lowerBound(this.sortedNames, prefix);
+    const prefixLower = prefix.toLowerCase();
+    const start = lowerBound(this.sortedNamesLower, prefixLower);
     const out: Symbol[] = [];
-    for (let i = start; i < this.sortedNames.length && out.length < limit; i++) {
-      const name = this.sortedNames[i];
-      if (!name.startsWith(prefix)) break;
-      const syms = this.symbolsByName.get(name);
+    for (let i = start; i < this.sortedNamesLower.length && out.length < limit; i++) {
+      if (!this.sortedNamesLower[i].startsWith(prefixLower)) break;
+      const syms = this.symbolsByName.get(this.sortedNames[i]);
       if (!syms) continue;
       for (const s of syms) {
         if (out.length >= limit) break;
+        if (!matchesKindScope(s, kind, scope)) continue;
         out.push(s);
       }
     }
     return out;
   }
 
-  suggest(query: string, limit: number): Symbol[] {
+  suggest(
+    query: string,
+    limit: number,
+    kind?: SymbolKind,
+    scope?: string,
+  ): Symbol[] {
     if (!query || limit <= 0) return [];
     this.rebuildIndexesIfDirty();
     if (!this.searchIndex) return [];
@@ -161,7 +169,9 @@ export class CodeIndex {
     for (const r of results) {
       if (out.length >= limit) break;
       const sym = this.symbolById.get(r.id as string);
-      if (sym) out.push(sym);
+      if (!sym) continue;
+      if (!matchesKindScope(sym, kind, scope)) continue;
+      out.push(sym);
     }
     return out;
   }
@@ -175,12 +185,20 @@ export class CodeIndex {
     return [...this.fileByPath.values()];
   }
 
+  hasFile(path: string): boolean {
+    return this.fileByPath.has(path);
+  }
+
   getCallees(symbolId: string): Symbol[] {
     return this.resolveIds(this.callees.get(symbolId));
   }
 
   getCallers(symbolId: string): Symbol[] {
     return this.resolveIds(this.callers.get(symbolId));
+  }
+
+  getCallerCount(symbolId: string): number {
+    return this.callers.get(symbolId)?.size ?? 0;
   }
 
   getImports(filePath: string): ImportInfo[] {
@@ -342,6 +360,7 @@ export class CodeIndex {
     this.callers = callers;
     // Derived caches: reset; rebuildIndexesIfDirty repopulates lazily.
     this.sortedNames = [];
+    this.sortedNamesLower = [];
     this.searchIndex = null;
     this.namesDirty = true;
 
@@ -366,7 +385,12 @@ export class CodeIndex {
 
   private rebuildIndexesIfDirty(): void {
     if (!this.namesDirty) return;
-    this.sortedNames = [...this.symbolsByName.keys()].sort();
+    const names = [...this.symbolsByName.keys()];
+    const pairs: Array<[string, string]> = names.map((n) => [n, n.toLowerCase()]);
+    // Codepoint compare (not localeCompare) so sort order matches `lowerBound`'s `<`.
+    pairs.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+    this.sortedNames = pairs.map((p) => p[0]);
+    this.sortedNamesLower = pairs.map((p) => p[1]);
     this.searchIndex = new MiniSearch<Symbol>({
       fields: ['name', 'fqn'],
       idField: 'id',
@@ -396,6 +420,16 @@ export class CodeIndex {
     );
     return next;
   }
+}
+
+export function matchesKindScope(
+  s: Symbol,
+  kind?: SymbolKind,
+  scope?: string,
+): boolean {
+  if (kind && s.kind !== kind) return false;
+  if (!scope) return true;
+  return scope.endsWith('/') ? s.file.startsWith(scope) : s.file === scope;
 }
 
 function pushOrInit<T>(map: Map<string, T[]>, key: string, value: T): void {
