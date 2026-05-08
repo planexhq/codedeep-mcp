@@ -450,15 +450,6 @@ describe('CodeIndex query helpers', () => {
     got.push(mkImport('src/a.ts', './evil'));
     expect(idx.getImports('src/a.ts')).toHaveLength(1);
   });
-
-  it('getExporters returns only exported symbols', () => {
-    const idx = new CodeIndex();
-    const exp = mkSym({ name: 'X', file: 'src/a.ts', exported: true });
-    const priv = mkSym({ name: 'X', file: 'src/b.ts', exported: false });
-    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [exp], [], []);
-    idx.addFile(makeFileInfo('typescript', 'src/b.ts'), [priv], [], []);
-    expect(idx.getExporters('X')).toEqual([exp]);
-  });
 });
 
 describe('CodeIndex.getStats', () => {
@@ -544,7 +535,6 @@ describe('CodeIndex persistence', () => {
     expect(loaded.getCallees(a.id).map((s) => s.id)).toEqual([b.id]);
     expect(loaded.getCallers(b.id).map((s) => s.id)).toEqual([a.id]);
     expect(loaded.getImports('src/a.ts')).toHaveLength(1);
-    expect(loaded.getExporters('a')).toEqual([a]);
     expect(loaded.findSymbolsByPrefix('a', 5)).toEqual([a]);
   });
 

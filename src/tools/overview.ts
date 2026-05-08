@@ -4,6 +4,7 @@ import { basename, join, resolve } from 'node:path';
 import {
   type CodeIndex,
   ENTRY_POINT_FILENAME_RE,
+  isClassMember,
   zeroSymbolsByKind,
 } from '../indexer/code-index.js';
 import type { Indexer } from '../indexer/pipeline.js';
@@ -375,11 +376,7 @@ async function collectEntryPoints(
 }
 
 function isTopLevelExport(s: Symbol): boolean {
-  if (!s.exported) return false;
-  // Class members inherit the class's `exported` flag. The file path may
-  // contain dots, so check for `.` AFTER the `:` separator, not anywhere.
-  const colonIdx = s.fqn.indexOf(':');
-  return colonIdx === -1 || s.fqn.indexOf('.', colonIdx) === -1;
+  return s.exported && !isClassMember(s);
 }
 
 function makeEntry(file: string, index: CodeIndex): EntryPoint {

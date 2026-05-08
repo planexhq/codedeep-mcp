@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { CodeIndex } from "./indexer/code-index.js";
 import type { Indexer } from "./indexer/pipeline.js";
 import { runFindSymbol } from "./tools/find-symbol.js";
+import { runGetContext } from "./tools/get-context.js";
 import { runOverview } from "./tools/overview.js";
 import type { ProbeConfig } from "./types.js";
 
@@ -21,17 +22,6 @@ export interface ServerDeps {
   index: CodeIndex;
   indexer: Indexer;
   config: ProbeConfig;
-}
-
-function stub(toolName: string, args: unknown) {
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: `## ${toolName}\n[stub] args=${JSON.stringify(args)}`,
-      },
-    ],
-  };
 }
 
 export function createServer(deps: ServerDeps): McpServer {
@@ -92,7 +82,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "get_context",
     {
       description:
-        "Return everything needed to understand a symbol: full body, within-file callers/callees, imports, and re-exports.",
+        "Return everything needed to understand a symbol: full body, within-file callers/callees, and imports.",
       inputSchema: {
         file: z.string().describe("File path (relative to project root)"),
         symbol: z
@@ -114,12 +104,12 @@ export function createServer(deps: ServerDeps): McpServer {
           .array(z.string())
           .optional()
           .describe(
-            "Sections to include: body, callers, callees, imports, exported_by",
+            "Sections to include: body, callers, callees, imports",
           ),
       },
       annotations: SHARED_ANNOTATIONS,
     },
-    async (args) => stub("get_context", args),
+    async (args) => runGetContext(args, deps),
   );
 
   return server;

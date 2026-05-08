@@ -206,12 +206,6 @@ export class CodeIndex {
     return list ? [...list] : [];
   }
 
-  getExporters(symbolName: string): Symbol[] {
-    const list = this.symbolsByName.get(symbolName);
-    if (!list) return [];
-    return list.filter((s) => s.exported);
-  }
-
   getStats(): IndexStats {
     const filesByLanguage: Record<string, number> = {};
     for (const fi of this.fileByPath.values()) {
@@ -420,6 +414,14 @@ export class CodeIndex {
     );
     return next;
   }
+}
+
+export function isClassMember(s: Symbol): boolean {
+  // FQNs use `<file>:<name>` for top-level and `<file>:<Class>.<method>`
+  // for class members. File paths can contain dots, so check for a dot
+  // *after* the colon, not anywhere in the FQN.
+  const colonIdx = s.fqn.indexOf(':');
+  return colonIdx !== -1 && s.fqn.indexOf('.', colonIdx) !== -1;
 }
 
 export function matchesKindScope(
