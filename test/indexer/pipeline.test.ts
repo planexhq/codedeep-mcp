@@ -130,7 +130,7 @@ describe('Indexer.indexAll', () => {
     vi.spyOn(index, 'save').mockRejectedValue(new Error('disk full'));
     const stderr = silenceStderr();
 
-    await expect(indexer.indexAll()).resolves.toBeUndefined();
+    await expect(indexer.indexAll()).resolves.toBe(true);
     expect(indexer.isIndexing).toBe(false);
     expect(index.findSymbolByName('foo')).toHaveLength(1);
 
@@ -283,6 +283,20 @@ describe('Indexer concurrency and resilience', () => {
     expect(index.findSymbolByName('foo')).toHaveLength(1);
   });
 
+  it('reports guard drops as false, completed runs as true', async () => {
+    writeTree(root, { 'src/a.ts': 'export function foo() {}\n' });
+    silenceStderr();
+
+    // Dropped: indexFile while indexAll is still in flight.
+    const all = indexer.indexAll();
+    const dropped = indexer.indexFile('src/a.ts');
+    await expect(dropped).resolves.toBe('dropped');
+    await expect(all).resolves.toBe(true);
+
+    // Standalone run after the guard clears.
+    await expect(indexer.indexFile('src/a.ts')).resolves.toBe('noop');
+  });
+
   it('continues past a read failure and indexes the rest', async () => {
     writeTree(root, {
       'src/a.ts': 'export function foo() {}\n',
@@ -326,7 +340,7 @@ describe('Indexer concurrency and resilience', () => {
       },
     );
 
-    await expect(indexer.indexAll()).resolves.toBeUndefined();
+    await expect(indexer.indexAll()).resolves.toBe(true);
 
     expect(index.findSymbolByName('foo')).toEqual([]);
     expect(index.findSymbolByName('bar')).toHaveLength(1);
@@ -350,7 +364,7 @@ describe('Indexer concurrency and resilience', () => {
       },
     );
 
-    await expect(indexer.indexAll()).resolves.toBeUndefined();
+    await expect(indexer.indexAll()).resolves.toBe(true);
 
     expect(index.findSymbolByName('foo')).toEqual([]);
     expect(index.findSymbolByName('bar')).toHaveLength(1);
@@ -464,9 +478,16 @@ describe('Indexer.indexFile', () => {
   });
 
   it('drops stale symbols when extractSymbols throws', async () => {
+    const aPath = join(root, 'src/a.ts');
     writeTree(root, { 'src/a.ts': 'export function foo() {}\n' });
     await indexer.indexAll();
     expect(index.findSymbolByName('foo')).toHaveLength(1);
+
+    // Change the file so indexFile's no-change short-circuit doesn't skip
+    // the (throwing) extraction.
+    writeFileSync(aPath, 'export function foo() { /* changed */ }\n');
+    const future = (Date.now() + 60_000) / 1000;
+    utimesSync(aPath, future, future);
 
     silenceStderr();
     vi.spyOn(extractorModule, 'extractSymbols').mockImplementation(() => {
@@ -477,6 +498,50 @@ describe('Indexer.indexFile', () => {
 
     expect(index.findSymbolByName('foo')).toEqual([]);
     expect(index.getAllFiles().some((f) => f.path === 'src/a.ts')).toBe(false);
+  });
+
+  it('skips re-extraction when mtime and size are unchanged', async () => {
+    writeTree(root, { 'src/a.ts': 'export function foo() {}\n' });
+    await indexer.indexAll();
+
+    const extractSpy = vi.spyOn(extractorModule, 'extractSymbols');
+    await expect(indexer.indexFile('src/a.ts')).resolves.toBe('noop');
+
+    expect(extractSpy).not.toHaveBeenCalled();
+    expect(index.findSymbolByName('foo')).toHaveLength(1);
+  });
+
+  it('detects a same-size edit in the same coarse-mtime tick via content hash', async () => {
+    // HFS+/FAT/NFS report whole-second mtimes: a second equal-length edit
+    // can share the indexed (mtime, size) fingerprint. The fs event fired,
+    // so the hash check must catch it instead of silently skipping.
+    const aPath = join(root, 'src/a.ts');
+    writeTree(root, { 'src/a.ts': 'export function before() {}\n' });
+    const fixed = Math.floor(Date.now() / 1000) - 3600;
+    utimesSync(aPath, fixed, fixed);
+    await indexer.indexAll();
+    expect(index.findSymbolByName('before')).toHaveLength(1);
+
+    // Same byte length ('before' → 'cafter'), same pinned mtime.
+    writeFileSync(aPath, 'export function cafter() {}\n');
+    utimesSync(aPath, fixed, fixed);
+
+    await expect(indexer.indexFile('src/a.ts')).resolves.toBe('indexed');
+    expect(index.findSymbolByName('before')).toEqual([]);
+    expect(index.findSymbolByName('cafter')).toHaveLength(1);
+  });
+
+  it('reports cap-skipped for a new file when the index is at maxFiles', async () => {
+    writeTree(root, { 'src/a.ts': 'export function foo() {}\n' });
+    const tinyConfig = makeConfig(root, { maxFiles: 1 });
+    const tinyIndex = new CodeIndex(tinyConfig.projectRoot);
+    const tinyIndexer = new Indexer(tinyConfig, tinyIndex);
+    await tinyIndexer.indexAll();
+    expect(tinyIndex.fileCount).toBe(1);
+
+    writeTree(root, { 'src/b.ts': 'export function bar() {}\n' });
+    await expect(tinyIndexer.indexFile('src/b.ts')).resolves.toBe('cap-skipped');
+    expect(tinyIndex.hasFile('src/b.ts')).toBe(false);
   });
 
   it('drops a file that grew past maxFileSize', async () => {
