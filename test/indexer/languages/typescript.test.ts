@@ -309,10 +309,186 @@ describe('typescript extractor — within-file call references', () => {
     });
   });
 
-  it('skips member-expression calls (obj.method())', () => {
+  it('emits an unresolved member ref with receiver for obj.method()', () => {
     const src = 'function caller() { obj.method(); }';
     const result = extract(src);
+    const caller = result.symbols.find((s) => s.name === 'caller')!;
+    expect(result.references).toEqual([
+      {
+        sourceId: caller.id,
+        targetId: null,
+        targetName: 'method',
+        kind: 'calls',
+        file: 'src/test.ts',
+        line: 1,
+        receiver: 'obj',
+      },
+    ]);
+  });
+
+  it('resolves this.helper() to the sibling method of the enclosing class', () => {
+    const src = [
+      'class Service {',
+      '  helper() {}',
+      '  run() { this.helper(); }',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const helper = result.symbols.find((s) => s.name === 'helper')!;
+    const run = result.symbols.find((s) => s.name === 'run')!;
+    expect(result.references).toEqual([
+      {
+        sourceId: run.id,
+        targetId: helper.id,
+        targetName: 'helper',
+        kind: 'calls',
+        file: 'src/test.ts',
+        line: 3,
+        receiver: 'this',
+        selfReceiver: true,
+      },
+    ]);
+  });
+
+  it('resolves Class.staticMethod() against a same-file class', () => {
+    const src = [
+      'class Factory {',
+      '  static create() {}',
+      '}',
+      'function caller() { Factory.create(); }',
+    ].join('\n');
+    const result = extract(src);
+    const create = result.symbols.find((s) => s.name === 'create')!;
+    const caller = result.symbols.find((s) => s.name === 'caller')!;
+    expect(result.references).toEqual([
+      {
+        sourceId: caller.id,
+        targetId: create.id,
+        targetName: 'create',
+        kind: 'calls',
+        file: 'src/test.ts',
+        line: 4,
+        receiver: 'Factory',
+      },
+    ]);
+  });
+
+  it('resolves this.x() in a class field initializer, attributed to the class', () => {
+    const src = [
+      'class Widget {',
+      '  helper() { return 1; }',
+      '  size = this.helper();',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const helper = result.symbols.find((s) => s.name === 'helper')!;
+    const widget = result.symbols.find((s) => s.kind === 'class')!;
+    expect(result.references).toEqual([
+      {
+        sourceId: widget.id,
+        targetId: helper.id,
+        targetName: 'helper',
+        kind: 'calls',
+        file: 'src/test.ts',
+        line: 3,
+        receiver: 'this',
+        selfReceiver: true,
+      },
+    ]);
+  });
+
+  it('resolves this.#x() private-method calls', () => {
+    const src = [
+      'class Vault {',
+      '  #open() {}',
+      '  unlock() { this.#open(); }',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const open = result.symbols.find((s) => s.name === '#open')!;
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetId).toBe(open.id);
+    expect(result.references[0]!.receiver).toBe('this');
+  });
+
+  it('resolves this.m() to the own class when two classes share a method name', () => {
+    const src = [
+      'class A {',
+      '  m() {}',
+      '}',
+      'class B {',
+      '  m() {}',
+      '  run() { this.m(); }',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const bM = result.symbols.find((s) => s.fqn === 'src/test.ts:B.m')!;
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetId).toBe(bM.id);
+  });
+
+  it('leaves this.x() unresolved when x is not a method of the class', () => {
+    const src = [
+      'class Store {',
+      '  load() { this.refresh(); }',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetId).toBeNull();
+    expect(result.references[0]!.receiver).toBe('this');
+    expect(result.references[0]!.targetName).toBe('refresh');
+  });
+
+  it('emits this.x() in a plain function as an ordinary member ref', () => {
+    // No enclosing class → no class instance to refer to: the ref must
+    // not carry the selfReceiver flag that isCallerOf rejects.
+    const src = 'function handler() { this.dispatch(); }';
+    const result = extract(src);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetId).toBeNull();
+    expect(result.references[0]!.receiver).toBe('this');
+    expect(result.references[0]!.selfReceiver).toBeUndefined();
+  });
+
+  it('emits optional-chain member calls (obj?.method())', () => {
+    const src = 'function caller() { obj?.method(); }';
+    const result = extract(src);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetName).toBe('method');
+    expect(result.references[0]!.receiver).toBe('obj');
+  });
+
+  it('skips chained member calls (a.b.c() and foo().bar())', () => {
+    const src = 'function caller() { a.b.c(); foo().bar(); }';
+    const result = extract(src);
+    // foo() itself is a bare call and still emits; the .bar() and a.b.c()
+    // member chains do not.
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetName).toBe('foo');
+  });
+
+  it('skips super.method() calls', () => {
+    const src = [
+      'class Child extends Base {',
+      '  render() { super.render(); }',
+      '}',
+    ].join('\n');
+    const result = extract(src);
     expect(result.references).toEqual([]);
+  });
+
+  it('still never resolves a bare m() call to a method', () => {
+    const src = [
+      'class A {',
+      '  m() {}',
+      '}',
+      'function caller() { m(); }',
+    ].join('\n');
+    const result = extract(src);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetId).toBeNull();
+    expect(result.references[0]!.receiver).toBeUndefined();
   });
 
   it('attributes calls inside class methods to the method', () => {
@@ -575,16 +751,22 @@ describe('typescript extractor — new expression references', () => {
     expect(newRef!.targetId).toBe(cls.id);
   });
 
-  it('skips `new this.X()` (member-expression constructor)', () => {
+  it('emits an unresolved member ref for `new this.X()`', () => {
     const src = 'function f() { return new this.Service(); }';
     const result = extract(src);
-    expect(result.references).toEqual([]);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetName).toBe('Service');
+    expect(result.references[0]!.targetId).toBeNull();
+    expect(result.references[0]!.receiver).toBe('this');
   });
 
-  it('skips `new ns.X()` (member-expression constructor)', () => {
+  it('emits an unresolved member ref for `new ns.X()`', () => {
     const src = 'function f() { return new ns.Service(); }';
     const result = extract(src);
-    expect(result.references).toEqual([]);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetName).toBe('Service');
+    expect(result.references[0]!.targetId).toBeNull();
+    expect(result.references[0]!.receiver).toBe('ns');
   });
 
   it('emits unresolved ref for `new X()` to undefined name', () => {
@@ -767,10 +949,14 @@ describe('typescript extractor — bare decorator references', () => {
     expect(result.references).toEqual([]);
   });
 
-  it('emits no reference for a member-expression parametrized decorator (`@scope.cached()`)', () => {
+  it('emits a member ref for a member-expression parametrized decorator (`@scope.cached()`)', () => {
+    // `@scope.cached()` genuinely invokes scope.cached at decoration time —
+    // it flows through the call selector like any other member call.
     const src = '@scope.cached()\nclass Service {}';
     const result = extract(src);
-    expect(result.references).toEqual([]);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetName).toBe('cached');
+    expect(result.references[0]!.receiver).toBe('scope');
   });
 
   it('emits a reference for a bare method decorator inside a class', () => {

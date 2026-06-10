@@ -7,7 +7,7 @@ import {
   type FindSymbolDeps,
 } from '../../src/tools/find-symbol.js';
 import type { Symbol } from '../../src/types.js';
-import { makeConfig, makeFileInfo, makeProjectDir, mkRef, mkSym } from '../helpers.js';
+import { makeConfig, makeFileInfo, makeProjectDir, mkMemberRef, mkRef, mkSym } from '../helpers.js';
 
 let tmpRoot: string;
 
@@ -829,5 +829,31 @@ describe('runFindSymbol — banner and validation', () => {
 
     const result = await runFindSymbol({ name: 'foo' }, makeDeps(idx));
     expect(result.content[0].text).toBe('Error: boom');
+  });
+});
+
+describe('runFindSymbol — member-call reference counts', () => {
+  it('counts cross-file member refs in References: ~N for methods', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const save = mkSym({
+      name: 'save',
+      kind: 'method',
+      parent: 'Repo',
+      file: 'src/repo.ts',
+      exported: true,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/repo.ts'), [save], [], []);
+
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkMemberRef(caller, 'save', 'repo')],
+      [],
+    );
+
+    const text = (await runFindSymbol({ name: 'save' }, makeDeps(idx)))
+      .content[0].text;
+    expect(text).toContain('References: ~1');
   });
 });

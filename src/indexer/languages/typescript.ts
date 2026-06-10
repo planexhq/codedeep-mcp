@@ -3,7 +3,12 @@ import type { Node, Tree } from 'web-tree-sitter';
 import { IMPORT_DEFAULT, IMPORT_NAMESPACE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import { bareDecoratorIdentifier, resolveCalls, symbolId } from '../extractor.js';
-import type { CallSelector, ExtractResult, PendingBody } from '../extractor.js';
+import type {
+  CallSelector,
+  ExtractResult,
+  MemberCallInfo,
+  PendingBody,
+} from '../extractor.js';
 
 const WS_REGEX = /\s+/g;
 
@@ -45,6 +50,24 @@ function jsxComponentName(node: Node): Node | null {
   return name;
 }
 
+// Single-level member callees only: `this.x()` and `obj.x()` qualify;
+// chained (`a.b.c()`), computed (`foo().bar()`), `super.x()`, and
+// non-null-asserted receivers return null and emit nothing.
+function tsMemberCallInfo(callee: Node): MemberCallInfo | null {
+  if (callee.type !== 'member_expression') return null;
+  const obj = callee.childForFieldName('object');
+  const prop = callee.childForFieldName('property');
+  if (!obj || !prop) return null;
+  if (prop.type !== 'property_identifier' && prop.type !== 'private_property_identifier') {
+    return null;
+  }
+  if (obj.type === 'this') return { receiver: 'this', property: prop.text, isSelf: true };
+  if (obj.type === 'identifier') {
+    return { receiver: obj.text, property: prop.text, isSelf: false };
+  }
+  return null;
+}
+
 export function extractTypeScript(
   tree: Tree,
   content: string,
@@ -78,6 +101,7 @@ export function extractTypeScript(
     TS_SELECTORS,
     TS_SKIP_TYPES,
     TS_FUNCTION_BODY_SKIP_TYPES,
+    tsMemberCallInfo,
   );
   return { symbols, references, imports };
 }
@@ -124,7 +148,7 @@ function extractTopLevel(
       // `field = helper()`) attribute to the class. TS_SKIP_TYPES
       // contains method_definition + function/arrow forms, so calls
       // inside member function bodies stay attributed to the member.
-      outBodies.push({ symbolId: classSym.id, body });
+      outBodies.push({ symbolId: classSym.id, body, className });
       return;
     }
     case 'interface_declaration': {
@@ -210,7 +234,9 @@ function extractClassMember(
       );
       outSymbols.push(methodSym);
       const methodBody = member.childForFieldName('body');
-      if (methodBody) outBodies.push({ symbolId: methodSym.id, body: methodBody });
+      if (methodBody) {
+        outBodies.push({ symbolId: methodSym.id, body: methodBody, className });
+      }
       return;
     }
     case 'public_field_definition': {
@@ -234,7 +260,9 @@ function extractClassMember(
       outSymbols.push(fieldSym);
       if (isCallable && value) {
         const fnBody = value.childForFieldName('body');
-        if (fnBody) outBodies.push({ symbolId: fieldSym.id, body: fnBody });
+        if (fnBody) {
+          outBodies.push({ symbolId: fieldSym.id, body: fnBody, className });
+        }
       }
       return;
     }

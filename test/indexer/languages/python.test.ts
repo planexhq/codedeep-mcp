@@ -274,10 +274,134 @@ describe('python extractor — within-file calls', () => {
     });
   });
 
-  it('skips attribute calls (obj.method())', () => {
+  it('emits an unresolved member ref with receiver for obj.method()', () => {
     const src = 'def caller():\n    obj.method()\n';
     const result = extract(src);
-    expect(result.references).toEqual([]);
+    const caller = result.symbols.find((s) => s.name === 'caller')!;
+    expect(result.references).toEqual([
+      {
+        sourceId: caller.id,
+        targetId: null,
+        targetName: 'method',
+        kind: 'calls',
+        file: 'src/test.py',
+        line: 2,
+        receiver: 'obj',
+      },
+    ]);
+  });
+
+  it('resolves self.helper() to the sibling method of the enclosing class', () => {
+    const src = [
+      'class Service:',
+      '    def helper(self): pass',
+      '    def run(self):',
+      '        self.helper()',
+      '',
+    ].join('\n');
+    const result = extract(src);
+    const helper = result.symbols.find((s) => s.name === 'helper')!;
+    const run = result.symbols.find((s) => s.name === 'run')!;
+    expect(result.references).toEqual([
+      {
+        sourceId: run.id,
+        targetId: helper.id,
+        targetName: 'helper',
+        kind: 'calls',
+        file: 'src/test.py',
+        line: 4,
+        receiver: 'self',
+        selfReceiver: true,
+      },
+    ]);
+  });
+
+  it('resolves cls.helper() inside a classmethod', () => {
+    const src = [
+      'class Service:',
+      '    def helper(cls): pass',
+      '    @classmethod',
+      '    def build(cls):',
+      '        cls.helper()',
+      '',
+    ].join('\n');
+    const result = extract(src);
+    const helper = result.symbols.find((s) => s.name === 'helper')!;
+    const clsRef = result.references.find((r) => r.receiver === 'cls')!;
+    expect(clsRef.targetId).toBe(helper.id);
+    expect(clsRef.targetName).toBe('helper');
+  });
+
+  it('resolves ClassName.method() against a same-file class', () => {
+    const src = [
+      'class Factory:',
+      '    def create(self): pass',
+      'def caller():',
+      '    Factory.create()',
+      '',
+    ].join('\n');
+    const result = extract(src);
+    const create = result.symbols.find((s) => s.name === 'create')!;
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetId).toBe(create.id);
+    expect(result.references[0]!.receiver).toBe('Factory');
+  });
+
+  it('leaves self.x() unresolved when x is not a method of the class', () => {
+    const src = [
+      'class Store:',
+      '    def load(self):',
+      '        self.refresh()',
+      '',
+    ].join('\n');
+    const result = extract(src);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetId).toBeNull();
+    expect(result.references[0]!.receiver).toBe('self');
+  });
+
+  it('does not flag self.x() in a plain function as a self-receiver', () => {
+    // `self` is only special as a method's first parameter; in a plain
+    // function it is an ordinary variable, and the ref must stay an
+    // ordinary member ref (weak name-match evidence) instead of being
+    // rejected by isCallerOf's inherited-method rule.
+    const src = 'def handler(self):\n    self.process()\n';
+    const result = extract(src);
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.receiver).toBe('self');
+    expect(result.references[0]!.selfReceiver).toBeUndefined();
+  });
+
+  it('skips super().method() and chained attribute calls', () => {
+    const src = [
+      'class Child(Base):',
+      '    def render(self):',
+      '        super().render()',
+      '        a.b.c()',
+      '',
+    ].join('\n');
+    const result = extract(src);
+    // super() itself is a bare call and still emits; the .render() and
+    // a.b.c() attribute chains do not.
+    expect(result.references).toHaveLength(1);
+    expect(result.references[0]!.targetName).toBe('super');
+  });
+
+  it('attributes self-calls inside a decorated method to the method', () => {
+    const src = [
+      'class Service:',
+      '    def helper(self): pass',
+      '    @retry',
+      '    def run(self):',
+      '        self.helper()',
+      '',
+    ].join('\n');
+    const result = extract(src);
+    const helper = result.symbols.find((s) => s.name === 'helper')!;
+    const run = result.symbols.find((s) => s.name === 'run')!;
+    const selfRef = result.references.find((r) => r.receiver === 'self')!;
+    expect(selfRef.sourceId).toBe(run.id);
+    expect(selfRef.targetId).toBe(helper.id);
   });
 
   it('attributes calls inside a method to the method', () => {

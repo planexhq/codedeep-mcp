@@ -13,6 +13,7 @@ import {
   makeFileInfo,
   makeProjectDir,
   mkImport,
+  mkMemberRef,
   mkSym,
 } from '../helpers.js';
 
@@ -866,5 +867,150 @@ describe('runFindReferences — readiness banner', () => {
 
     expect(text.startsWith(BANNER)).toBe(false);
     expect(text).toContain('outside the project root');
+  });
+});
+
+describe('runFindReferences — member-expression refs', () => {
+  function memberSetup() {
+    const idx = new CodeIndex(tmpRoot);
+    const save = mkSym({
+      name: 'save',
+      kind: 'method',
+      parent: 'Repo',
+      file: 'src/repo.ts',
+      exported: true,
+      startLine: 5,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/repo.ts'), [save], [], []);
+    return { idx, save };
+  }
+
+  it('tags unresolved member rows with [member call, unverified]', async () => {
+    const { idx } = memberSetup();
+    const caller = mkSym({ name: 'handler', file: 'src/api.ts', startLine: 3 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/api.ts'),
+      [caller],
+      [mkMemberRef(caller, 'save', 'repo', { line: 4 })],
+      [],
+    );
+
+    const text = (
+      await runFindReferences(
+        { file: 'src/repo.ts', symbol: 'save' },
+        makeDeps(idx),
+      )
+    ).content[0].text;
+
+    expect(text).toContain('src/api.ts:4 — handler()  [member call, unverified]');
+    expect(text).not.toContain('src/api.ts:4 — handler()  [name match, unverified]');
+  });
+
+  it('keeps the name-match tag for extract-time-resolved member rows', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const helper = mkSym({
+      name: 'helper',
+      kind: 'method',
+      parent: 'C',
+      file: 'src/c.ts',
+      startLine: 2,
+    });
+    const run = mkSym({
+      name: 'run',
+      kind: 'method',
+      parent: 'C',
+      file: 'src/c.ts',
+      startLine: 5,
+    });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [helper, run],
+      [mkMemberRef(run, 'helper', 'this', { targetId: helper.id, line: 6 })],
+      [],
+    );
+
+    const text = (
+      await runFindReferences(
+        { file: 'src/c.ts', symbol: 'helper' },
+        makeDeps(idx),
+      )
+    ).content[0].text;
+
+    expect(text).toContain('src/c.ts:6 — run()  [name match, unverified]');
+  });
+
+  it('ranks import-connected receivers above unknown receivers', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const target = mkSym({
+      name: 'formatDate',
+      file: 'src/utils.ts',
+      exported: true,
+      startLine: 1,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/utils.ts'), [target], [], []);
+
+    // Unknown receiver in a same-directory file would out-rank by
+    // directory if member refs used directory tiers; it must not.
+    const noisy = mkSym({ name: 'noisy', file: 'src/near.ts', startLine: 1 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/near.ts'),
+      [noisy],
+      [mkMemberRef(noisy, 'formatDate', 'obj', { line: 2 })],
+      [],
+    );
+
+    const connected = mkSym({ name: 'svc', file: 'lib/deep/svc.ts', startLine: 1 });
+    idx.addFile(
+      makeFileInfo('typescript', 'lib/deep/svc.ts'),
+      [connected],
+      [mkMemberRef(connected, 'formatDate', 'u', { line: 3 })],
+      [
+        mkImport('lib/deep/svc.ts', '../../src/utils', [
+          { name: IMPORT_NAMESPACE, alias: 'u', kind: 'namespace' },
+        ]),
+      ],
+    );
+
+    const text = (
+      await runFindReferences(
+        { file: 'src/utils.ts', symbol: 'formatDate' },
+        makeDeps(idx),
+      )
+    ).content[0].text;
+
+    expect(text.indexOf('lib/deep/svc.ts:3')).toBeLessThan(
+      text.indexOf('src/near.ts:2'),
+    );
+  });
+
+  it('excludes member matches for short method names', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const get = mkSym({
+      name: 'get',
+      kind: 'method',
+      parent: 'Store',
+      file: 'src/store.ts',
+      exported: true,
+      startLine: 2,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/store.ts'), [get], [], []);
+
+    const caller = mkSym({ name: 'caller', file: 'src/api.ts', startLine: 1 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/api.ts'),
+      [caller],
+      [mkMemberRef(caller, 'get', 'store', { line: 2 })],
+      [],
+    );
+
+    const text = (
+      await runFindReferences(
+        { file: 'src/store.ts', symbol: 'get' },
+        makeDeps(idx),
+      )
+    ).content[0].text;
+
+    expect(text).toContain('### Callers');
+    expect(text).toContain('(none)');
   });
 });

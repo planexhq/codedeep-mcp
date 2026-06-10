@@ -3,7 +3,12 @@ import type { Node, Tree } from 'web-tree-sitter';
 import { IMPORT_NAMESPACE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import { bareDecoratorIdentifier, resolveCalls, symbolId } from '../extractor.js';
-import type { CallSelector, ExtractResult, PendingBody } from '../extractor.js';
+import type {
+  CallSelector,
+  ExtractResult,
+  MemberCallInfo,
+  PendingBody,
+} from '../extractor.js';
 
 const WS_REGEX = /\s+/g;
 
@@ -25,6 +30,20 @@ const PY_SELECTORS: ReadonlyArray<CallSelector> = [
   { nodeType: 'call', getCallee: (n) => n.childForFieldName('function') },
   { nodeType: 'decorator', getCallee: bareDecoratorIdentifier },
 ];
+
+// Single-level attribute callees only: `self.x()`, `cls.x()`, `obj.x()`.
+// Chained (`a.b.c()`) and computed (`super().x()` — object is a `call`
+// node) receivers return null and emit nothing.
+function pyMemberCallInfo(callee: Node): MemberCallInfo | null {
+  if (callee.type !== 'attribute') return null;
+  const obj = callee.childForFieldName('object');
+  const prop = callee.childForFieldName('attribute');
+  if (!obj || !prop || prop.type !== 'identifier' || obj.type !== 'identifier') {
+    return null;
+  }
+  const isSelf = obj.text === 'self' || obj.text === 'cls';
+  return { receiver: obj.text, property: prop.text, isSelf };
+}
 
 export function extractPython(
   tree: Tree,
@@ -49,6 +68,7 @@ export function extractPython(
     PY_SELECTORS,
     PY_SKIP_TYPES,
     PY_FUNCTION_BODY_SKIP_TYPES,
+    pyMemberCallInfo,
   );
   return { symbols, references, imports };
 }
@@ -158,7 +178,7 @@ function extractClass(
   // `class C: helper()`) attribute to the class. PY_SKIP_TYPES contains
   // function_definition / lambda / class_definition, so methods,
   // lambdas, and nested classes stay attributed to themselves.
-  outBodies.push({ symbolId: classSym.id, body });
+  outBodies.push({ symbolId: classSym.id, body, className });
 
   for (const member of body.namedChildren) {
     if (member.type === 'function_definition') {
@@ -177,7 +197,9 @@ function extractClass(
       );
       outSymbols.push(methodSym);
       const methodBody = member.childForFieldName('body');
-      if (methodBody) outBodies.push({ symbolId: methodSym.id, body: methodBody });
+      if (methodBody) {
+        outBodies.push({ symbolId: methodSym.id, body: methodBody, className });
+      }
     } else if (member.type === 'decorated_definition') {
       const innerDef = member.childForFieldName('definition');
       if (!innerDef || innerDef.type !== 'function_definition') continue;
@@ -196,7 +218,9 @@ function extractClass(
       );
       outSymbols.push(methodSym);
       const methodBody = innerDef.childForFieldName('body');
-      if (methodBody) outBodies.push({ symbolId: methodSym.id, body: methodBody });
+      if (methodBody) {
+        outBodies.push({ symbolId: methodSym.id, body: methodBody, className });
+      }
     }
   }
 }

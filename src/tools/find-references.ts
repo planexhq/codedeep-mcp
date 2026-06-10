@@ -2,6 +2,7 @@ import { dirname } from 'node:path';
 
 import {
   isCallerOf,
+  isClassMember,
   isWildcardImport,
   type CodeIndex,
 } from '../indexer/code-index.js';
@@ -10,6 +11,7 @@ import { errMsg } from '../logger.js';
 import type { ImportInfo, ProbeConfig, Reference, Symbol } from '../types.js';
 
 import {
+  MEMBER_MATCH_TAG,
   MODULE_LEVEL,
   NAME_MATCH_HEADER_QUALIFIER,
   NAME_MATCH_TAG,
@@ -140,7 +142,7 @@ function renderCallers(
   limit: number,
 ): string {
   const filtered = index
-    .getReferencesByNameOrAlias(target.name, target.file)
+    .getReferencesByNameOrAlias(target.name, target.file, isClassMember(target))
     .filter((ref) => isCallerOf(ref, target));
 
   const ranked = rankRefs(filtered, target, index);
@@ -155,7 +157,14 @@ function renderCallers(
   const shown = ranked.slice(0, limit);
   const body: string[] = shown.map((r) => {
     const callerLabel = r.source ? `${r.source.name}()` : MODULE_LEVEL;
-    return `- ${r.ref.file}:${r.ref.line} — ${callerLabel}  ${NAME_MATCH_TAG}`;
+    // Resolved member refs (this.x() bound at extract time) carry the
+    // same confidence as resolved bare refs and keep the name-match tag;
+    // unresolved member rows get the noisier member tag.
+    const tag =
+      r.ref.receiver !== undefined && r.ref.targetId === null
+        ? MEMBER_MATCH_TAG
+        : NAME_MATCH_TAG;
+    return `- ${r.ref.file}:${r.ref.line} — ${callerLabel}  ${tag}`;
   });
   if (ranked.length > shown.length) {
     body.push(omittedSuffix(ranked.length - shown.length));
@@ -203,7 +212,13 @@ function rankRefs(
   for (const ref of refs) {
     const refDir = dirname(ref.file);
     let tier: number;
-    if (refDir === targetDir) {
+    if (ref.targetId === null && ref.receiver !== undefined) {
+      // Unresolved member refs rank by their receiver binding: an
+      // import-connected receiver (`import * as u; u.fn()`) is as strong
+      // as an import-connected bare name; anything else is the noisiest
+      // tier — the property match alone is weak evidence.
+      tier = importsReceiver(importsFor(ref.file), ref.receiver) ? 2 : 5;
+    } else if (refDir === targetDir) {
       tier = 1;
     } else if (importsTargetName(importsFor(ref.file), target.name)) {
       tier = 2;
@@ -216,6 +231,21 @@ function rankRefs(
     out.push({ ref, tier, source });
   }
   return out;
+}
+
+// Only module-object bindings (`import * as u`, Python `import x` /
+// `from . import x`) make a receiver "import-connected" for ranking:
+// those are the bindings memberRefMatchesTarget can resolve precisely.
+// A value import merely NAMED like the receiver says nothing about where
+// the object's class lives, so it must not buy tier-2 placement.
+function importsReceiver(imports: ImportInfo[], receiver: string): boolean {
+  for (const imp of imports) {
+    for (const named of imp.importedNames) {
+      if (named.kind !== 'namespace' && named.kind !== 'module') continue;
+      if ((named.alias ?? named.name) === receiver) return true;
+    }
+  }
+  return false;
 }
 
 function importsTargetName(imports: ImportInfo[], name: string): boolean {
