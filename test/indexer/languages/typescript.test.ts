@@ -252,7 +252,9 @@ describe('typescript extractor — imports', () => {
 
   it('extracts namespace imports', () => {
     const result = extract('import * as fs from "node:fs";');
-    expect(result.imports[0]!.importedNames).toEqual([{ name: '*', alias: 'fs' }]);
+    expect(result.imports[0]!.importedNames).toEqual([
+      { name: '*', alias: 'fs', kind: 'namespace' },
+    ]);
     expect(result.imports[0]!.sourceModule).toBe('node:fs');
   });
 
@@ -261,6 +263,28 @@ describe('typescript extractor — imports', () => {
     expect(result.imports).toHaveLength(1);
     expect(result.imports[0]!.sourceModule).toBe('polyfill');
     expect(result.imports[0]!.importedNames).toEqual([]);
+  });
+
+  it('marks whole-statement `import type { X } from` as kind=type', () => {
+    const result = extract('import type { Service } from "./m";');
+    expect(result.imports[0]!.importedNames).toEqual([
+      { name: 'Service', kind: 'type' },
+    ]);
+  });
+
+  it('marks only the type-prefixed specifier in `import { type X, Y } from`', () => {
+    const result = extract('import { type X, Y } from "./m";');
+    expect(result.imports[0]!.importedNames).toEqual([
+      { name: 'X', kind: 'type' },
+      { name: 'Y' },
+    ]);
+  });
+
+  it('marks `import type X from` (default-position type import) as kind=type', () => {
+    const result = extract('import type Default from "./m";');
+    expect(result.imports[0]!.importedNames).toEqual([
+      { name: 'default', alias: 'Default', kind: 'type' },
+    ]);
   });
 });
 
@@ -408,7 +432,7 @@ describe('typescript extractor — decorator references', () => {
     expect(decRef!.line).toBe(2);
   });
 
-  it('emits a module-level reference for a method decorator', () => {
+  it('attributes a method decorator to its enclosing class', () => {
     const src = [
       'function methodDec() { return () => {}; }',
       'class Foo {',
@@ -417,12 +441,14 @@ describe('typescript extractor — decorator references', () => {
       '}',
     ].join('\n');
     const result = extract(src);
+    const fooSym = result.symbols.find((s) => s.name === 'Foo' && s.kind === 'class');
+    expect(fooSym).toBeDefined();
     const ref = result.references.find((r) => r.targetName === 'methodDec');
     expect(ref).toBeDefined();
-    expect(ref!.sourceId).toBeNull();
+    expect(ref!.sourceId).toBe(fooSym!.id);
   });
 
-  it('emits a module-level reference for a field decorator', () => {
+  it('attributes a field decorator to its enclosing class', () => {
     const src = [
       'function fieldDec() { return () => {}; }',
       'class Foo {',
@@ -431,9 +457,11 @@ describe('typescript extractor — decorator references', () => {
       '}',
     ].join('\n');
     const result = extract(src);
+    const fooSym = result.symbols.find((s) => s.name === 'Foo' && s.kind === 'class');
+    expect(fooSym).toBeDefined();
     const ref = result.references.find((r) => r.targetName === 'fieldDec');
     expect(ref).toBeDefined();
-    expect(ref!.sourceId).toBeNull();
+    expect(ref!.sourceId).toBe(fooSym!.id);
   });
 
   it('finds decorators inside an exported class', () => {
@@ -445,9 +473,11 @@ describe('typescript extractor — decorator references', () => {
       '}',
     ].join('\n');
     const result = extract(src);
+    const bazSym = result.symbols.find((s) => s.name === 'Baz' && s.kind === 'class');
+    expect(bazSym).toBeDefined();
     const ref = result.references.find((r) => r.targetName === 'inner');
     expect(ref).toBeDefined();
-    expect(ref!.sourceId).toBeNull();
+    expect(ref!.sourceId).toBe(bazSym!.id);
   });
 
   it('emits exactly one reference per decorator invocation', () => {
@@ -746,17 +776,21 @@ describe('typescript extractor — bare decorator references', () => {
   it('emits a reference for a bare method decorator inside a class', () => {
     const src = ['class C {', '  @bound', '  m() {}', '}'].join('\n');
     const result = extract(src);
+    const cSym = result.symbols.find((s) => s.name === 'C' && s.kind === 'class');
+    expect(cSym).toBeDefined();
     const refs = result.references.filter((r) => r.targetName === 'bound');
     expect(refs).toHaveLength(1);
-    expect(refs[0]!.sourceId).toBeNull();
+    expect(refs[0]!.sourceId).toBe(cSym!.id);
   });
 
   it('emits a reference for a bare field decorator', () => {
     const src = ['class C {', '  @observable', '  count = 0;', '}'].join('\n');
     const result = extract(src);
+    const cSym = result.symbols.find((s) => s.name === 'C' && s.kind === 'class');
+    expect(cSym).toBeDefined();
     const refs = result.references.filter((r) => r.targetName === 'observable');
     expect(refs).toHaveLength(1);
-    expect(refs[0]!.sourceId).toBeNull();
+    expect(refs[0]!.sourceId).toBe(cSym!.id);
   });
 
   it('emits one ref per decorator when bare and parametrized are stacked', () => {
@@ -771,5 +805,71 @@ describe('typescript extractor — bare decorator references', () => {
     const bRefs = result.references.filter((r) => r.targetName === 'b');
     expect(aRefs).toHaveLength(1);
     expect(bRefs).toHaveLength(1);
+  });
+});
+
+describe('typescript extractor — class body call extraction', () => {
+  beforeAll(async () => {
+    await initParser();
+  });
+
+  it('attributes a static-block call to the enclosing class', () => {
+    const src = [
+      'function helper() {}',
+      'class C {',
+      '  static { helper(); }',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const cSym = result.symbols.find((s) => s.name === 'C' && s.kind === 'class');
+    expect(cSym).toBeDefined();
+    const ref = result.references.find((r) => r.targetName === 'helper');
+    expect(ref).toBeDefined();
+    expect(ref!.sourceId).toBe(cSym!.id);
+  });
+
+  it('attributes a static-field-initializer call to the class', () => {
+    const src = [
+      'function h() { return 1; }',
+      'class C {',
+      '  static x = h();',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const cSym = result.symbols.find((s) => s.name === 'C' && s.kind === 'class');
+    expect(cSym).toBeDefined();
+    const ref = result.references.find((r) => r.targetName === 'h');
+    expect(ref).toBeDefined();
+    expect(ref!.sourceId).toBe(cSym!.id);
+  });
+
+  it('attributes an instance-field-initializer call to the class', () => {
+    const src = [
+      'function h() { return 1; }',
+      'class C {',
+      '  x = h();',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const cSym = result.symbols.find((s) => s.name === 'C' && s.kind === 'class');
+    expect(cSym).toBeDefined();
+    const ref = result.references.find((r) => r.targetName === 'h');
+    expect(ref).toBeDefined();
+    expect(ref!.sourceId).toBe(cSym!.id);
+  });
+
+  it('still attributes method-body calls to the method, not the class', () => {
+    const src = [
+      'function h() {}',
+      'class C {',
+      '  foo() { h(); }',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const fooSym = result.symbols.find((s) => s.name === 'foo' && s.kind === 'method');
+    expect(fooSym).toBeDefined();
+    const ref = result.references.find((r) => r.targetName === 'h');
+    expect(ref).toBeDefined();
+    expect(ref!.sourceId).toBe(fooSym!.id);
   });
 });

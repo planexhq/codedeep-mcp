@@ -190,7 +190,7 @@ describe('python extractor — imports', () => {
     expect(result.imports[0]).toEqual({
       file: 'src/test.py',
       sourceModule: 'os',
-      importedNames: [{ name: 'os' }],
+      importedNames: [{ name: 'os', kind: 'module' }],
       line: 1,
     });
   });
@@ -198,7 +198,9 @@ describe('python extractor — imports', () => {
   it('extracts aliased import', () => {
     const result = extract('import numpy as np\n');
     expect(result.imports[0]!.sourceModule).toBe('numpy');
-    expect(result.imports[0]!.importedNames).toEqual([{ name: 'numpy', alias: 'np' }]);
+    expect(result.imports[0]!.importedNames).toEqual([
+      { name: 'numpy', alias: 'np', kind: 'module' },
+    ]);
   });
 
   it('extracts multi-import as separate ImportInfo records', () => {
@@ -226,6 +228,28 @@ describe('python extractor — imports', () => {
   it('extracts wildcard from-import', () => {
     const result = extract('from .helpers import *\n');
     expect(result.imports[0]!.importedNames).toEqual([{ name: '*' }]);
+  });
+
+  it('marks `from . import utils` as kind=module', () => {
+    const result = extract('from . import utils\n');
+    expect(result.imports[0]!.sourceModule).toBe('.');
+    expect(result.imports[0]!.importedNames).toEqual([
+      { name: 'utils', kind: 'module' },
+    ]);
+  });
+
+  it('marks `from .. import sub` (multi-dot bare) as kind=module', () => {
+    const result = extract('from .. import sub\n');
+    expect(result.imports[0]!.sourceModule).toBe('..');
+    expect(result.imports[0]!.importedNames).toEqual([
+      { name: 'sub', kind: 'module' },
+    ]);
+  });
+
+  it('does not mark `from .pkg import name` as kind=module (named submodule import is a value)', () => {
+    const result = extract('from .pkg import name\n');
+    expect(result.imports[0]!.sourceModule).toBe('.pkg');
+    expect(result.imports[0]!.importedNames).toEqual([{ name: 'name' }]);
   });
 });
 
@@ -377,9 +401,11 @@ describe('python extractor — bare decorator references', () => {
   it('emits a reference for a bare method decorator inside a class', () => {
     const src = ['class C:', '    @staticmethod', '    def m(): pass', ''].join('\n');
     const result = extract(src);
+    const cSym = result.symbols.find((s) => s.name === 'C' && s.kind === 'class');
+    expect(cSym).toBeDefined();
     const refs = result.references.filter((r) => r.targetName === 'staticmethod');
     expect(refs).toHaveLength(1);
-    expect(refs[0]!.sourceId).toBeNull();
+    expect(refs[0]!.sourceId).toBe(cSym!.id);
   });
 
   // walkDecorators skips nested function bodies (and lambdas). A
@@ -402,5 +428,47 @@ describe('python extractor — bare decorator references', () => {
       (r) => r.targetName === 'dataclass' && r.sourceId === outer.id,
     );
     expect(refsFromOuter).toHaveLength(0);
+  });
+});
+
+describe('python extractor — class body call extraction', () => {
+  beforeAll(async () => {
+    await initParser();
+  });
+
+  it('attributes a class-body assignment call to the class', () => {
+    const src = ['def h(): pass', 'class C:', '    x = h()', ''].join('\n');
+    const result = extract(src);
+    const cSym = result.symbols.find((s) => s.name === 'C' && s.kind === 'class');
+    expect(cSym).toBeDefined();
+    const ref = result.references.find((r) => r.targetName === 'h');
+    expect(ref).toBeDefined();
+    expect(ref!.sourceId).toBe(cSym!.id);
+  });
+
+  it('attributes a bare class-body call to the class', () => {
+    const src = ['def h(): pass', 'class C:', '    h()', ''].join('\n');
+    const result = extract(src);
+    const cSym = result.symbols.find((s) => s.name === 'C' && s.kind === 'class');
+    expect(cSym).toBeDefined();
+    const ref = result.references.find((r) => r.targetName === 'h');
+    expect(ref).toBeDefined();
+    expect(ref!.sourceId).toBe(cSym!.id);
+  });
+
+  it('still attributes method-body calls to the method, not the class', () => {
+    const src = [
+      'def h(): pass',
+      'class C:',
+      '    def foo(self):',
+      '        h()',
+      '',
+    ].join('\n');
+    const result = extract(src);
+    const fooSym = result.symbols.find((s) => s.name === 'foo' && s.kind === 'method');
+    expect(fooSym).toBeDefined();
+    const ref = result.references.find((r) => r.targetName === 'h');
+    expect(ref).toBeDefined();
+    expect(ref!.sourceId).toBe(fooSym!.id);
   });
 });

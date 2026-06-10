@@ -139,21 +139,26 @@ function extractClass(
   const className = inner.childForFieldName('name')?.text;
   if (!className) return;
   const exported = isExported(className, allNames);
-  outSymbols.push(
-    makePythonSymbol(
-      rangeNode,
-      inner,
-      pythonSignature(inner, rangeNode, content),
-      fileInfo,
-      'class',
-      className,
-      `${fileInfo.path}:${className}`,
-      exported,
-    ),
+  const classSym = makePythonSymbol(
+    rangeNode,
+    inner,
+    pythonSignature(inner, rangeNode, content),
+    fileInfo,
+    'class',
+    className,
+    `${fileInfo.path}:${className}`,
+    exported,
   );
+  outSymbols.push(classSym);
 
   const body = inner.childForFieldName('body');
   if (!body) return;
+
+  // Walk the class body so class-level calls (`class C: x = helper()`,
+  // `class C: helper()`) attribute to the class. PY_SKIP_TYPES contains
+  // function_definition / lambda / class_definition, so methods,
+  // lambdas, and nested classes stay attributed to themselves.
+  outBodies.push({ symbolId: classSym.id, body });
 
   for (const member of body.namedChildren) {
     if (member.type === 'function_definition') {
@@ -225,22 +230,25 @@ function extractAssignment(
 }
 
 function extractImport(stmt: Node, fileInfo: FileInfo, out: ImportInfo[]): void {
+  // `import x` / `import x as y` — both bind a module object, not a
+  // callable value. kind='module' tells primaryRefMatchesTarget to
+  // not admit bare `x()` / `y()` as bound through the import.
   for (const nameNode of stmt.childrenForFieldName('name')) {
     if (nameNode.type === 'aliased_import') {
-      const inner = nameNode.childForFieldName('name');
-      const alias = nameNode.childForFieldName('alias');
-      if (!inner || !alias) continue;
+      const named = readAliased(nameNode);
+      if (!named) continue;
+      named.kind = 'module';
       out.push({
         file: fileInfo.path,
-        sourceModule: inner.text,
-        importedNames: [{ name: inner.text, alias: alias.text }],
+        sourceModule: named.name,
+        importedNames: [named],
         line: stmt.startPosition.row + 1,
       });
     } else if (nameNode.type === 'dotted_name') {
       out.push({
         file: fileInfo.path,
         sourceModule: nameNode.text,
-        importedNames: [{ name: nameNode.text }],
+        importedNames: [{ name: nameNode.text, kind: 'module' }],
         line: stmt.startPosition.row + 1,
       });
     }
@@ -251,6 +259,14 @@ function extractImportFrom(stmt: Node, fileInfo: FileInfo, out: ImportInfo[]): v
   const moduleNode = stmt.childForFieldName('module_name');
   if (!moduleNode) return;
   const sourceModule = moduleNode.text;
+  // `from . import x` / `from .. import y` — the bare-dot form binds
+  // `x`/`y` as submodule objects of the package, not as callable
+  // values. tree-sitter-python distinguishes by structure: a bare-dot
+  // `relative_import` carries only `import_prefix`, while a named one
+  // (`from .pkg import x`) also has a `dotted_name` child.
+  const bindsModuleObjects =
+    moduleNode.type === 'relative_import' &&
+    !moduleNode.namedChildren.some((c) => c.type === 'dotted_name');
   const importedNames: ImportedName[] = [];
 
   const hasWildcard = stmt.namedChildren.some((c) => c.type === 'wildcard_import');
@@ -258,15 +274,13 @@ function extractImportFrom(stmt: Node, fileInfo: FileInfo, out: ImportInfo[]): v
     importedNames.push({ name: IMPORT_NAMESPACE });
   } else {
     for (const nameNode of stmt.childrenForFieldName('name')) {
-      if (nameNode.type === 'aliased_import') {
-        const inner = nameNode.childForFieldName('name');
-        const alias = nameNode.childForFieldName('alias');
-        if (inner && alias) {
-          importedNames.push({ name: inner.text, alias: alias.text });
-        }
-      } else {
-        importedNames.push({ name: nameNode.text });
-      }
+      const named =
+        nameNode.type === 'aliased_import'
+          ? readAliased(nameNode)
+          : { name: nameNode.text };
+      if (!named) continue;
+      if (bindsModuleObjects) named.kind = 'module';
+      importedNames.push(named);
     }
   }
 
@@ -276,6 +290,13 @@ function extractImportFrom(stmt: Node, fileInfo: FileInfo, out: ImportInfo[]): v
     importedNames,
     line: stmt.startPosition.row + 1,
   });
+}
+
+function readAliased(nameNode: Node): ImportedName | null {
+  const inner = nameNode.childForFieldName('name');
+  const alias = nameNode.childForFieldName('alias');
+  if (!inner || !alias) return null;
+  return { name: inner.text, alias: alias.text };
 }
 
 function pythonSignature(inner: Node, rangeNode: Node, content: string): string {

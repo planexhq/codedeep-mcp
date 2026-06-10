@@ -736,7 +736,7 @@ describe('CodeIndex edge cases', () => {
     await idx.save(cachePath);
 
     const data = JSON.parse(readFileSync(cachePath, 'utf8'));
-    expect(data.version).toBe(2);
+    expect(data.version).toBe(3);
     expect(data.projectRoot).toBe(tmpRoot);
     expect(Array.isArray(data.symbols)).toBe(true);
     expect(Array.isArray(data.files)).toBe(true);
@@ -1564,7 +1564,7 @@ describe('CodeIndex.getReferencesByNameOrAlias', () => {
       makeFileInfo('typescript', 'src/c.ts'),
       [caller],
       [mkUnresolvedRef(caller, 'helper', 'src/c.ts', 2)],
-      [mkImport('src/c.ts', './x', [{ name: '*', alias: 'ns' }])],
+      [mkImport('src/c.ts', './x', [{ name: '*', alias: 'ns', kind: 'namespace' }])],
     );
 
     // TS `import * as ns` exposes member access only — bare `helper()` does
@@ -1572,6 +1572,111 @@ describe('CodeIndex.getReferencesByNameOrAlias', () => {
     // `helper`. The ref is dropped (parameter/local/global), not admitted
     // as a wildcard caller.
     expect(idx.getReferencesByNameOrAlias('helper', aSym.file)).toHaveLength(0);
+  });
+
+  it('drops attribution when `import type { X }` shadows a bare X() in the same file', () => {
+    // `import type` is erased at runtime; bare `Service()` here binds to
+    // the parameter, not the type-only import.
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'Service', file: 'src/types.ts' });
+    const wrap = mkSym({ name: 'wrap', file: 'src/auth.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/types.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/auth.ts'),
+      [wrap],
+      [mkUnresolvedRef(wrap, 'Service', 'src/auth.ts', 2)],
+      [mkImport('src/auth.ts', './types', [{ name: 'Service', kind: 'type' }])],
+    );
+    expect(idx.getReferencesByNameOrAlias('Service', target.file)).toHaveLength(0);
+  });
+
+  it('drops attribution for a bare ns() call when ns is a TS namespace import', () => {
+    // `import * as ns` binds a namespace object; calling `ns()` directly
+    // is a TypeError, never a real call into the source module.
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'ns', file: 'src/m.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/c.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/m.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [caller],
+      [mkUnresolvedRef(caller, 'ns', 'src/c.ts', 2)],
+      [mkImport('src/c.ts', './m', [{ name: '*', alias: 'ns', kind: 'namespace' }])],
+    );
+    expect(idx.getReferencesByNameOrAlias('ns', target.file)).toHaveLength(0);
+  });
+
+  it('drops attribution for a bare utils() call when utils is a Python module import', () => {
+    // Python `import utils` binds the module object; `utils()` is a
+    // TypeError. The cross-file caller list shouldn't surface it.
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'utils', file: 'pkg/utils.py' });
+    const caller = mkSym({ name: 'caller', file: 'pkg/main.py' });
+    idx.addFile(makeFileInfo('python', 'pkg/utils.py'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('python', 'pkg/main.py'),
+      [caller],
+      [mkUnresolvedRef(caller, 'utils', 'pkg/main.py', 2)],
+      [mkImport('pkg/main.py', 'utils', [{ name: 'utils', kind: 'module' }])],
+    );
+    expect(idx.getReferencesByNameOrAlias('utils', target.file)).toHaveLength(0);
+  });
+
+  it('drops attribution for `from . import utils` followed by bare utils()', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'utils', file: 'pkg/utils.py' });
+    const caller = mkSym({ name: 'caller', file: 'pkg/main.py' });
+    idx.addFile(makeFileInfo('python', 'pkg/utils.py'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('python', 'pkg/main.py'),
+      [caller],
+      [mkUnresolvedRef(caller, 'utils', 'pkg/main.py', 2)],
+      [mkImport('pkg/main.py', '.', [{ name: 'utils', kind: 'module' }])],
+    );
+    expect(idx.getReferencesByNameOrAlias('utils', target.file)).toHaveLength(0);
+  });
+
+  it('keeps Y but drops X when `import { type X, Y }` mixes type-only and value', () => {
+    const idx = new CodeIndex();
+    const xTarget = mkSym({ name: 'X', file: 'src/m.ts' });
+    const yTarget = mkSym({ name: 'Y', file: 'src/m.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/c.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/m.ts'), [xTarget, yTarget], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [caller],
+      [
+        mkUnresolvedRef(caller, 'X', 'src/c.ts', 2),
+        mkUnresolvedRef(caller, 'Y', 'src/c.ts', 3),
+      ],
+      [
+        mkImport('src/c.ts', './m', [
+          { name: 'X', kind: 'type' },
+          { name: 'Y' },
+        ]),
+      ],
+    );
+    expect(idx.getReferencesByNameOrAlias('X', xTarget.file)).toHaveLength(0);
+    expect(idx.getReferencesByNameOrAlias('Y', yTarget.file)).toHaveLength(1);
+  });
+
+  it('drops alias attribution when `import type { X as Y }` is renaming type-only', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'Service', file: 'src/m.ts' });
+    const caller = mkSym({ name: 'caller', file: 'src/c.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/m.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [caller],
+      // Reference targets the local alias 'S'.
+      [mkUnresolvedRef(caller, 'S', 'src/c.ts', 2)],
+      [
+        mkImport('src/c.ts', './m', [
+          { name: 'Service', alias: 'S', kind: 'type' },
+        ]),
+      ],
+    );
+    expect(idx.getReferencesByNameOrAlias('Service', target.file)).toHaveLength(0);
   });
 });
 

@@ -34,6 +34,14 @@ export type RefKind = 'calls' | 'imports' | 'implements' | 'type_ref';
 export const IMPORT_DEFAULT = 'default' as const;
 export const IMPORT_NAMESPACE = '*' as const;
 
+// Discriminator for binding semantics, separate from the syntactic
+// `name` slot. Bare `localName()` calls are evidence of a value-callable
+// binding only when kind is 'value' (or absent — legacy persisted data
+// is treated as 'value'). Non-value bindings are TypeErrors at runtime
+// if invoked directly, so they shouldn't be attributed as callers of
+// the source module's exports.
+export type ImportKind = 'value' | 'type' | 'namespace' | 'module';
+
 // Sentinel language tag for files whose extension we don't recognize.
 // They're recorded as FileInfo (so overview can report them) but skipped
 // at parse/extract time.
@@ -70,6 +78,9 @@ export interface Reference {
 export interface ImportedName {
   name: string;
   alias?: string;
+  // Absence is interpreted as 'value' so legacy persisted indexes
+  // (pre-schema-v3) keep their existing attribution semantics.
+  kind?: ImportKind;
 }
 
 export interface ImportInfo {

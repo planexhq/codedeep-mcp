@@ -112,14 +112,19 @@ function extractTopLevel(
     case 'abstract_class_declaration': {
       const className = target.childForFieldName('name')?.text;
       if (!className) return;
-      outSymbols.push(
-        makeSymbol(target, outer, declSignature(target, content), fileInfo, 'class', className, `${fileInfo.path}:${className}`, exported),
-      );
+      const classSym = makeSymbol(target, outer, declSignature(target, content), fileInfo, 'class', className, `${fileInfo.path}:${className}`, exported);
+      outSymbols.push(classSym);
       const body = target.childForFieldName('body');
       if (!body) return;
       for (const member of body.namedChildren) {
         extractClassMember(member, content, fileInfo, className, exported, outSymbols, outBodies);
       }
+      // Walk the class body itself so calls in static blocks and
+      // non-callable field initializers (`static x = helper()`,
+      // `field = helper()`) attribute to the class. TS_SKIP_TYPES
+      // contains method_definition + function/arrow forms, so calls
+      // inside member function bodies stay attributed to the member.
+      outBodies.push({ symbolId: classSym.id, body });
       return;
     }
     case 'interface_declaration': {
@@ -243,17 +248,23 @@ function extractImport(stmt: Node, fileInfo: FileInfo, out: ImportInfo[]): void 
   if (!sourceNode) return;
   const sourceModule = sourceNode.text.replace(/^['"`]|['"`]$/g, '');
   const importedNames: ImportedName[] = [];
+  // `import type { ... }` — the `type` token is an unnamed child of
+  // import_statement, so it isn't surfaced via namedChildren.
+  const wholeIsTypeOnly = hasTypeKeyword(stmt);
 
   for (const child of stmt.namedChildren) {
     if (child.type !== 'import_clause') continue;
     for (const item of child.namedChildren) {
       if (item.type === 'identifier') {
-        importedNames.push({ name: IMPORT_DEFAULT, alias: item.text });
+        const named: ImportedName = { name: IMPORT_DEFAULT, alias: item.text };
+        if (wholeIsTypeOnly) named.kind = 'type';
+        importedNames.push(named);
       } else if (item.type === 'namespace_import') {
         for (const nsChild of item.namedChildren) {
-          if (nsChild.type === 'identifier') {
-            importedNames.push({ name: IMPORT_NAMESPACE, alias: nsChild.text });
-          }
+          if (nsChild.type !== 'identifier') continue;
+          const named: ImportedName = { name: IMPORT_NAMESPACE, alias: nsChild.text };
+          named.kind = wholeIsTypeOnly ? 'type' : 'namespace';
+          importedNames.push(named);
         }
       } else if (item.type === 'named_imports') {
         for (const spec of item.namedChildren) {
@@ -261,7 +272,12 @@ function extractImport(stmt: Node, fileInfo: FileInfo, out: ImportInfo[]): void 
           const specName = spec.childForFieldName('name')?.text;
           if (!specName) continue;
           const specAlias = spec.childForFieldName('alias')?.text;
-          importedNames.push(specAlias ? { name: specName, alias: specAlias } : { name: specName });
+          const named: ImportedName = { name: specName };
+          if (specAlias) named.alias = specAlias;
+          // `import { type X, Y }` — per-specifier `type` keyword sits
+          // as an unnamed child before the name identifier.
+          if (wholeIsTypeOnly || hasTypeKeyword(spec)) named.kind = 'type';
+          importedNames.push(named);
         }
       }
     }
@@ -273,6 +289,13 @@ function extractImport(stmt: Node, fileInfo: FileInfo, out: ImportInfo[]): void 
     importedNames,
     line: stmt.startPosition.row + 1,
   });
+}
+
+function hasTypeKeyword(node: Node): boolean {
+  for (let i = 0; i < node.childCount; i++) {
+    if (node.child(i)?.type === 'type') return true;
+  }
+  return false;
 }
 
 function makeSymbol(

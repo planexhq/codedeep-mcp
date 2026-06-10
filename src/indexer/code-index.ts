@@ -15,9 +15,12 @@ import type {
   SymbolKind,
 } from '../types.js';
 
-// v2 persists raw references so unresolved cross-file refs (targetId=null)
-// survive save/load. v1 caches are invalidated at load.
-const SCHEMA_VERSION = 2;
+// v3 adds the optional `kind` discriminator on ImportedName so non-value
+// bindings (TS `import type`, `import * as`, Python `import x`) don't
+// surface bare callee names as cross-file callers. Older caches lack
+// the field — equivalent to kind='value' — so attribution silently
+// degrades unless we re-extract; bumping forces a rebuild.
+const SCHEMA_VERSION = 3;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both
@@ -372,6 +375,10 @@ export class CodeIndex {
           if (named.name !== name || !named.alias || named.alias === name) {
             continue;
           }
+          // Renaming type-only aliases (`import type { X as Y }`) are
+          // erased at runtime; their alias-named call sites can't bind
+          // through the import.
+          if (!isValueBinding(named)) continue;
           if (targetFile !== undefined) {
             const importingFile = this.fileByPath.get(filePath);
             if (!importingFile) continue;
@@ -683,6 +690,7 @@ export class CodeIndex {
         }
         const localName = named.alias ?? named.name;
         if (localName !== name) continue;
+        if (!isValueBinding(named)) continue;
         // The local binding `name` is an alias for a different export.
         // The alias loop attributes via resolveImportTarget; skip here
         // so the ref isn't double-attributed to a same-named homonym.
@@ -813,6 +821,16 @@ function isRenamingNamedAlias(named: ImportedName): boolean {
 // member access only (bare callees don't bind through it).
 export function isWildcardImport(named: ImportedName): boolean {
   return named.name === IMPORT_NAMESPACE && named.alias === undefined;
+}
+
+// Bindings where bare `localName()` is a legitimate value-callable site.
+// kind='type' (TS `import type`), 'namespace' (TS `import * as ns`), and
+// 'module' (Python `import x` / `from . import x`) all bind something
+// that throws TypeError when invoked directly, so they shouldn't be
+// admitted as evidence that a bare call resolves through the import.
+// Absent kind defaults to 'value' for legacy persisted indexes.
+function isValueBinding(named: ImportedName): boolean {
+  return named.kind === undefined || named.kind === 'value';
 }
 
 // Filters refs to those that should be surfaced as callers of `target`.
