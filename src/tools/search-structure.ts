@@ -3,7 +3,7 @@ import { initParser, parseFile } from '../indexer/parser.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { compareShallowFirst } from '../indexer/scanner.js';
 import { errMsg, log } from '../logger.js';
-import type { FileInfo, ProbeConfig, Symbol } from '../types.js';
+import type { FileInfo, GitMeta, ProbeConfig, Symbol } from '../types.js';
 
 import {
   MODULE_LEVEL,
@@ -31,6 +31,52 @@ export interface SearchStructureDeps {
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 100;
+
+// Git churn boost for query mode: recently active files float up. Capped
+// at 1.5x — the same magnitude as the exported-symbol boost — so churn
+// reorders near-ties but never outweighs MiniSearch's name relevance
+// (name field boost is 3). log1p-scaled because commit counts are
+// heavy-tailed: one 300-commit churner must not flatten the boost for
+// the 1-30 range where most files live.
+const GIT_BOOST_MAX_EXTRA = 0.5;
+
+// Memoized on the GitMeta OBJECT IDENTITY: every path that changes the
+// underlying commitFrequency data — applyGitAnalysis, load(), and
+// clearGitData() — replaces (or nulls) the GitMeta instance, so keying
+// on the object collapses cache validity into one invariant owned by
+// CodeIndex itself. No generation counter, no cross-module guard.
+const boostMemo = new WeakMap<GitMeta, ReadonlyMap<string, number> | undefined>();
+
+function gitBoostMap(
+  deps: SearchStructureDeps,
+): ReadonlyMap<string, number> | undefined {
+  const meta = deps.index.getGitMeta();
+  if (meta === null) return undefined;
+  if (boostMemo.has(meta)) return boostMemo.get(meta);
+
+  const churned = deps.index
+    .getAllFiles()
+    .filter((f) => (f.commitFrequency ?? 0) > 0);
+  let map: Map<string, number> | undefined;
+  if (churned.length > 0) {
+    // Plain loop, NOT Math.max(...spread): spreading throws RangeError
+    // past ~125k elements, and an exception here would surface as an
+    // in-band tool error caused purely by git enrichment.
+    let maxLog = 0;
+    for (const f of churned) {
+      const lg = Math.log1p(f.commitFrequency!);
+      if (lg > maxLog) maxLog = lg;
+    }
+    map = new Map(
+      churned.map((f) => [
+        f.path,
+        1 + GIT_BOOST_MAX_EXTRA * (Math.log1p(f.commitFrequency!) / maxLog),
+      ]),
+    );
+  }
+  boostMemo.set(meta, map);
+  return map;
+}
 // Pattern scans read every candidate file from disk; bound the worst case
 // (zero matches on a huge repo) and tell the caller to narrow instead.
 const PATTERN_FILE_CAP = 2000;
@@ -113,7 +159,11 @@ function runQueryMode(
   deps: SearchStructureDeps,
   languageArg: string | undefined,
 ): string {
-  const { symbols, total } = deps.index.searchSymbols(query, { limit, languages });
+  const { symbols, total } = deps.index.searchSymbols(query, {
+    limit,
+    languages,
+    boostByFile: gitBoostMap(deps),
+  });
   if (symbols.length === 0) {
     const filterNote = languageArg ? ` (language: ${languageArg})` : '';
     return `No matches for '${query}'${filterNote}.`;

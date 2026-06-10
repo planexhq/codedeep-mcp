@@ -3,10 +3,12 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CodeIndex, isCallerOf } from '../../src/indexer/code-index.js';
-import type { Reference, SymbolKind } from '../../src/types.js';
+import type { CoChange, Reference, SymbolKind } from '../../src/types.js';
 import {
   makeFileInfo,
   makeProjectDir,
+  mkCoChange,
+  mkGitMeta,
   mkImport,
   mkMemberRef,
   mkModuleRef,
@@ -842,7 +844,7 @@ describe('CodeIndex edge cases', () => {
     await idx.save(cachePath);
 
     const data = JSON.parse(readFileSync(cachePath, 'utf8'));
-    expect(data.version).toBe(4);
+    expect(data.version).toBe(5);
     expect(data.projectRoot).toBe(tmpRoot);
     expect(Array.isArray(data.symbols)).toBe(true);
     expect(Array.isArray(data.files)).toBe(true);
@@ -850,6 +852,9 @@ describe('CodeIndex edge cases', () => {
     expect(Array.isArray(data.callees)).toBe(true);
     expect(Array.isArray(data.callers)).toBe(true);
     expect(Array.isArray(data.references)).toBe(true);
+    expect(Array.isArray(data.cochanges)).toBe(true);
+    expect(Array.isArray(data.hotspots)).toBe(true);
+    expect(data.gitMeta).toBeNull();
   });
 });
 
@@ -2167,11 +2172,31 @@ describe('CodeIndex persistence — references round-trip', () => {
     expect(refs[0].line).toBe(7);
   });
 
-  it('rejects a cache whose reference carries a non-string receiver', async () => {
+  it('invalidates v4 caches, which lack the git enrichment sections', async () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
         version: 4,
+        createdAt: 0,
+        projectRoot: tmpRoot,
+        symbols: [],
+        files: [],
+        imports: [],
+        callees: [],
+        callers: [],
+        references: [],
+      }),
+    );
+    const idx = new CodeIndex(tmpRoot);
+    expect(await idx.load(cachePath)).toBe(false);
+    expect(existsSync(cachePath)).toBe(false);
+  });
+
+  it('rejects a cache whose reference carries a non-string receiver', async () => {
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        version: 5,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],
@@ -2190,6 +2215,9 @@ describe('CodeIndex persistence — references round-trip', () => {
             receiver: 42,
           },
         ],
+        cochanges: [],
+        hotspots: [],
+        gitMeta: null,
       }),
     );
     const idx = new CodeIndex(tmpRoot);
@@ -2590,5 +2618,208 @@ describe('CodeIndex member-ref adjacency and counts', () => {
 
     idx.removeFile('src/app.ts');
     expect(idx.getReferencesByName('save')).toHaveLength(0);
+  });
+});
+
+describe('CodeIndex git enrichment (schema v5)', () => {
+  function seededIndex(): CodeIndex {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [mkSym({ name: 'a', file: 'src/a.ts' })], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/b.ts'), [mkSym({ name: 'b', file: 'src/b.ts' })], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/c.ts'), [], [], []);
+    return idx;
+  }
+
+  const META = mkGitMeta({ head: 'abc123', analyzedAt: 1_700_000_000_000 });
+
+  async function applySample(idx: CodeIndex): Promise<void> {
+    const ab = mkCoChange('src/a.ts', 'src/b.ts', 5);
+    const aYaml = mkCoChange('config/x.yaml', 'src/a.ts', 3);
+    await idx.applyGitAnalysis({
+      counts: new Map([
+        ['src/a.ts', 10],
+        ['src/b.ts', 7],
+        ['config/x.yaml', 4],
+      ]),
+      cochanges: new Map([
+        ['src/a.ts', [ab, aYaml]],
+        ['src/b.ts', [ab]],
+        // Key not in the index — must be dropped on apply.
+        ['gone/old.ts', [mkCoChange('gone/old.ts', 'src/a.ts')]],
+      ]),
+      hotspots: ['src/a.ts', 'src/b.ts', 'gone/old.ts'],
+      meta: META,
+    });
+  }
+
+  it('applyGitAnalysis sets commitFrequency for every indexed file (0 when uncommitted)', async () => {
+    const idx = seededIndex();
+    expect(idx.getFile('src/a.ts')?.commitFrequency).toBeUndefined();
+    await applySample(idx);
+    expect(idx.getFile('src/a.ts')?.commitFrequency).toBe(10);
+    expect(idx.getFile('src/b.ts')?.commitFrequency).toBe(7);
+    expect(idx.getFile('src/c.ts')?.commitFrequency).toBe(0);
+  });
+
+  it('applyGitAnalysis filters cochange keys and hotspots to indexed files', async () => {
+    const idx = seededIndex();
+    await applySample(idx);
+    expect(idx.getCoChanges('gone/old.ts')).toEqual([]);
+    expect(idx.getCoChanges('src/a.ts')).toHaveLength(2);
+    expect(idx.getHotspots().map((h) => h.path)).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(idx.getGitMeta()).toEqual(META);
+  });
+
+  it('getHotspots joins live commit counts and respects the limit', async () => {
+    const idx = seededIndex();
+    await applySample(idx);
+    expect(idx.getHotspots(1)).toEqual([{ path: 'src/a.ts', commits: 10 }]);
+    expect(idx.getHotspots()).toEqual([
+      { path: 'src/a.ts', commits: 10 },
+      { path: 'src/b.ts', commits: 7 },
+    ]);
+  });
+
+  it('a second applyGitAnalysis replaces prior results wholesale', async () => {
+    const idx = seededIndex();
+    await applySample(idx);
+    await idx.applyGitAnalysis({
+      counts: new Map([['src/b.ts', 2]]),
+      cochanges: new Map(),
+      hotspots: ['src/b.ts'],
+      meta: { ...META, head: 'def456' },
+    });
+    expect(idx.getCoChanges('src/a.ts')).toEqual([]);
+    expect(idx.getFile('src/a.ts')?.commitFrequency).toBe(0);
+    expect(idx.getFile('src/b.ts')?.commitFrequency).toBe(2);
+    expect(idx.getHotspots().map((h) => h.path)).toEqual(['src/b.ts']);
+    expect(idx.getGitMeta()?.head).toBe('def456');
+  });
+
+  it('removeFile prunes the own cochange key and hotspot entry but keeps partner-side records', async () => {
+    const idx = seededIndex();
+    await applySample(idx);
+
+    expect(idx.removeFile('src/a.ts')).toBe(true);
+
+    expect(idx.getCoChanges('src/a.ts')).toEqual([]);
+    expect(idx.getHotspots().map((h) => h.path)).toEqual(['src/b.ts']);
+    // b's record naming a as partner is retained: a fresh analysis would
+    // re-derive it (partner values may be non-indexed paths).
+    expect(idx.getCoChanges('src/b.ts')).toHaveLength(1);
+  });
+
+  it('updateFile preserves commitFrequency, cochange key, and hotspot membership', async () => {
+    const idx = seededIndex();
+    await applySample(idx);
+
+    const fresh = makeFileInfo('typescript', 'src/a.ts');
+    expect(fresh.commitFrequency).toBeUndefined();
+    idx.updateFile(fresh, [mkSym({ name: 'a2', file: 'src/a.ts' })], [], []);
+
+    expect(idx.getFile('src/a.ts')?.commitFrequency).toBe(10);
+    expect(idx.getCoChanges('src/a.ts')).toHaveLength(2);
+    expect(idx.getHotspots().map((h) => h.path)).toContain('src/a.ts');
+  });
+
+  it('round-trips git data through save/load', async () => {
+    const idx = seededIndex();
+    await applySample(idx);
+    await idx.save(cachePath);
+
+    const loaded = new CodeIndex(tmpRoot);
+    expect(await loaded.load(cachePath)).toBe(true);
+
+    expect(loaded.getGitMeta()).toEqual(META);
+    expect(loaded.getFile('src/a.ts')?.commitFrequency).toBe(10);
+    expect(loaded.getFile('src/c.ts')?.commitFrequency).toBe(0);
+    expect(loaded.getCoChanges('src/a.ts')).toEqual(idx.getCoChanges('src/a.ts'));
+    expect(loaded.getHotspots()).toEqual(idx.getHotspots());
+  });
+
+  it('rejects a cache with a malformed cochange record', async () => {
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        version: 5,
+        createdAt: 0,
+        projectRoot: tmpRoot,
+        symbols: [],
+        files: [],
+        imports: [],
+        callees: [],
+        callers: [],
+        references: [],
+        cochanges: [['src/a.ts', [{ fileA: 'src/a.ts' }]]],
+        hotspots: [],
+        gitMeta: null,
+      }),
+    );
+    const idx = new CodeIndex(tmpRoot);
+    expect(await idx.load(cachePath)).toBe(false);
+    expect(existsSync(cachePath)).toBe(false);
+  });
+
+  it('rejects a cache with a malformed gitMeta', async () => {
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        version: 5,
+        createdAt: 0,
+        projectRoot: tmpRoot,
+        symbols: [],
+        files: [],
+        imports: [],
+        callees: [],
+        callers: [],
+        references: [],
+        cochanges: [],
+        hotspots: [],
+        gitMeta: { head: 42 },
+      }),
+    );
+    const idx = new CodeIndex(tmpRoot);
+    expect(await idx.load(cachePath)).toBe(false);
+  });
+
+  it('save chained after applyGitAnalysis persists the applied data (write lock ordering)', async () => {
+    const idx = seededIndex();
+    // Do not await apply before save — the lock must serialize them.
+    const applied = applySample(idx);
+    const saved = idx.save(cachePath);
+    await Promise.all([applied, saved]);
+
+    const loaded = new CodeIndex(tmpRoot);
+    expect(await loaded.load(cachePath)).toBe(true);
+    expect(loaded.getGitMeta()).toEqual(META);
+    expect(loaded.getFile('src/a.ts')?.commitFrequency).toBe(10);
+  });
+
+  it('searchSymbols boostByFile reorders equal-relevance results and composes with the export boost', () => {
+    const idx = new CodeIndex();
+    // Same name in two files — identical relevance; only file boost differs.
+    const cold = mkSym({ name: 'handler', file: 'src/cold.ts' });
+    const hot = mkSym({ name: 'handler', file: 'src/hot.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/cold.ts'), [cold], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/hot.ts'), [hot], [], []);
+
+    const plain = idx.searchSymbols('handler', { limit: 5 });
+    expect(plain.symbols).toHaveLength(2);
+
+    const boosted = idx.searchSymbols('handler', {
+      limit: 5,
+      boostByFile: new Map([['src/hot.ts', 1.5]]),
+    });
+    expect(boosted.symbols[0].file).toBe('src/hot.ts');
+
+    // An exported cold symbol at 1.5x ties the hot boost; raising the file
+    // boost beyond it wins again — multiplicative composition.
+    const exportedCold = mkSym({ name: 'handler', file: 'src/cold2.ts', exported: true });
+    idx.addFile(makeFileInfo('typescript', 'src/cold2.ts'), [exportedCold], [], []);
+    const composed = idx.searchSymbols('handler', {
+      limit: 5,
+      boostByFile: new Map([['src/hot.ts', 1.6]]),
+    });
+    expect(composed.symbols[0].file).toBe('src/hot.ts');
   });
 });

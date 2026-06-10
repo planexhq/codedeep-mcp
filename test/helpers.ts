@@ -6,7 +6,9 @@ import { vi } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { symbolId } from '../src/indexer/extractor.js';
 import type {
+  CoChange,
   FileInfo,
+  GitMeta,
   ImportedName,
   ImportInfo,
   ProbeConfig,
@@ -67,6 +69,8 @@ export function makeConfig(
     maxFileSize: overrides.maxFileSize ?? base.maxFileSize,
     cacheDir: overrides.cacheDir ?? base.cacheDir,
     watch: overrides.watch ?? base.watch,
+    gitEnabled: overrides.gitEnabled ?? base.gitEnabled,
+    gitWindow: overrides.gitWindow ?? base.gitWindow,
   }) as ProbeConfig;
 }
 
@@ -185,5 +189,55 @@ export function mkImport(
     sourceModule,
     importedNames: names.map((n) => (typeof n === 'string' ? { name: n } : n)),
     line: 1,
+  };
+}
+
+// Disabled-git stub for tool deps: behaves like a non-git project (null /
+// empty returns) so non-git assertions stay valid. Git-specific tests
+// spread-override the methods they need. Satisfies every Pick<GitService>
+// a tool dep declares.
+export function makeGitStub(
+  overrides: Partial<{
+    branchSummary: () => Promise<import('../src/git/git-service.js').BranchSummary | null>;
+    recentCommits: (
+      path: string,
+      n?: number,
+    ) => Promise<import('../src/git/git-service.js').RecentCommit[]>;
+  }> = {},
+) {
+  return {
+    branchSummary: async () => null,
+    recentCommits: async () => [],
+    ...overrides,
+  };
+}
+
+// Builders for git-enrichment fixtures, mirroring mkSym/mkRef for the
+// structural side. mkCoChange keeps the canonical fileA < fileB
+// orientation the analyzer guarantees ONLY if callers pass it that way —
+// tests deliberately pass both orientations to pin direction handling.
+export function mkCoChange(
+  fileA: string,
+  fileB: string,
+  shared = 3,
+  overrides: Partial<CoChange> = {},
+): CoChange {
+  return {
+    fileA,
+    fileB,
+    sharedCommits: shared,
+    confidenceAB: 0.5,
+    confidenceBA: 0.25,
+    lastSeen: 1_000_000,
+    ...overrides,
+  };
+}
+
+export function mkGitMeta(overrides: Partial<GitMeta> = {}): GitMeta {
+  return {
+    head: 'h'.repeat(40),
+    windowDays: 180,
+    analyzedAt: Date.now(),
+    ...overrides,
   };
 }

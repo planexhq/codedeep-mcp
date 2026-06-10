@@ -4,11 +4,13 @@ import {
   isCallerOf,
   isClassMember,
 } from '../indexer/code-index.js';
+import type { GitService } from '../git/git-service.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
 import type { ImportInfo, ProbeConfig, Symbol } from '../types.js';
 
 import {
+  BEHAVIORAL_TAG,
   MODULE_LEVEL,
   NAME_MATCH_HEADER_QUALIFIER,
   NAME_MATCH_TAG,
@@ -16,6 +18,7 @@ import {
   displaySignature,
   normalizeFilePath,
   pickByLine,
+  plural,
   readinessBanner,
   renderAmbiguous,
   renderSuggestions,
@@ -23,6 +26,7 @@ import {
   sectionOrEmpty,
   sectionOrNone,
   textResponse,
+  topCoChangePartners,
   type ToolResponse,
 } from './common.js';
 
@@ -38,6 +42,7 @@ export interface GetContextDeps {
   index: CodeIndex;
   indexer: Pick<Indexer, 'ready'>;
   config: ProbeConfig;
+  git: Pick<GitService, 'recentCommits'>;
 }
 
 const DEFAULT_MAX_TOKENS = 3000;
@@ -46,13 +51,21 @@ const SUGGEST_LIMIT = 5;
 // statements (`export { x } from './y'`), so any "exported by" listing in
 // Phase 1a would only surface coincidentally same-named exports from
 // unrelated files. The section returns when re-export edges land.
-const ALL_SECTIONS = ['body', 'callers', 'callees', 'imports'] as const;
+// `co_changes` and `git` sit last: they render at the end and are the
+// first casualties under max_tokens pressure (enrichment, not core).
+const ALL_SECTIONS = ['body', 'callers', 'callees', 'imports', 'co_changes', 'git'] as const;
 type Section = typeof ALL_SECTIONS[number];
 
 type SectionItem = {
   name: string;
   includeKey: Section;
   render: () => Promise<string> | string;
+  // Cheap synchronous answer to "would render() be non-empty?" — used
+  // only after the budget is exhausted, to skip paying for renders whose
+  // output would be discarded (or to name the truncation point without
+  // rendering it). Omit when emptiness is only knowable by rendering
+  // (e.g. the recent-changes subprocess).
+  peekNonEmpty?: () => boolean;
 };
 
 function truncationNote(at: string, maxTokens: number): string {
@@ -71,10 +84,23 @@ async function renderBudgeted(
   let truncatedAt: string | null = null;
   for (const item of items) {
     if (!include.has(item.includeKey)) continue;
+    // Once the budget is spent, a cheap peek avoids rendering work whose
+    // output would be discarded: known-empty sections skip silently,
+    // known non-empty ones become the truncation point without paying
+    // their render. Sections without a peek (recent-changes subprocess)
+    // still render below so the note stays honest.
     if (item.includeKey !== neverDrop && used >= maxTokens) {
-      truncatedAt = item.name;
-      break;
+      const peek = item.peekNonEmpty?.();
+      if (peek === false) continue;
+      if (peek === true) {
+        truncatedAt = item.name;
+        break;
+      }
     }
+    // Render BEFORE deciding truncation: a section that renders empty
+    // (e.g. git sections outside a repo) is silently elided either way,
+    // so the truncation note can never name it and promise content a
+    // larger max_tokens would not reveal.
     const text = await item.render();
     if (!text) continue;
     const cost = estimate(text);
@@ -209,20 +235,72 @@ async function renderSymbolBlock(
       name: 'callers',
       includeKey: 'callers',
       render: () => renderCallerEdges(deps.index.getCallerEdges(target.id)),
+      peekNonEmpty: () => true, // sectionOrNone renders "(none)"
     },
     {
       name: 'callees',
       includeKey: 'callees',
       render: () => renderCalleeEdges(deps.index.getCallees(target.id)),
+      peekNonEmpty: () => true,
     },
     {
       name: 'imports',
       includeKey: 'imports',
       render: () => renderImports(file, deps.index),
+      peekNonEmpty: () => deps.index.getImports(file).length > 0,
     },
+    ...gitSectionItems(target.file, deps),
   ];
 
   return renderBudgeted(header, items, include, maxTokens, 'body');
+}
+
+// The two git sections are identical in both modes and always trail the
+// list (first to drop under budget pressure).
+function gitSectionItems(file: string, deps: GetContextDeps): SectionItem[] {
+  return [
+    {
+      name: 'co-change partners',
+      includeKey: 'co_changes',
+      render: () => renderCoChanges(file, deps.index),
+      peekNonEmpty: () => deps.index.getCoChanges(file).length > 0,
+    },
+    {
+      name: 'recent changes',
+      includeKey: 'git',
+      render: () => renderRecentChanges(file, deps.git),
+    },
+  ];
+}
+
+function renderCoChanges(file: string, index: CodeIndex): string {
+  const rows = topCoChangePartners(index.getCoChanges(file), file);
+  return sectionOrEmpty(
+    `### Co-change Partners (${rows.length} behavioral)`,
+    rows.map(
+      (r) =>
+        `- ${r.partner}  ${r.pct}% confidence (${r.shared} shared ${plural('commit', r.shared)})`,
+    ),
+  );
+}
+
+// Defensive try/catch at the tool boundary: GitService promises not to
+// throw, but a git failure must never turn a get_context call into an
+// in-band "Error:" response — the section just vanishes.
+async function renderRecentChanges(
+  file: string,
+  git: GetContextDeps['git'],
+): Promise<string> {
+  let commits;
+  try {
+    commits = await git.recentCommits(file);
+  } catch {
+    return '';
+  }
+  return sectionOrEmpty(
+    `### Recent Changes ${BEHAVIORAL_TAG}`,
+    commits.map((c) => `- ${c.date} ${c.hash} "${c.subject}"`),
+  );
 }
 
 async function renderBody(
@@ -323,6 +401,7 @@ async function renderFileMode(
       name: 'Imports',
       includeKey: 'imports',
       render: () => sectionOrEmpty('### Imports', renderImportLines(imports)),
+      peekNonEmpty: () => imports.length > 0,
     },
     {
       name: "Callers of this file's exports",
@@ -332,7 +411,11 @@ async function renderFileMode(
           `### Callers of this file's exports ${NAME_MATCH_HEADER_QUALIFIER}`,
           collectExportCallers(exported, deps.index),
         ),
+      // sectionOrNone always renders; peeking spares the reference scan
+      // when the budget is already gone.
+      peekNonEmpty: () => true,
     },
+    ...gitSectionItems(file, deps),
   ];
 
   return renderBudgeted(header, items, include, maxTokens);
@@ -379,6 +462,3 @@ function estimate(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-function plural(word: string, count: number): string {
-  return count === 1 ? word : `${word}s`;
-}

@@ -2,6 +2,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { loadConfig, resolveCacheDir } from "./config.js";
+import { GitService } from "./git/git-service.js";
 import { CodeIndex } from "./indexer/code-index.js";
 import { Indexer } from "./indexer/pipeline.js";
 import { Watcher } from "./indexer/watcher.js";
@@ -58,6 +59,18 @@ if (config.watch) {
   watcher.start();
 }
 
+// Git enrichment starts strictly AFTER the startup index resolves: the
+// analyzer filters to fileByPath membership, so running against a
+// cold/empty index would persist an EMPTY analysis whose gitMeta marks
+// it fresh for a day. The .catch(() => {}) keeps git alive when
+// indexChanged fails over a successfully loaded cache. Tool calls served
+// before the first analysis simply omit git sections (warm starts get
+// them instantly from the v5 cache).
+// git.start() never throws (it catches internally), and the leading
+// .catch makes the chain unrejectable — one line, one error path.
+const git = new GitService(config, index, indexer.cachePath);
+void indexingPromise.catch(() => {}).then(() => git.start());
+
 // Flush-on-shutdown — the watcher's per-flush saves bound the loss window,
 // but exiting between flushes shouldn't discard the last debounce batch.
 // watcher.close() drains that batch and persists through its normal save
@@ -95,6 +108,9 @@ function shutdown(
         // index finish (it persists internally) as the pre-watcher
         // server did. Signals skip the wait: the user wants out now.
         if (waitForStartup) await indexingPromise.catch(() => {});
+        // Sync-fast: aborts in-flight git children. Never awaits the
+        // analysis — the watchdog must not ride on a git subprocess.
+        git.close();
         await watcher?.close();
       })();
       const watchdog = new Promise<"timeout">((resolve) => {
@@ -124,5 +140,5 @@ process.on("SIGTERM", () => shutdown("SIGTERM received", false, true));
 process.stdin.once("end", () => shutdown("stdin closed", true));
 process.stdin.once("close", () => shutdown("stdin closed", true));
 
-const server = createServer({ index, indexer, config });
+const server = createServer({ index, indexer, config, git });
 await server.connect(new StdioServerTransport());

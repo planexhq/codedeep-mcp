@@ -7,6 +7,7 @@ import {
   isClassMember,
   zeroSymbolsByKind,
 } from '../indexer/code-index.js';
+import type { BranchSummary, GitService } from '../git/git-service.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { compareShallowFirst } from '../indexer/scanner.js';
 import { errMsg, log } from '../logger.js';
@@ -18,7 +19,13 @@ import {
   type SymbolKind,
 } from '../types.js';
 
-import { INDEXING_BANNER, textResponse, type ToolResponse } from './common.js';
+import {
+  BEHAVIORAL_TAG,
+  INDEXING_BANNER,
+  plural,
+  textResponse,
+  type ToolResponse,
+} from './common.js';
 
 export interface OverviewArgs {
   path?: string;
@@ -28,12 +35,14 @@ export interface OverviewDeps {
   index: CodeIndex;
   indexer: Pick<Indexer, 'ready'>;
   config: ProbeConfig;
+  git: Pick<GitService, 'branchSummary'>;
 }
 
 const MAX_DIR_GROUPS = 7;
 const MAX_KINDS_PER_GROUP = 3;
 const MAX_ENTRY_POINTS = 15;
 const MAX_OTHER_EXTENSIONS = 5;
+const MAX_HOTSPOTS = 10;
 
 // Without this, monorepos with many packages/*/index.ts (or many
 // __init__.py) saturate MAX_ENTRY_POINTS alphabetically and hide the real
@@ -151,10 +160,67 @@ export async function runOverview(
       `- ${stats.totalFiles} ${plural('file', stats.totalFiles)} indexed, ${stats.totalSymbols} total ${plural('symbol', stats.totalSymbols)}`,
     );
 
+    appendGitSections(lines, await collectGitData(deps));
+
     return textResponse(lines.join('\n'));
   } catch (err) {
     return textResponse(`Error: ${errMsg(err)}`);
   }
+}
+
+interface OverviewGitData {
+  branch: BranchSummary | null;
+  hotspots: Array<{ path: string; commits: number }>;
+  windowDays: number;
+}
+
+// Defensive catch at the tool boundary: GitService promises not to
+// throw, but a git failure must never break overview output.
+async function collectGitData(deps: OverviewDeps): Promise<OverviewGitData> {
+  let branch: BranchSummary | null = null;
+  try {
+    branch = await deps.git.branchSummary();
+  } catch {
+    branch = null;
+  }
+  return {
+    branch,
+    hotspots: deps.index.getHotspots(MAX_HOTSPOTS),
+    // Label with the window that PRODUCED the data (gitMeta provenance),
+    // not the live config: after a gitWindow change, persisted counts
+    // keep their true label until the re-analysis lands.
+    windowDays: deps.index.getGitMeta()?.windowDays ?? deps.config.gitWindow,
+  };
+}
+
+// Both sections vanish entirely outside git repos (and before the first
+// analysis lands) — silent omission is the degradation contract, never a
+// placeholder. Hotspots come from the persisted index, so a warm start
+// shows them immediately, even while the indexing banner is up.
+function appendGitSections(lines: string[], data: OverviewGitData): void {
+  if (data.branch !== null) {
+    lines.push('', `### Branch ${BEHAVIORAL_TAG}`, formatBranchLine(data.branch));
+  }
+  if (data.hotspots.length > 0) {
+    lines.push('', `### Hotspots (last ${data.windowDays} days) ${BEHAVIORAL_TAG}`);
+    for (const h of data.hotspots) {
+      lines.push(`- ${h.path} — ${h.commits} ${plural('commit', h.commits)}`);
+    }
+  }
+}
+
+function formatBranchLine(s: BranchSummary): string {
+  if (s.defaultBranch !== null && s.branch === s.defaultBranch) {
+    return `- ${s.branch} (default branch)`;
+  }
+  if (s.defaultBranch === null || s.ahead === null) {
+    return `- ${s.branch}`;
+  }
+  const files =
+    s.changedFiles === null
+      ? ''
+      : `, ${s.changedFiles.length} ${plural('file', s.changedFiles.length)} changed on branch`;
+  return `- ${s.branch} — ${s.ahead} ${plural('commit', s.ahead)} ahead of ${s.defaultBranch}${files}`;
 }
 
 function displayLanguage(lang: string): string {
@@ -183,9 +249,6 @@ function pluralKind(kind: SymbolKind, count: number): string {
   return count === 1 ? kind : KIND_PLURAL[kind];
 }
 
-function plural(word: string, count: number): string {
-  return count === 1 ? word : `${word}s`;
-}
 
 function sortedKindCounts(
   kinds: Record<SymbolKind, number>,

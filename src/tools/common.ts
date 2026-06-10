@@ -1,7 +1,8 @@
 import { promises as fs } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 
-import type { ProbeConfig, Symbol } from '../types.js';
+import { partnerOf } from '../git/analyzer.js';
+import type { CoChange, ProbeConfig, Symbol } from '../types.js';
 
 // Index signature required to satisfy the MCP SDK's CallToolResult shape.
 export interface ToolResponse {
@@ -181,6 +182,56 @@ export const NAME_MATCH_HEADER_QUALIFIER = '(approximate — from AST name match
 // `get_context` symbol-mode caller/callee lists.
 export const STRUCTURAL_TAG = '[structural]';
 
+// Tier tag for git-derived data: commit co-occurrence and history, not
+// code structure. Pairs with the DESIGN.md tier vocabulary
+// ([structural] / [approximate] / [behavioral]).
+export const BEHAVIORAL_TAG = '[behavioral]';
+
+export interface CoChangePartnerRow {
+  partner: string;
+  // Confidence FROM the queried file, as a rounded percent: "when THIS
+  // file changes, how often does the partner change too".
+  pct: number;
+  shared: number;
+}
+
+// The confidence direction is the most invertible bug in the git layer —
+// confidenceAB is the from-self direction only when the queried file is
+// fileA. Centralized (sharing analyzer's partnerOf for the orientation
+// pick) so get_context and find_references cannot disagree. Both tools
+// use the same default partner cap.
+export function topCoChangePartners(
+  coChanges: readonly CoChange[],
+  selfPath: string,
+  limit = 5,
+): CoChangePartnerRow[] {
+  const rows = coChanges.map((c) => {
+    const selfIsA = c.fileA === selfPath;
+    return {
+      partner: partnerOf(c, selfPath),
+      // Floor at 1%: a pair only exists because coupling registered, so a
+      // "0% confidence" row (3 shared commits against a 600-commit hub
+      // file) would be self-contradictory output.
+      pct: Math.max(
+        1,
+        Math.round((selfIsA ? c.confidenceAB : c.confidenceBA) * 100),
+      ),
+      shared: c.sharedCommits,
+    };
+  });
+  rows.sort(
+    (a, b) =>
+      b.pct - a.pct ||
+      b.shared - a.shared ||
+      (a.partner < b.partner ? -1 : a.partner > b.partner ? 1 : 0),
+  );
+  return rows.slice(0, limit);
+}
+
 export function readinessBanner(ready: boolean): string {
   return ready ? '' : `${INDEXING_BANNER}\n\n`;
+}
+
+export function plural(word: string, count: number): string {
+  return count === 1 ? word : `${word}s`;
 }

@@ -11,6 +11,7 @@ import {
   makeConfig,
   makeFileInfo,
   makeProjectDir,
+  mkGitMeta,
   mkSym,
   silenceStderr,
   writeTree,
@@ -390,5 +391,74 @@ describe('runSearchStructure — binding unavailable', () => {
     );
     expect(out).toContain('structural pattern matching is unavailable');
     expect(out).toContain('`query` mode still works');
+  });
+});
+
+describe('runSearchStructure — git churn boost', () => {
+  // Two files with the SAME symbol name so MiniSearch relevance ties and
+  // only the churn boost can decide the order.
+  async function tiedIndex(): Promise<CodeIndex> {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/cold.ts'),
+      [mkSym({ name: 'handler', file: 'src/cold.ts', signature: 'function handler()' })],
+      [],
+      [],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/hot.ts'),
+      [mkSym({ name: 'handler', file: 'src/hot.ts', signature: 'function handler()' })],
+      [],
+      [],
+    );
+    return idx;
+  }
+
+  async function applyChurn(
+    idx: CodeIndex,
+    counts: Array<[string, number]>,
+  ): Promise<void> {
+    await idx.applyGitAnalysis({
+      counts: new Map(counts),
+      cochanges: new Map(),
+      hotspots: counts.map(([p]) => p),
+      meta: mkGitMeta(),
+    });
+  }
+
+  it('ranks the churned file above an equal-relevance cold file', async () => {
+    const idx = await tiedIndex();
+    await applyChurn(idx, [['src/hot.ts', 25]]);
+
+    const out = text(
+      await runSearchStructure({ query: 'handler' }, makeDeps(idx)),
+    );
+    expect(out.indexOf('src/hot.ts')).toBeGreaterThan(-1);
+    expect(out.indexOf('src/hot.ts')).toBeLessThan(out.indexOf('src/cold.ts'));
+  });
+
+  it('does not reorder anything without git data', async () => {
+    const idx = await tiedIndex();
+    const out = text(
+      await runSearchStructure({ query: 'handler' }, makeDeps(idx)),
+    );
+    // Both present; no churn data -> tie broken by MiniSearch insertion
+    // order, which is cold.ts first here. The assertion pins "no boost",
+    // not a particular tiebreak policy.
+    expect(out.indexOf('src/cold.ts')).toBeLessThan(out.indexOf('src/hot.ts'));
+  });
+
+  it('a fresh analysis invalidates the memoized boost map (GitMeta identity key)', async () => {
+    const idx = await tiedIndex();
+    await applyChurn(idx, [['src/hot.ts', 25]]);
+
+    let out = text(await runSearchStructure({ query: 'handler' }, makeDeps(idx)));
+    expect(out.indexOf('src/hot.ts')).toBeLessThan(out.indexOf('src/cold.ts'));
+
+    // Churn flips to cold.ts; applyGitAnalysis swaps the GitMeta object,
+    // which is the memo key — the map must rebuild.
+    await applyChurn(idx, [['src/cold.ts', 25]]);
+    out = text(await runSearchStructure({ query: 'handler' }, makeDeps(idx)));
+    expect(out.indexOf('src/cold.ts')).toBeLessThan(out.indexOf('src/hot.ts'));
   });
 });

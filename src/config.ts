@@ -27,6 +27,7 @@ const DEFAULT_EXCLUDES: readonly string[] = [
 const DEFAULT_LANGUAGES: readonly string[] = ['typescript', 'tsx', 'javascript', 'python'];
 const DEFAULT_MAX_FILES = 100_000;
 const DEFAULT_MAX_FILE_SIZE = 1_048_576;
+const DEFAULT_GIT_WINDOW = 180;
 
 interface PartialFileConfig {
   exclude?: unknown;
@@ -35,6 +36,8 @@ interface PartialFileConfig {
   maxFileSize?: unknown;
   cacheDir?: unknown;
   watch?: unknown;
+  gitEnabled?: unknown;
+  gitWindow?: unknown;
 }
 
 function readFileConfig(root: string): PartialFileConfig {
@@ -72,6 +75,13 @@ function asNonNegativeInt(value: unknown): number | undefined {
   return Math.floor(value);
 }
 
+// A 0-day git window is meaningless (empty analysis marked fresh), so the
+// git window requires >= 1, unlike maxFiles/maxFileSize where 0 is valid.
+function asPositiveInt(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) return undefined;
+  return Math.floor(value);
+}
+
 function asNonBlankString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
@@ -82,13 +92,23 @@ function asBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
-function parseEnvWatch(): boolean | undefined {
-  const raw = process.env.PROBE_WATCH?.trim().toLowerCase();
+function parseEnvBool(name: string): boolean | undefined {
+  const raw = process.env[name]?.trim().toLowerCase();
   if (raw === undefined || raw === '') return undefined;
   if (raw === '0' || raw === 'false') return false;
   if (raw === '1' || raw === 'true') return true;
-  log.warn(`config: PROBE_WATCH=${raw} not recognized; expected 0/1/true/false`);
+  log.warn(`config: ${name}=${raw} not recognized; expected 0/1/true/false`);
   return undefined;
+}
+
+function parseEnvGitWindow(): number | undefined {
+  const raw = process.env.PROBE_GIT_WINDOW?.trim();
+  if (raw === undefined || raw === '') return undefined;
+  const parsed = asPositiveInt(Number(raw));
+  if (parsed === undefined) {
+    log.warn(`config: PROBE_GIT_WINDOW=${raw} not recognized; expected a positive integer (days)`);
+  }
+  return parsed;
 }
 
 function parseEnvExclude(): string[] {
@@ -162,7 +182,9 @@ export function loadConfig(projectRoot: string = process.cwd()): ProbeConfig {
     maxFiles: fileMaxFiles ?? DEFAULT_MAX_FILES,
     maxFileSize: fileMaxFileSize ?? DEFAULT_MAX_FILE_SIZE,
     cacheDir: resolvedCacheDir,
-    watch: parseEnvWatch() ?? asBoolean(fileCfg.watch) ?? true,
+    watch: parseEnvBool('PROBE_WATCH') ?? asBoolean(fileCfg.watch) ?? true,
+    gitEnabled: parseEnvBool('PROBE_GIT') ?? asBoolean(fileCfg.gitEnabled) ?? true,
+    gitWindow: parseEnvGitWindow() ?? asPositiveInt(fileCfg.gitWindow) ?? DEFAULT_GIT_WINDOW,
   };
   return Object.freeze(cfg);
 }

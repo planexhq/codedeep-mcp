@@ -7,7 +7,9 @@ import { runOverview, type OverviewDeps } from '../../src/tools/overview.js';
 import {
   makeConfig,
   makeFileInfo,
+  makeGitStub,
   makeProjectDir,
+  mkGitMeta,
   mkSym,
   silenceStderr,
   writeTree,
@@ -24,11 +26,16 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function makeDeps(index: CodeIndex, ready = true): OverviewDeps {
+function makeDeps(
+  index: CodeIndex,
+  ready = true,
+  git: OverviewDeps['git'] = makeGitStub(),
+): OverviewDeps {
   return {
     index,
     indexer: { ready },
     config: makeConfig(tmpRoot),
+    git,
   };
 }
 
@@ -950,5 +957,140 @@ describe('runOverview — exported-symbol fallback', () => {
     const result = await runOverview({}, makeDeps(idx));
     const matches = result.content[0].text.match(/src\/index\.ts/g) ?? [];
     expect(matches.length).toBe(1);
+  });
+});
+
+describe('runOverview — git sections', () => {
+  async function applyHotspots(
+    idx: CodeIndex,
+    entries: Array<[string, number]>,
+  ): Promise<void> {
+    for (const [path] of entries) {
+      idx.addFile(makeFileInfo('typescript', path), [], [], []);
+    }
+    await idx.applyGitAnalysis({
+      counts: new Map(entries),
+      cochanges: new Map(),
+      hotspots: entries.map(([p]) => p),
+      meta: mkGitMeta(),
+    });
+  }
+
+  it('renders the branch line with ahead count and changed files', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    const git = makeGitStub({
+      branchSummary: async () => ({
+        branch: 'feature/git-enrichment',
+        defaultBranch: 'main',
+        ahead: 3,
+        changedFiles: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
+      }),
+    });
+    const text = (await runOverview({}, makeDeps(idx, true, git))).content[0].text;
+
+    expect(text).toContain('### Branch [behavioral]');
+    expect(text).toContain(
+      '- feature/git-enrichment — 3 commits ahead of main, 7 files changed on branch',
+    );
+  });
+
+  it('renders "(default branch)" when on the default branch', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    const git = makeGitStub({
+      branchSummary: async () => ({
+        branch: 'main',
+        defaultBranch: 'main',
+        ahead: 0,
+        changedFiles: [],
+      }),
+    });
+    const text = (await runOverview({}, makeDeps(idx, true, git))).content[0].text;
+    expect(text).toContain('- main (default branch)');
+  });
+
+  it('renders the bare branch name when no default branch resolves', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    const git = makeGitStub({
+      branchSummary: async () => ({
+        branch: 'trunk',
+        defaultBranch: null,
+        ahead: null,
+        changedFiles: null,
+      }),
+    });
+    const text = (await runOverview({}, makeDeps(idx, true, git))).content[0].text;
+    expect(text).toContain('### Branch [behavioral]');
+    expect(text).toContain('- trunk');
+    expect(text).not.toContain('ahead of');
+  });
+
+  it('renders top-10 hotspots with window label and commit counts, strongest first', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const entries: Array<[string, number]> = [];
+    for (let i = 0; i < 11; i++) {
+      entries.push([`src/f${String(i).padStart(2, '0')}.ts`, 30 - i]);
+    }
+    await applyHotspots(idx, entries);
+    const text = (await runOverview({}, makeDeps(idx))).content[0].text;
+
+    expect(text).toContain('### Hotspots (last 180 days) [behavioral]');
+    expect(text).toContain('- src/f00.ts — 30 commits');
+    expect(text).toContain('- src/f09.ts — 21 commits');
+    expect(text).not.toContain('src/f10.ts'); // 11th hotspot clipped at 10
+    const f0 = text.indexOf('src/f00.ts');
+    const f9 = text.indexOf('src/f09.ts');
+    expect(f0).toBeGreaterThan(-1);
+    expect(f0).toBeLessThan(f9);
+  });
+
+  it('singular commit count renders without the plural s', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    await applyHotspots(idx, [['src/once.ts', 1]]);
+    const text = (await runOverview({}, makeDeps(idx))).content[0].text;
+    expect(text).toContain('- src/once.ts — 1 commit');
+    expect(text).not.toContain('1 commits');
+  });
+
+  it('omits both git sections entirely outside git repos', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    const text = (await runOverview({}, makeDeps(idx))).content[0].text;
+    expect(text).not.toContain('### Branch');
+    expect(text).not.toContain('Hotspots');
+    expect(text).not.toContain('[behavioral]');
+  });
+
+  it('a rejecting branchSummary never breaks the response', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    const git = makeGitStub({
+      branchSummary: async () => {
+        throw new Error('boom');
+      },
+    });
+    const text = (await runOverview({}, makeDeps(idx, true, git))).content[0].text;
+    expect(text).toContain('## Project:');
+    expect(text).not.toContain('### Branch');
+    expect(text).not.toContain('Error:');
+  });
+});
+
+describe('runOverview — hotspot window label provenance', () => {
+  it('labels hotspots with the window that produced the data, not the live config', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    await idx.applyGitAnalysis({
+      counts: new Map([['src/a.ts', 4]]),
+      cochanges: new Map(),
+      hotspots: ['src/a.ts'],
+      // Persisted analysis ran with a 90-day window; config now says 180.
+      meta: mkGitMeta({ windowDays: 90 }),
+    });
+    const text = (await runOverview({}, makeDeps(idx))).content[0].text;
+    expect(text).toContain('### Hotspots (last 90 days) [behavioral]');
+    expect(text).not.toContain('last 180 days');
   });
 });

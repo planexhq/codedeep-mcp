@@ -11,7 +11,9 @@ import {
   classNameFromFqn,
 } from '../types.js';
 import type {
+  CoChange,
   FileInfo,
+  GitMeta,
   ImportedName,
   ImportInfo,
   IndexStats,
@@ -20,13 +22,13 @@ import type {
   SymbolKind,
 } from '../types.js';
 
-// v4 adds the optional `receiver` field on Reference and, more
-// importantly, starts emitting member-expression call refs
-// (`obj.method()`, `this.x()`). A v3 cache read by v4 code would
-// silently lack every member ref until files were re-extracted;
-// bumping forces the rebuild. (v3 added ImportedName.kind for the
-// same re-extraction reason.)
-const SCHEMA_VERSION = 4;
+// v5 adds persisted git enrichment: FileInfo.commitFrequency, the
+// per-file co-change lists, the hotspot ranking, and gitMeta (analyzed
+// HEAD / window / timestamp) driving staleness detection. A v4 cache
+// has none of these sections; bumping forces a clean rebuild instead of
+// teaching load() about absent maps. (v4 added member-expression call
+// refs; v3 added ImportedName.kind.)
+const SCHEMA_VERSION = 5;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both
@@ -42,6 +44,19 @@ export interface SearchSymbolsOptions {
   // Index-internal language ids ('typescript', 'tsx', ...); callers expand
   // user-facing aliases before querying.
   languages?: ReadonlySet<string>;
+  // Per-file score multiplier (git churn boost from search_structure).
+  // Composes multiplicatively with the exported-symbol boost; files
+  // absent from the map are neutral (1).
+  boostByFile?: ReadonlyMap<string, number>;
+}
+
+// What GitService hands to applyGitAnalysis: the analyzer's products plus
+// the provenance that drives staleness checks on the next startup.
+export interface GitAnalysisResult {
+  counts: ReadonlyMap<string, number>;
+  cochanges: ReadonlyMap<string, CoChange[]>;
+  hotspots: readonly string[];
+  meta: GitMeta;
 }
 
 // Suffix candidates appended to a relative-import resolution to match an
@@ -124,6 +139,11 @@ interface PersistedSchema {
   callees: Array<[string, string[]]>;
   callers: Array<[string, string[]]>;
   references: Reference[];
+  // Git enrichment (v5). gitMeta null = no analysis has landed yet
+  // (non-git project, gitEnabled=false, or saved before first analysis).
+  cochanges: Array<[string, CoChange[]]>;
+  hotspots: string[];
+  gitMeta: GitMeta | null;
 }
 
 export class CodeIndex {
@@ -169,6 +189,13 @@ export class CodeIndex {
   private sortedFilePaths: string[] = [];
   private filePathsDirty = true;
 
+  // Git enrichment (schema v5). cochangesByFile is keyed by indexed
+  // paths only; partner values inside the records may be any repo path.
+  // hotspotList is <= 50 entries — linear scans are fine.
+  private cochangesByFile = new Map<string, CoChange[]>();
+  private hotspotList: string[] = [];
+  private gitMetaState: GitMeta | null = null;
+
   private writeLock: Promise<unknown> = Promise.resolve();
   private readonly projectRoot: string;
 
@@ -212,8 +239,16 @@ export class CodeIndex {
   // Returns true when the file was actually in the index (cascade ran);
   // false for a no-op so callers can tell mutation from idle work.
   removeFile(path: string): boolean {
+    return this.removeFileInternal(path, true);
+  }
+
+  // pruneGit=false is the re-index path (updateFile): the file still
+  // exists, so its co-change history and hotspot membership remain valid
+  // and must survive the remove+add cycle.
+  private removeFileInternal(path: string, pruneGit: boolean): boolean {
     const symsInFile = this.symbolsByFile.get(path);
     if (!symsInFile) return false;
+    if (pruneGit) this.pruneGitData(path);
 
     const deletedIds = new Set<string>();
     for (const sym of symsInFile) {
@@ -272,8 +307,90 @@ export class CodeIndex {
     references: Reference[],
     imports: ImportInfo[],
   ): void {
-    this.removeFile(file.path);
+    // The pipeline never sets commitFrequency — carry it over from the
+    // previous FileInfo, or every watcher flush would silently zero the
+    // touched file's git data until the next analysis.
+    const prevFrequency = this.fileByPath.get(file.path)?.commitFrequency;
+    this.removeFileInternal(file.path, false);
     this.addFile(file, symbols, references, imports);
+    if (file.commitFrequency === undefined && prevFrequency !== undefined) {
+      file.commitFrequency = prevFrequency;
+    }
+  }
+
+  // True deletion only (never the re-index path): drop the file's own
+  // co-change key and hotspot membership. Records naming this file as a
+  // PARTNER in other files' lists are deliberately retained — partner
+  // values are allowed to be non-indexed paths (config/auth.yaml), and a
+  // fresh analysis would re-derive exactly those records from history,
+  // so pruning them here would just disagree with the next refresh.
+  private pruneGitData(path: string): void {
+    this.cochangesByFile.delete(path);
+    if (this.hotspotList.includes(path)) {
+      this.hotspotList = this.hotspotList.filter((p) => p !== path);
+    }
+  }
+
+  // Swap in a completed analysis. Runs under the write lock so a save()
+  // chained behind it persists the new data and apply can never land in
+  // the middle of a save's snapshot. Membership may have drifted since
+  // the analyzer snapshotted hasFile — re-filter keys here.
+  applyGitAnalysis(result: GitAnalysisResult): Promise<void> {
+    return this.runLocked(async () => {
+      for (const [path, fi] of this.fileByPath) {
+        fi.commitFrequency = result.counts.get(path) ?? 0;
+      }
+      const cochanges = new Map<string, CoChange[]>();
+      for (const [path, list] of result.cochanges) {
+        if (this.fileByPath.has(path)) cochanges.set(path, [...list]);
+      }
+      this.cochangesByFile = cochanges;
+      this.hotspotList = result.hotspots.filter((p) => this.fileByPath.has(p));
+      this.gitMetaState = result.meta;
+    });
+  }
+
+  getCoChanges(path: string): CoChange[] {
+    const list = this.cochangesByFile.get(path);
+    return list ? [...list] : [];
+  }
+
+  // Ranked hotspot files with their window commit counts, strongest
+  // first. Counts come from the live FileInfo so a just-deleted file
+  // can't resurface (pruneGitData removed it from the list).
+  getHotspots(limit = 10): Array<{ path: string; commits: number }> {
+    return this.hotspotList.slice(0, Math.max(0, limit)).map((path) => ({
+      path,
+      commits: this.fileByPath.get(path)?.commitFrequency ?? 0,
+    }));
+  }
+
+  // Non-null once a git analysis has landed (live or from cache). Tools
+  // gate analysis-derived sections on this; per-call git queries gate on
+  // their own null returns instead.
+  getGitMeta(): GitMeta | null {
+    return this.gitMetaState;
+  }
+
+  // Kill-switch / repo-gone path: when git is disabled (PROBE_GIT=0) or
+  // the repo disappeared, persisted enrichment from an earlier enabled
+  // session must not keep rendering forever — it could never refresh.
+  // No-op when no git data is present.
+  clearGitData(): Promise<boolean> {
+    return this.runLocked(async () => {
+      const hadData =
+        this.gitMetaState !== null ||
+        this.cochangesByFile.size > 0 ||
+        this.hotspotList.length > 0;
+      if (!hadData) return false;
+      for (const fi of this.fileByPath.values()) {
+        delete fi.commitFrequency;
+      }
+      this.cochangesByFile = new Map();
+      this.hotspotList = [];
+      this.gitMetaState = null;
+      return true;
+    });
   }
 
   findSymbolByName(name: string, kind?: SymbolKind, scope?: string): Symbol[] {
@@ -348,8 +465,14 @@ export class CodeIndex {
       // Equivalent to post-multiplying the total score (each term's
       // contribution is scaled), but lets MiniSearch do the re-ranking
       // so the limit slice below stays correct.
-      boostDocument: (id) =>
-        this.symbolById.get(id as string)?.exported ? EXPORTED_BOOST : 1,
+      boostDocument: (id) => {
+        const sym = this.symbolById.get(id as string);
+        if (!sym) return 1;
+        return (
+          (sym.exported ? EXPORTED_BOOST : 1) *
+          (opts.boostByFile?.get(sym.file) ?? 1)
+        );
+      },
       // Filter inside search (not after the limit slice) so results
       // under-fill only when there genuinely aren't enough matches.
       filter: languages
@@ -568,6 +691,9 @@ export class CodeIndex {
         callees: adjacencyToEntries(this.callees),
         callers: adjacencyToEntries(this.callers),
         references: allRefs,
+        cochanges: [...this.cochangesByFile.entries()],
+        hotspots: [...this.hotspotList],
+        gitMeta: this.gitMetaState,
       };
       const json = JSON.stringify(data);
       const tmp = `${cachePath}.tmp.${process.pid}.${Date.now()}`;
@@ -646,6 +772,8 @@ export class CodeIndex {
     const callers = new Map<string, Set<string>>();
     const referencesByTargetName = new Map<string, Reference[]>();
     const referencesBySourceFile = new Map<string, Reference[]>();
+    const cochangesByFile = new Map<string, CoChange[]>();
+    const hotspotList: string[] = [];
 
     try {
       for (const [id, sym] of parsed.symbols) symbolById.set(id, sym);
@@ -659,6 +787,23 @@ export class CodeIndex {
         }
         pushOrInit(referencesByTargetName, ref.targetName, ref);
         pushOrInit(referencesBySourceFile, ref.file, ref);
+      }
+      for (const entry of parsed.cochanges) {
+        if (
+          !Array.isArray(entry) ||
+          typeof entry[0] !== 'string' ||
+          !Array.isArray(entry[1]) ||
+          !entry[1].every(isPersistedCoChange)
+        ) {
+          throw new Error('persisted cochange entry has invalid shape');
+        }
+        cochangesByFile.set(entry[0], entry[1]);
+      }
+      for (const path of parsed.hotspots) {
+        if (typeof path !== 'string') {
+          throw new Error('persisted hotspot entry has invalid shape');
+        }
+        hotspotList.push(path);
       }
 
       // Seed entries for zero-symbol files so removeFile's symsInFile guard fires (mirrors addFile).
@@ -686,6 +831,9 @@ export class CodeIndex {
     this.callers = callers;
     this.referencesByTargetName = referencesByTargetName;
     this.referencesBySourceFile = referencesBySourceFile;
+    this.cochangesByFile = cochangesByFile;
+    this.hotspotList = hotspotList;
+    this.gitMetaState = parsed.gitMeta;
     // Derived caches: reset; rebuild*IfDirty repopulates lazily.
     this.sortedNames = [];
     this.sortedNamesLower = [];
@@ -1185,6 +1333,29 @@ function isPersistedReference(ref: unknown): ref is Reference {
   );
 }
 
+function isPersistedCoChange(value: unknown): value is CoChange {
+  if (typeof value !== 'object' || value === null) return false;
+  const c = value as Record<string, unknown>;
+  return (
+    typeof c.fileA === 'string' &&
+    typeof c.fileB === 'string' &&
+    typeof c.sharedCommits === 'number' &&
+    typeof c.confidenceAB === 'number' &&
+    typeof c.confidenceBA === 'number' &&
+    typeof c.lastSeen === 'number'
+  );
+}
+
+function isPersistedGitMeta(value: unknown): value is GitMeta {
+  if (typeof value !== 'object' || value === null) return false;
+  const m = value as Record<string, unknown>;
+  return (
+    typeof m.head === 'string' &&
+    typeof m.windowDays === 'number' &&
+    typeof m.analyzedAt === 'number'
+  );
+}
+
 function isValidPersisted(
   data: unknown,
   expectedVersion: number,
@@ -1200,6 +1371,9 @@ function isValidPersisted(
     Array.isArray(d.imports) &&
     Array.isArray(d.callees) &&
     Array.isArray(d.callers) &&
-    Array.isArray(d.references)
+    Array.isArray(d.references) &&
+    Array.isArray(d.cochanges) &&
+    Array.isArray(d.hotspots) &&
+    (d.gitMeta === null || isPersistedGitMeta(d.gitMeta))
   );
 }

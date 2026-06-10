@@ -4,6 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+import type { GitService } from "./git/git-service.js";
 import type { CodeIndex } from "./indexer/code-index.js";
 import type { Indexer } from "./indexer/pipeline.js";
 import { runFindReferences } from "./tools/find-references.js";
@@ -24,6 +25,9 @@ export interface ServerDeps {
   index: CodeIndex;
   indexer: Indexer;
   config: ProbeConfig;
+  // Required, not optional: git unavailability lives INSIDE the service
+  // (null/empty returns), so tools never branch on a missing dep.
+  git: GitService;
 }
 
 export function createServer(deps: ServerDeps): McpServer {
@@ -36,7 +40,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "overview",
     {
       description:
-        "Get a structural overview of the codebase: language breakdown, top-level directories, entry points, and symbol counts.",
+        "Get a structural overview of the codebase: language breakdown, top-level directories, entry points, and symbol counts — plus branch summary and git hotspots when in a git repo.",
       inputSchema: {
         path: z.string().optional().describe("Project root (default: cwd)"),
       },
@@ -84,7 +88,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "get_context",
     {
       description:
-        "Return everything needed to understand a symbol: full body, within-file callers/callees, and imports.",
+        "Return everything needed to understand a symbol: full body, within-file callers/callees, and imports — plus co-change partners and recent commits when git is available.",
       inputSchema: {
         file: z.string().describe("File path (relative to project root)"),
         symbol: z
@@ -106,7 +110,7 @@ export function createServer(deps: ServerDeps): McpServer {
           .array(z.string())
           .optional()
           .describe(
-            "Sections to include: body, callers, callees, imports",
+            "Sections to include: body, callers, callees, imports, co_changes, git",
           ),
       },
       annotations: SHARED_ANNOTATIONS,
@@ -118,7 +122,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "find_references",
     {
       description:
-        "Cross-file usage navigation. Returns approximate AST name-matched callers for a symbol, ranked by directory and import proximity. LSP-precise tiers ship in Phase 2.",
+        "Cross-file usage navigation. Returns approximate AST name-matched callers for a symbol, ranked by directory and import proximity — plus co-change partners from git history when available. LSP-precise tiers ship in Phase 2.",
       inputSchema: {
         file: z.string().describe("File containing the symbol (relative to project root)"),
         symbol: z.string().describe("Symbol name"),

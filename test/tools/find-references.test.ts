@@ -12,6 +12,8 @@ import {
   makeConfig,
   makeFileInfo,
   makeProjectDir,
+  mkCoChange,
+  mkGitMeta,
   mkImport,
   mkMemberRef,
   mkSym,
@@ -1012,5 +1014,87 @@ describe('runFindReferences — member-expression refs', () => {
 
     expect(text).toContain('### Callers');
     expect(text).toContain('(none)');
+  });
+});
+
+describe('runFindReferences — co-change partners', () => {
+  async function fixtureWithCoChanges(): Promise<CodeIndex> {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/auth.ts'),
+      [mkSym({ name: 'authenticate', file: 'src/auth.ts', exported: true })],
+      [],
+      [],
+    );
+    await idx.applyGitAnalysis({
+      counts: new Map([
+        ['src/auth.ts', 10],
+        ['config/auth.yaml', 12],
+      ]),
+      cochanges: new Map([
+        [
+          'src/auth.ts',
+          [
+            // From auth.ts's side (it is fileB): 83%.
+            mkCoChange('config/auth.yaml', 'src/auth.ts', 12, {
+              confidenceAB: 0.6,
+              confidenceBA: 0.83,
+            }),
+            mkCoChange('src/auth.ts', 'src/types/auth.ts', 8, {
+              confidenceAB: 0.67,
+              confidenceBA: 0.3,
+            }),
+          ],
+        ],
+      ]),
+      hotspots: ['src/auth.ts'],
+      meta: mkGitMeta(),
+    });
+    return idx;
+  }
+
+  it("appends a behavioral section with confidence-only rows for kind 'all'", async () => {
+    const idx = await fixtureWithCoChanges();
+    const result = await runFindReferences(
+      { file: 'src/auth.ts', symbol: 'authenticate' },
+      makeDeps(idx),
+    );
+    const text = result.content[0].text;
+
+    expect(text).toContain('### Co-change Partners (behavioral — from git)');
+    expect(text).toContain('- config/auth.yaml  83% confidence');
+    expect(text).toContain('- src/types/auth.ts  67% confidence');
+    // Confidence-only — shared-commit detail belongs to get_context.
+    expect(text).not.toContain('shared commits');
+    // Strongest first.
+    expect(text.indexOf('config/auth.yaml')).toBeLessThan(
+      text.indexOf('src/types/auth.ts'),
+    );
+  });
+
+  it('omits the section for explicit reference kinds', async () => {
+    const idx = await fixtureWithCoChanges();
+    const result = await runFindReferences(
+      { file: 'src/auth.ts', symbol: 'authenticate', kind: 'callers' },
+      makeDeps(idx),
+    );
+    expect(result.content[0].text).not.toContain('Co-change Partners');
+  });
+
+  it('vanishes (no header, no "(none)") outside git repos', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/auth.ts'),
+      [mkSym({ name: 'authenticate', file: 'src/auth.ts' })],
+      [],
+      [],
+    );
+    const result = await runFindReferences(
+      { file: 'src/auth.ts', symbol: 'authenticate' },
+      makeDeps(idx),
+    );
+    const text = result.content[0].text;
+    expect(text).not.toContain('Co-change Partners');
+    expect(text).toContain('### Callers'); // structural sections unaffected
   });
 });

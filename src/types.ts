@@ -130,6 +130,40 @@ export interface FileInfo {
   // mtime+size collide on coarse-mtime filesystems. Absent for
   // unknown-language files (never read) and pre-existing cache entries.
   contentHash?: string;
+  // Commits touching this file inside the git analysis window. Absent
+  // until the first analysis lands (and forever on non-git projects);
+  // 0 after analysis for files with no commits in the window. The
+  // indexing pipeline never sets this — CodeIndex.updateFile preserves
+  // it across re-index so watcher flushes can't wipe git data.
+  commitFrequency?: number;
+}
+
+// Behavioral coupling between two files, derived from commit co-occurrence
+// in the analysis window. Canonical orientation: fileA < fileB
+// lexicographically. Partner paths are NOT restricted to indexed files —
+// a config/yaml file that co-commits with source is a legitimate partner
+// — but the per-file lists in CodeIndex are keyed by indexed files only.
+export interface CoChange {
+  fileA: string;
+  fileB: string;
+  sharedCommits: number;
+  // sharedCommits / commits(fileA): when fileA changes, how often fileB
+  // changes too. Both denominators come from the same filtered commit
+  // stream as the numerator (no-merges, <=30 files), so values are <= 1.
+  confidenceAB: number;
+  // sharedCommits / commits(fileB) — the reverse direction.
+  confidenceBA: number;
+  // Epoch ms of the newest shared commit.
+  lastSeen: number;
+}
+
+// Provenance of the persisted git analysis; drives staleness detection.
+// Stale when HEAD moved, the configured window changed, or the analysis
+// is older than a day (the window is relative to "now", so counts drift).
+export interface GitMeta {
+  head: string;
+  windowDays: number;
+  analyzedAt: number;
 }
 
 export interface IndexStats {
@@ -150,4 +184,11 @@ export interface ProbeConfig {
   // Live re-indexing via fs.watch. Env PROBE_WATCH overrides the config
   // file's `watch`; defaults to true.
   readonly watch: boolean;
+  // Git enrichment kill switch. Env PROBE_GIT overrides the config file's
+  // `gitEnabled`; defaults to true (actual availability is still detected
+  // at runtime — true just means "try").
+  readonly gitEnabled: boolean;
+  // Git analysis window in days (hotspots + co-change). Env PROBE_GIT_WINDOW
+  // overrides the config file's `gitWindow`; defaults to 180.
+  readonly gitWindow: number;
 }

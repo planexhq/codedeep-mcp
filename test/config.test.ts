@@ -68,6 +68,8 @@ describe('loadConfig', () => {
     expect(cfg.maxFileSize).toBe(1_048_576);
     expect(cfg.cacheDir).toBe(resolve(root, '.probe', 'cache'));
     expect(cfg.watch).toBe(true);
+    expect(cfg.gitEnabled).toBe(true);
+    expect(cfg.gitWindow).toBe(180);
   });
 
   it('file watch flag overrides the default', () => {
@@ -105,6 +107,77 @@ describe('loadConfig', () => {
     expect(loadConfig(root).watch).toBe(true);
     expect(spy).toHaveBeenCalled();
     expect(String(spy.mock.calls[0]?.[0])).toContain('PROBE_WATCH');
+  });
+
+  it('file gitEnabled flag overrides the default', () => {
+    writeConfig(root, JSON.stringify({ gitEnabled: false }));
+    expect(loadConfig(root).gitEnabled).toBe(false);
+
+    writeConfig(root, JSON.stringify({ gitEnabled: true }));
+    expect(loadConfig(root).gitEnabled).toBe(true);
+  });
+
+  it('ignores a non-boolean file gitEnabled value', () => {
+    writeConfig(root, JSON.stringify({ gitEnabled: 'off' }));
+    expect(loadConfig(root).gitEnabled).toBe(true);
+  });
+
+  it.each([
+    ['0', false],
+    ['false', false],
+    ['1', true],
+    ['true', true],
+  ])('PROBE_GIT=%s sets gitEnabled to %s', (raw, expected) => {
+    vi.stubEnv('PROBE_GIT', raw);
+    expect(loadConfig(root).gitEnabled).toBe(expected);
+  });
+
+  it('PROBE_GIT overrides the file gitEnabled flag', () => {
+    writeConfig(root, JSON.stringify({ gitEnabled: false }));
+    vi.stubEnv('PROBE_GIT', '1');
+    expect(loadConfig(root).gitEnabled).toBe(true);
+  });
+
+  it('warns and keeps the default for an unrecognized PROBE_GIT', () => {
+    // The stderr spy accumulates across tests (afterEach unstubs envs, not
+    // mocks), so scan all calls instead of asserting on calls[0].
+    const spy = silenceStderr();
+    vi.stubEnv('PROBE_GIT', 'maybe');
+    expect(loadConfig(root).gitEnabled).toBe(true);
+    expect(
+      spy.mock.calls.some((c) => String(c[0]).includes('PROBE_GIT=maybe')),
+    ).toBe(true);
+  });
+
+  it('file gitWindow overrides the default and floors to an integer', () => {
+    writeConfig(root, JSON.stringify({ gitWindow: 90.9 }));
+    expect(loadConfig(root).gitWindow).toBe(90);
+  });
+
+  it('ignores zero, negative, and non-numeric file gitWindow values', () => {
+    writeConfig(root, JSON.stringify({ gitWindow: 0 }));
+    expect(loadConfig(root).gitWindow).toBe(180);
+
+    writeConfig(root, JSON.stringify({ gitWindow: -5 }));
+    expect(loadConfig(root).gitWindow).toBe(180);
+
+    writeConfig(root, JSON.stringify({ gitWindow: '30' }));
+    expect(loadConfig(root).gitWindow).toBe(180);
+  });
+
+  it('PROBE_GIT_WINDOW overrides the file gitWindow', () => {
+    writeConfig(root, JSON.stringify({ gitWindow: 30 }));
+    vi.stubEnv('PROBE_GIT_WINDOW', '365');
+    expect(loadConfig(root).gitWindow).toBe(365);
+  });
+
+  it('warns and keeps the default for an invalid PROBE_GIT_WINDOW', () => {
+    const spy = silenceStderr();
+    vi.stubEnv('PROBE_GIT_WINDOW', 'soon');
+    expect(loadConfig(root).gitWindow).toBe(180);
+    expect(
+      spy.mock.calls.some((c) => String(c[0]).includes('PROBE_GIT_WINDOW=soon')),
+    ).toBe(true);
   });
 
   it('full config file overrides each scalar field and unions excludes', () => {

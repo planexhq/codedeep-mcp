@@ -21,6 +21,7 @@ import { runSearchStructure } from '../src/tools/search-structure.js';
 import type { ProbeConfig } from '../src/types.js';
 import {
   makeConfig,
+  makeGitStub,
   makeProjectDir,
   silenceStderr,
   writeTree,
@@ -67,9 +68,12 @@ beforeAll(async () => {
 describe('integration: end-to-end pipeline + tools', () => {
   let root = '';
 
-  async function setup(
-    fixture: 'small-ts' | 'small-py',
-  ): Promise<{ index: CodeIndex; indexer: Indexer; config: ProbeConfig }> {
+  async function setup(fixture: 'small-ts' | 'small-py'): Promise<{
+    index: CodeIndex;
+    indexer: Indexer;
+    config: ProbeConfig;
+    git: ReturnType<typeof makeGitStub>;
+  }> {
     // loadConfig (config.ts:81,115) reads PROBE_EXCLUDE and PROBE_CACHE_DIR.
     // Unset them so a developer's shell can't perturb the fixture's index.
     vi.stubEnv('PROBE_EXCLUDE', undefined);
@@ -80,7 +84,9 @@ describe('integration: end-to-end pipeline + tools', () => {
     const indexer = new Indexer(config, index);
     silenceStderr();
     await indexer.indexAll();
-    return { index, indexer, config };
+    // Disabled stub: fixtures are not git repos. Real-git end-to-end
+    // coverage lives in integration-git.test.ts.
+    return { index, indexer, config, git: makeGitStub() };
   }
 
   afterEach(() => {

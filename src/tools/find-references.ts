@@ -21,8 +21,10 @@ import {
   readinessBanner,
   renderAmbiguous,
   renderSuggestions,
+  sectionOrEmpty,
   sectionOrNone,
   textResponse,
+  topCoChangePartners,
   type ToolResponse,
 } from './common.js';
 
@@ -129,6 +131,17 @@ export async function runFindReferences(
     if (kind === 'type_references' || kind === 'all') {
       sections.push(renderPhase2('Type References'));
     }
+    // Behavioral coupling rides along with kind 'all' only: it is
+    // file-granularity enrichment, not a reference kind, and it stays a
+    // separate section rather than a rankRefs tier — a co-committing
+    // file says nothing about whether any given AST row is a real call
+    // site, so it must not outrank verified rows. Vanishes (no header)
+    // outside git repos, unlike the structural sections above whose
+    // "(none)" is a real answer.
+    if (kind === 'all') {
+      const coChanges = renderCoChangePartners(target.file, deps.index);
+      if (coChanges) sections.push(coChanges);
+    }
 
     return textResponse(banner + sections.join('\n\n'));
   } catch (err) {
@@ -190,6 +203,16 @@ function renderCallees(
 
 function renderPhase2(label: string): string {
   return `### ${label}\n${PHASE_2_NOTE}`;
+}
+
+// Confidence-only rows — find_references is the breadth view; the
+// shared-commit detail lives in get_context's co-change section.
+function renderCoChangePartners(file: string, index: CodeIndex): string {
+  const rows = topCoChangePartners(index.getCoChanges(file), file);
+  return sectionOrEmpty(
+    '### Co-change Partners (behavioral — from git)',
+    rows.map((r) => `- ${r.partner}  ${r.pct}% confidence`),
+  );
 }
 
 function rankRefs(

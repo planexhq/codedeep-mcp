@@ -11,7 +11,10 @@ import type { ImportInfo, Symbol } from '../../src/types.js';
 import {
   makeConfig,
   makeFileInfo,
+  makeGitStub,
   makeProjectDir,
+  mkCoChange,
+  mkGitMeta,
   mkImport,
   mkMemberRef,
   mkModuleRef,
@@ -33,11 +36,16 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function makeDeps(index: CodeIndex, ready = true): GetContextDeps {
+function makeDeps(
+  index: CodeIndex,
+  ready = true,
+  git: GetContextDeps['git'] = makeGitStub(),
+): GetContextDeps {
   return {
     index,
     indexer: { ready },
     config: makeConfig(tmpRoot),
+    git,
   };
 }
 
@@ -397,6 +405,7 @@ describe('runGetContext — symbol mode body extraction', () => {
       index: idx,
       indexer: { ready: true },
       config: makeConfig(tmpRoot, { maxFileSize: 128 }),
+      git: makeGitStub(),
     };
     writeTree(tmpRoot, { 'src/big.ts': 'x'.repeat(deps.config.maxFileSize + 1) });
     idx.addFile(
@@ -1424,5 +1433,298 @@ describe('runGetContext — member-ref method adjacency', () => {
     ).content[0].text;
     expect(calleesText).toContain('### Callees');
     expect(calleesText).toContain('src/service.ts:2 — helper() [structural]');
+  });
+});
+
+describe('runGetContext — git sections', () => {
+  // Symbol-mode fixture with one exported symbol whose body exists on disk.
+  function gitFixture(): CodeIndex {
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, {
+      'src/auth.ts': 'export function authenticate() {\n  return 1;\n}\n',
+    });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/auth.ts'),
+      [
+        mkSym({
+          name: 'authenticate',
+          file: 'src/auth.ts',
+          exported: true,
+          startLine: 1,
+          endLine: 3,
+          signature: 'function authenticate()',
+        }),
+      ],
+      [],
+      [],
+    );
+    return idx;
+  }
+
+  // Asymmetric on purpose: the queried file is fileB, so the from-self
+  // confidence is confidenceBA (83%), NOT confidenceAB (60%). Inverting
+  // the direction is the bug this fixture exists to catch.
+  async function applyCoChanges(idx: CodeIndex): Promise<void> {
+    await idx.applyGitAnalysis({
+      counts: new Map([
+        ['src/auth.ts', 14],
+        ['config/auth.yaml', 20],
+      ]),
+      cochanges: new Map([
+        [
+          'src/auth.ts',
+          [
+            mkCoChange('config/auth.yaml', 'src/auth.ts', 12, {
+              confidenceAB: 0.6,
+              confidenceBA: 0.83,
+            }),
+            mkCoChange('src/auth.ts', 'tests/auth.test.ts', 9, {
+              confidenceAB: 0.71,
+              confidenceBA: 0.4,
+            }),
+          ],
+        ],
+      ]),
+      hotspots: ['src/auth.ts'],
+      meta: { head: 'h'.repeat(40), windowDays: 180, analyzedAt: Date.now() },
+    });
+  }
+
+  it('renders co-change partners with the from-self confidence direction', async () => {
+    const idx = gitFixture();
+    await applyCoChanges(idx);
+
+    const result = await runGetContext(
+      { file: 'src/auth.ts', symbol: 'authenticate' },
+      makeDeps(idx),
+    );
+    const text = result.content[0].text;
+
+    expect(text).toContain('### Co-change Partners (2 behavioral)');
+    expect(text).toContain('- config/auth.yaml  83% confidence (12 shared commits)');
+    expect(text).toContain('- tests/auth.test.ts  71% confidence (9 shared commits)');
+    // Strongest first.
+    expect(text.indexOf('config/auth.yaml')).toBeLessThan(
+      text.indexOf('tests/auth.test.ts'),
+    );
+  });
+
+  it('renders recent changes rows from the git service', async () => {
+    const idx = gitFixture();
+    const git = makeGitStub({
+      recentCommits: async () => [
+        { hash: 'abc1234', date: '2026-04-10', subject: 'fix token refresh race condition' },
+        { hash: 'def5678', date: '2026-04-03', subject: 'add OAuth2 PKCE support' },
+      ],
+    });
+    const result = await runGetContext(
+      { file: 'src/auth.ts', symbol: 'authenticate' },
+      makeDeps(idx, true, git),
+    );
+    const text = result.content[0].text;
+
+    expect(text).toContain('### Recent Changes [behavioral]');
+    expect(text).toContain('- 2026-04-10 abc1234 "fix token refresh race condition"');
+    expect(text).toContain('- 2026-04-03 def5678 "add OAuth2 PKCE support"');
+  });
+
+  it('renders both git sections in file mode too', async () => {
+    const idx = gitFixture();
+    await applyCoChanges(idx);
+    const git = makeGitStub({
+      recentCommits: async () => [
+        { hash: 'abc1234', date: '2026-04-10', subject: 'touch' },
+      ],
+    });
+    const text = (
+      await runGetContext({ file: 'src/auth.ts' }, makeDeps(idx, true, git))
+    ).content[0].text;
+
+    expect(text).toContain('## File: src/auth.ts');
+    expect(text).toContain('### Co-change Partners (2 behavioral)');
+    expect(text).toContain('### Recent Changes [behavioral]');
+  });
+
+  it('omits git sections entirely outside git repos', async () => {
+    const idx = gitFixture();
+    const text = (
+      await runGetContext(
+        { file: 'src/auth.ts', symbol: 'authenticate' },
+        makeDeps(idx),
+      )
+    ).content[0].text;
+
+    expect(text).toContain('### Body');
+    expect(text).not.toContain('Co-change Partners');
+    expect(text).not.toContain('Recent Changes');
+    expect(text).not.toContain('[behavioral]');
+  });
+
+  it('include filtering isolates the co_changes section', async () => {
+    const idx = gitFixture();
+    await applyCoChanges(idx);
+    const text = (
+      await runGetContext(
+        { file: 'src/auth.ts', symbol: 'authenticate', include: ['co_changes'] },
+        makeDeps(idx),
+      )
+    ).content[0].text;
+
+    expect(text).toContain('### Co-change Partners (2 behavioral)');
+    expect(text).not.toContain('### Body');
+    expect(text).not.toContain('### Callers');
+    expect(text).not.toContain('### Recent Changes');
+  });
+
+  it('drops git sections first under max_tokens pressure while body survives', async () => {
+    const idx = gitFixture();
+    await applyCoChanges(idx);
+    const git = makeGitStub({
+      recentCommits: async () => [
+        { hash: 'abc1234', date: '2026-04-10', subject: 'touch' },
+      ],
+    });
+    const text = (
+      await runGetContext(
+        {
+          file: 'src/auth.ts',
+          symbol: 'authenticate',
+          include: ['body', 'co_changes', 'git'],
+          max_tokens: 30,
+        },
+        makeDeps(idx, true, git),
+      )
+    ).content[0].text;
+
+    expect(text).toContain('### Body');
+    expect(text).not.toContain('Co-change Partners');
+    expect(text).not.toContain('Recent Changes');
+    expect(text).toContain('omitted to stay within max_tokens=30');
+    expect(text).toContain('co-change partners');
+  });
+
+  it('a rejecting recentCommits never breaks the response', async () => {
+    const idx = gitFixture();
+    const git = makeGitStub({
+      recentCommits: async () => {
+        throw new Error('boom');
+      },
+    });
+    const text = (
+      await runGetContext(
+        { file: 'src/auth.ts', symbol: 'authenticate' },
+        makeDeps(idx, true, git),
+      )
+    ).content[0].text;
+
+    expect(text).toContain('### Body');
+    expect(text).not.toContain('Recent Changes');
+    expect(text).not.toContain('Error:');
+  });
+
+  it('caps co-change partners at five rows', async () => {
+    const idx = gitFixture();
+    const list = Array.from({ length: 7 }, (_, i) =>
+      mkCoChange('src/auth.ts', `src/p${i}.ts`, 10 - i, {
+        confidenceAB: (10 - i) / 14,
+      }),
+    );
+    await idx.applyGitAnalysis({
+      counts: new Map([['src/auth.ts', 14]]),
+      cochanges: new Map([['src/auth.ts', list]]),
+      hotspots: [],
+      meta: mkGitMeta(),
+    });
+    const text = (
+      await runGetContext(
+        { file: 'src/auth.ts', symbol: 'authenticate' },
+        makeDeps(idx),
+      )
+    ).content[0].text;
+
+    expect(text).toContain('### Co-change Partners (5 behavioral)');
+    expect(text).toContain('src/p0.ts');
+    expect(text).toContain('src/p4.ts');
+    expect(text).not.toContain('src/p5.ts');
+  });
+});
+
+describe('runGetContext — review hardening', () => {
+  it('floors displayed co-change confidence at 1% (never a 0% row)', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, { 'src/hub.ts': 'export function hub() {}\n' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/hub.ts'),
+      [
+        mkSym({
+          name: 'hub',
+          file: 'src/hub.ts',
+          startLine: 1,
+          endLine: 1,
+          signature: 'function hub()',
+        }),
+      ],
+      [],
+      [],
+    );
+    await idx.applyGitAnalysis({
+      counts: new Map([['src/hub.ts', 700]]),
+      cochanges: new Map([
+        [
+          'src/hub.ts',
+          [
+            mkCoChange('src/hub.ts', 'src/rare.ts', 3, {
+              confidenceAB: 3 / 700, // 0.43% — would round to 0
+            }),
+          ],
+        ],
+      ]),
+      hotspots: [],
+      meta: mkGitMeta(),
+    });
+    const text = (
+      await runGetContext({ file: 'src/hub.ts', symbol: 'hub' }, makeDeps(idx))
+    ).content[0].text;
+    expect(text).toContain('- src/rare.ts  1% confidence (3 shared commits)');
+    expect(text).not.toContain('0% confidence');
+  });
+
+  it('truncation note never names a git section that would render empty', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, {
+      'src/auth.ts': 'export function authenticate() {\n  return 1;\n}\n',
+    });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/auth.ts'),
+      [
+        mkSym({
+          name: 'authenticate',
+          file: 'src/auth.ts',
+          startLine: 1,
+          endLine: 3,
+          signature: 'function authenticate()',
+        }),
+      ],
+      [],
+      [],
+    );
+    // No git data at all: with a tight budget the old pre-render break
+    // would name 'co-change partners' and promise content that a larger
+    // max_tokens could never reveal.
+    const text = (
+      await runGetContext(
+        {
+          file: 'src/auth.ts',
+          symbol: 'authenticate',
+          include: ['body', 'co_changes', 'git'],
+          max_tokens: 30,
+        },
+        makeDeps(idx),
+      )
+    ).content[0].text;
+
+    expect(text).toContain('### Body');
+    expect(text).not.toContain('omitted to stay within');
+    expect(text).not.toContain('co-change partners');
   });
 });
