@@ -17,6 +17,7 @@ import { runFindReferences } from '../src/tools/find-references.js';
 import { runFindSymbol } from '../src/tools/find-symbol.js';
 import { runGetContext } from '../src/tools/get-context.js';
 import { runOverview } from '../src/tools/overview.js';
+import { runSearchStructure } from '../src/tools/search-structure.js';
 import type { ProbeConfig } from '../src/types.js';
 import {
   makeConfig,
@@ -31,8 +32,14 @@ const FIXTURES_ROOT = join(
 );
 
 const FIXTURE_FILES: Record<'small-ts' | 'small-py', readonly string[]> = {
-  'small-ts': ['src/index.ts', 'src/auth.ts', 'src/utils.ts', 'src/types.ts'],
-  'small-py': ['app/auth.py', 'app/models.py'],
+  'small-ts': [
+    'src/index.ts',
+    'src/auth.ts',
+    'src/utils.ts',
+    'src/types.ts',
+    'src/service.ts',
+  ],
+  'small-py': ['app/auth.py', 'app/models.py', 'app/service.py'],
 };
 
 async function copyFixtureToTmp(
@@ -88,7 +95,7 @@ describe('integration: end-to-end pipeline + tools', () => {
   it('indexes the TS fixture end-to-end', async () => {
     const { index } = await setup('small-ts');
 
-    expect(index.getStats().totalFiles).toBe(4);
+    expect(index.getStats().totalFiles).toBe(5);
 
     for (const name of [
       'authenticate',
@@ -121,7 +128,7 @@ describe('integration: end-to-end pipeline + tools', () => {
 
     expect(text).toContain('## Project:');
     expect(text).toContain('### Languages');
-    expect(text).toContain('- TypeScript: 4 files (100%)');
+    expect(text).toContain('- TypeScript: 5 files (100%)');
     expect(text).toContain('### Structure');
     expect(text).toContain('### Entry Points');
     expect(text).toContain('src/index.ts');
@@ -247,6 +254,116 @@ describe('integration: end-to-end pipeline + tools', () => {
     ).content[0].text;
 
     expect(text).toContain("Error: no symbol 'doesNotExist' in 'src/auth.ts'.");
+  });
+
+  it('resolves this.x() member calls into method adjacency end-to-end', async () => {
+    const { index } = await setup('small-ts');
+
+    // service.ts: login() calls this.stamp() — extract-time resolution
+    // must land in the id-keyed caller/callee adjacency.
+    const stamp = index.findSymbolByName('stamp')[0];
+    const login = index.findSymbolByName('login')[0];
+    expect(stamp?.kind).toBe('method');
+    expect(index.getCallers(stamp.id).map((s) => s.id)).toContain(login.id);
+    expect(index.getCallees(login.id).map((s) => s.id)).toContain(stamp.id);
+  });
+
+  it('find_references surfaces namespace-import member callers', async () => {
+    // service.ts calls utils.formatDate() through `import * as utils` —
+    // the receiver resolves the module precisely, so the ref must be
+    // attributed to utils.ts and labeled as a member match.
+    const deps = await setup('small-ts');
+    const text = (
+      await runFindReferences(
+        { file: 'src/utils.ts', symbol: 'formatDate' },
+        deps,
+      )
+    ).content[0].text;
+
+    expect(sectionAfter(text, '### Callers')).toContain('src/service.ts:13');
+    expect(text).toContain('[member call, unverified]');
+  });
+
+  it('find_references shows member-call callers for methods', async () => {
+    const deps = await setup('small-ts');
+    const text = (
+      await runFindReferences(
+        { file: 'src/service.ts', symbol: 'login' },
+        deps,
+      )
+    ).content[0].text;
+
+    // svc.login('admin') at module level — unknown receiver, weakly
+    // included and tagged as the noisier member tier.
+    const callers = sectionAfter(text, '### Callers');
+    expect(callers).toContain('src/service.ts:18');
+    expect(callers).toContain('[member call, unverified]');
+  });
+
+  it('resolves Python `from . import auth` member callers cross-module', async () => {
+    const deps = await setup('small-py');
+    const text = (
+      await runFindReferences(
+        { file: 'app/auth.py', symbol: 'authenticate' },
+        deps,
+      )
+    ).content[0].text;
+
+    // service.py calls auth.authenticate() inside Session.helper().
+    expect(sectionAfter(text, '### Callers')).toContain('app/service.py:8');
+
+    // And self.helper() resolves to method adjacency.
+    const helper = deps.index
+      .getSymbolsInFile('app/service.py')
+      .find((s) => s.name === 'helper')!;
+    const run = deps.index
+      .getSymbolsInFile('app/service.py')
+      .find((s) => s.name === 'run')!;
+    expect(deps.index.getCallers(helper.id).map((s) => s.id)).toContain(run.id);
+  });
+
+  it('search_structure query mode finds symbols by docstring keyword', async () => {
+    const deps = await setup('small-ts');
+    const text = (
+      await runSearchStructure({ query: 'JWT' }, deps)
+    ).content[0].text;
+
+    // 'JWT' appears only in authenticate's doc comment, never in a name —
+    // exercises the widened name+signature+doc search index end-to-end.
+    expect(text).toContain('src/auth.ts:');
+    expect(text).toContain('async function authenticate');
+    expect(text).toContain('Validates the JWT and attaches user to request');
+  });
+
+  it('search_structure pattern mode maps matches to enclosing symbols', async () => {
+    const deps = await setup('small-ts');
+    const text = (
+      await runSearchStructure({ pattern: 'hash($A)' }, deps)
+    ).content[0].text;
+
+    // auth.ts:7 calls hash(token) inside authenticate (lines 5-10).
+    expect(text).toContain('src/auth.ts:5-10 | function | exported');
+    expect(text).toContain('match :7  hash(token)');
+  });
+
+  it('search_structure pattern mode declines non-TS/JS languages in-band', async () => {
+    const deps = await setup('small-py');
+    const text = (
+      await runSearchStructure(
+        { pattern: 'authenticate($A)', language: 'python' },
+        deps,
+      )
+    ).content[0].text;
+
+    expect(text).toContain(
+      'Structural patterns are not supported for this language yet',
+    );
+
+    // Query mode still serves Python.
+    const query = (
+      await runSearchStructure({ query: 'authenticate', language: 'python' }, deps)
+    ).content[0].text;
+    expect(query).toContain('app/auth.py');
   });
 
   it('indexes the Python fixture and respects __all__ + underscore privacy', async () => {
