@@ -10,6 +10,7 @@ import { runFindReferences } from "./tools/find-references.js";
 import { runFindSymbol } from "./tools/find-symbol.js";
 import { runGetContext } from "./tools/get-context.js";
 import { runOverview } from "./tools/overview.js";
+import { runSearchStructure } from "./tools/search-structure.js";
 import type { ProbeConfig } from "./types.js";
 
 const SHARED_ANNOTATIONS = {
@@ -146,6 +147,40 @@ export function createServer(deps: ServerDeps): McpServer {
       annotations: SHARED_ANNOTATIONS,
     },
     async (args) => runFindReferences(args, deps),
+  );
+
+  server.registerTool(
+    "search_structure",
+    {
+      description:
+        "Keyword and structural code search. Fuzzy-matches symbol names, signatures, and docstrings; with `pattern`, runs an ast-grep structural query instead (TypeScript/TSX/JavaScript only for now).",
+      inputSchema: {
+        query: z
+          .string()
+          .optional()
+          .describe(
+            "Keywords matched fuzzily against symbol names, signatures, and docstrings (required unless `pattern` is set)",
+          ),
+        pattern: z
+          .string()
+          .optional()
+          .describe(
+            "ast-grep pattern, e.g. 'app.use($HANDLER)'. Takes precedence over `query`. TS/TSX/JS only.",
+          ),
+        language: z
+          .string()
+          .optional()
+          .describe("Filter to one language: typescript, tsx, javascript, python"),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max results (default: 10, max: 100)"),
+      },
+      annotations: SHARED_ANNOTATIONS,
+    },
+    async (args) => runSearchStructure(args, deps),
   );
 
   return server;

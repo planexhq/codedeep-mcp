@@ -25,6 +25,7 @@
     "prepare": "npm run build"
   },
   "dependencies": {
+    "@ast-grep/napi": "^0.43.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "minisearch": "^7.1.2",
     "picomatch": "^4.0.4",
