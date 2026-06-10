@@ -8,6 +8,7 @@ import {
   makeFileInfo,
   makeProjectDir,
   mkImport,
+  mkMemberRef,
   mkModuleRef,
   mkRef,
   mkSym,
@@ -401,6 +402,111 @@ describe('CodeIndex.suggest', () => {
   });
 });
 
+describe('CodeIndex.searchSymbols', () => {
+  it('finds a symbol by a signature token its name lacks', () => {
+    const idx = new CodeIndex();
+    const handler = mkSym({
+      name: 'handler',
+      file: 'src/h.ts',
+      signature: 'function handler(req: FastifyRequest): void',
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/h.ts'), [handler], [], []);
+
+    const { symbols } = idx.searchSymbols('FastifyRequest', { limit: 5 });
+    expect(symbols.map((s) => s.name)).toContain('handler');
+  });
+
+  it('finds a symbol by a doc token its name lacks', () => {
+    const idx = new CodeIndex();
+    const auth = mkSym({
+      name: 'authenticate',
+      file: 'src/auth.ts',
+      doc: 'Validates the JWT and attaches user to request',
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/auth.ts'), [auth], [], []);
+
+    const { symbols } = idx.searchSymbols('JWT', { limit: 5 });
+    expect(symbols.map((s) => s.name)).toContain('authenticate');
+  });
+
+  it('ranks an exported symbol above an equally relevant non-exported one', () => {
+    const idx = new CodeIndex();
+    const internal = mkSym({ name: 'parseConfig', file: 'src/a.ts' });
+    const exported = mkSym({
+      name: 'parseConfig',
+      file: 'src/b.ts',
+      exported: true,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [internal], [], []);
+    idx.addFile(makeFileInfo('typescript', 'src/b.ts'), [exported], [], []);
+
+    const { symbols } = idx.searchSymbols('parseConfig', { limit: 5 });
+    expect(symbols.length).toBeGreaterThanOrEqual(2);
+    expect(symbols[0].file).toBe('src/b.ts');
+  });
+
+  it('filters results to the given languages', () => {
+    const idx = new CodeIndex();
+    const ts = mkSym({ name: 'validate', file: 'src/v.ts' });
+    const py = mkSym({ name: 'validate', file: 'app/v.py', language: 'python' });
+    idx.addFile(makeFileInfo('typescript', 'src/v.ts'), [ts], [], []);
+    idx.addFile(makeFileInfo('python', 'app/v.py'), [py], [], []);
+
+    const { symbols } = idx.searchSymbols('validate', {
+      limit: 5,
+      languages: new Set(['python']),
+    });
+    expect(symbols.map((s) => s.file)).toEqual(['app/v.py']);
+  });
+
+  it('respects the limit', () => {
+    const idx = new CodeIndex();
+    for (let i = 0; i < 5; i++) {
+      const file = `src/${i}.ts`;
+      idx.addFile(
+        makeFileInfo('typescript', file),
+        [mkSym({ name: 'validateInput', file })],
+        [],
+        [],
+      );
+    }
+    const { symbols, total } = idx.searchSymbols('validateInput', { limit: 2 });
+    expect(symbols).toHaveLength(2);
+    expect(total).toBe(5);
+  });
+
+  it('returns [] for an empty query or non-positive limit', () => {
+    const idx = new CodeIndex();
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [mkSym({ name: 'foo', file: 'src/a.ts' })],
+      [],
+      [],
+    );
+    expect(idx.searchSymbols('', { limit: 10 })).toEqual({ symbols: [], total: 0 });
+    expect(idx.searchSymbols('foo', { limit: 0 })).toEqual({ symbols: [], total: 0 });
+  });
+
+  it('does not leak doc/signature matches into suggest()', () => {
+    const idx = new CodeIndex();
+    const auth = mkSym({
+      name: 'authenticate',
+      file: 'src/auth.ts',
+      signature: 'function authenticate(req: SessionRequest): User',
+      doc: 'Validates the JWT and attaches user to request',
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/auth.ts'), [auth], [], []);
+
+    // searchSymbols sees both extra fields...
+    expect(idx.searchSymbols('JWT', { limit: 5 }).symbols).toHaveLength(1);
+    expect(idx.searchSymbols('SessionRequest', { limit: 5 }).symbols).toHaveLength(1);
+    // ...but suggest stays pinned to name+fqn (did-you-mean must not
+    // surface doc-only hits).
+    expect(idx.suggest('JWT', 5)).toEqual([]);
+    expect(idx.suggest('SessionRequest', 5)).toEqual([]);
+  });
+});
+
 describe('CodeIndex query helpers', () => {
   it('getSymbolsInFile returns a copy', () => {
     const idx = new CodeIndex();
@@ -736,7 +842,7 @@ describe('CodeIndex edge cases', () => {
     await idx.save(cachePath);
 
     const data = JSON.parse(readFileSync(cachePath, 'utf8'));
-    expect(data.version).toBe(3);
+    expect(data.version).toBe(4);
     expect(data.projectRoot).toBe(tmpRoot);
     expect(Array.isArray(data.symbols)).toBe(true);
     expect(Array.isArray(data.files)).toBe(true);
@@ -2019,6 +2125,76 @@ describe('CodeIndex persistence — references round-trip', () => {
     const idx = new CodeIndex(tmpRoot);
     expect(await idx.load(cachePath)).toBe(false);
   });
+
+  it('invalidates v3 caches, which lack member-expression refs', async () => {
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        version: 3,
+        createdAt: 0,
+        projectRoot: tmpRoot,
+        symbols: [],
+        files: [],
+        imports: [],
+        callees: [],
+        callers: [],
+        references: [],
+      }),
+    );
+    const idx = new CodeIndex(tmpRoot);
+    expect(await idx.load(cachePath)).toBe(false);
+    expect(existsSync(cachePath)).toBe(false);
+  });
+
+  it('persists and restores the receiver on member refs', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const caller = mkSym({ name: 'caller', file: 'src/a.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [caller],
+      [mkMemberRef(caller, 'save', 'repo', { line: 7 })],
+      [],
+    );
+    await idx.save(cachePath);
+
+    const loaded = new CodeIndex(tmpRoot);
+    expect(await loaded.load(cachePath)).toBe(true);
+
+    const refs = loaded.getReferencesByName('save');
+    expect(refs).toHaveLength(1);
+    expect(refs[0].receiver).toBe('repo');
+    expect(refs[0].targetId).toBeNull();
+    expect(refs[0].line).toBe(7);
+  });
+
+  it('rejects a cache whose reference carries a non-string receiver', async () => {
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        version: 4,
+        createdAt: 0,
+        projectRoot: tmpRoot,
+        symbols: [],
+        files: [],
+        imports: [],
+        callees: [],
+        callers: [],
+        references: [
+          {
+            sourceId: null,
+            targetId: null,
+            targetName: 'save',
+            kind: 'calls',
+            file: 'src/a.ts',
+            line: 1,
+            receiver: 42,
+          },
+        ],
+      }),
+    );
+    const idx = new CodeIndex(tmpRoot);
+    expect(await idx.load(cachePath)).toBe(false);
+  });
 });
 
 describe('isCallerOf', () => {
@@ -2059,4 +2235,360 @@ describe('isCallerOf', () => {
       expect(isCallerOf(ref, target)).toBe(true);
     },
   );
+
+  it('accepts unresolved member refs for exported method targets', () => {
+    const target = mkSym({
+      name: 'save',
+      kind: 'method',
+      parent: 'Repo',
+      file: 'src/repo.ts',
+      exported: true,
+    });
+    const caller = mkSym({ name: 'caller', file: 'src/other.ts' });
+    expect(isCallerOf(mkMemberRef(caller, 'save', 'repo'), target)).toBe(true);
+  });
+
+  it.each<SymbolKind>(['interface', 'type'])(
+    'rejects member refs for %s targets',
+    (kind) => {
+      const target = mkSym({ name: 'Serializer', kind, exported: true });
+      const caller = mkSym({ name: 'caller', file: 'src/other.ts' });
+      expect(isCallerOf(mkMemberRef(caller, 'Serializer', 'lib'), target)).toBe(false);
+    },
+  );
+
+  it.each(['this', 'self', 'cls'])(
+    'rejects unresolved %s-receiver refs (inherited methods are LSP territory)',
+    (receiver) => {
+      const target = mkSym({
+        name: 'render',
+        kind: 'method',
+        parent: 'Base',
+        file: 'src/base.ts',
+        exported: true,
+      });
+      const caller = mkSym({ name: 'update', kind: 'method', parent: 'Child', file: 'src/child.ts' });
+      const ref = mkMemberRef(caller, 'render', receiver, { selfReceiver: true });
+      expect(isCallerOf(ref, target)).toBe(false);
+    },
+  );
+
+  it('admits refs whose receiver is merely NAMED self (extractor did not flag it)', () => {
+    // TS: `import * as self from './telemetry'; self.record()` or
+    // `const self = this; self.flush()` — the receiver token is 'self'
+    // but the extractor's isSelf is false, so the ref must NOT be
+    // rejected as an inherited-method call.
+    const target = mkSym({
+      name: 'record',
+      file: 'src/telemetry.ts',
+      exported: true,
+    });
+    const caller = mkSym({ name: 'boot', file: 'src/app.ts' });
+    expect(isCallerOf(mkMemberRef(caller, 'record', 'self'), target)).toBe(true);
+  });
+
+  it('rejects member refs for short method names', () => {
+    const target = mkSym({
+      name: 'get',
+      kind: 'method',
+      parent: 'Store',
+      file: 'src/store.ts',
+      exported: true,
+    });
+    const caller = mkSym({ name: 'caller', file: 'src/other.ts' });
+    expect(isCallerOf(mkMemberRef(caller, 'get', 'store'), target)).toBe(false);
+  });
+
+  it('rejects cross-file member refs to non-exported targets, accepts same-file', () => {
+    const target = mkSym({
+      name: 'persist',
+      kind: 'method',
+      parent: 'Repo',
+      file: 'src/repo.ts',
+      exported: false,
+    });
+    const sameFile = mkSym({ name: 'local', file: 'src/repo.ts' });
+    const otherFile = mkSym({ name: 'remote', file: 'src/other.ts' });
+    expect(isCallerOf(mkMemberRef(sameFile, 'persist', 'repo'), target)).toBe(true);
+    expect(isCallerOf(mkMemberRef(otherFile, 'persist', 'repo'), target)).toBe(false);
+  });
+
+  it('accepts precisely-resolved member refs regardless of receiver kind', () => {
+    const target = mkSym({
+      name: 'helper',
+      kind: 'method',
+      parent: 'C',
+      file: 'src/c.ts',
+    });
+    const run = mkSym({ name: 'run', kind: 'method', parent: 'C', file: 'src/c.ts' });
+    const ref = mkMemberRef(run, 'helper', 'this', { targetId: target.id });
+    expect(isCallerOf(ref, target)).toBe(true);
+  });
+});
+
+describe('CodeIndex.getReferencesByNameOrAlias — member-ref scoping', () => {
+  it('admits namespace-import member refs whose specifier resolves to the target file', () => {
+    const idx = new CodeIndex();
+    const helper = mkSym({ name: 'helper', file: 'src/utils.ts', exported: true });
+    idx.addFile(makeFileInfo('typescript', 'src/utils.ts'), [helper], [], []);
+    const homonym = mkSym({ name: 'helper', file: 'src/other.ts', exported: true });
+    idx.addFile(makeFileInfo('typescript', 'src/other.ts'), [homonym], [], []);
+
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkMemberRef(caller, 'helper', 'u')],
+      [mkImport('src/app.ts', './utils', [{ name: '*', alias: 'u', kind: 'namespace' }])],
+    );
+
+    // `u` names ./utils — admit for utils.ts, drop for the homonym.
+    expect(idx.getReferencesByNameOrAlias('helper', 'src/utils.ts')).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('helper', 'src/other.ts')).toHaveLength(0);
+  });
+
+  it('resolves Python `from . import x` submodule receivers', () => {
+    const idx = new CodeIndex();
+    const auth = mkSym({
+      name: 'authenticate',
+      file: 'app/auth.py',
+      language: 'python',
+      exported: true,
+    });
+    idx.addFile(makeFileInfo('python', 'app/auth.py'), [auth], [], []);
+    const homonym = mkSym({
+      name: 'authenticate',
+      file: 'app/legacy.py',
+      language: 'python',
+      exported: true,
+    });
+    idx.addFile(makeFileInfo('python', 'app/legacy.py'), [homonym], [], []);
+
+    const caller = mkSym({ name: 'login', file: 'app/service.py', language: 'python' });
+    idx.addFile(
+      makeFileInfo('python', 'app/service.py'),
+      [caller],
+      [mkMemberRef(caller, 'authenticate', 'auth')],
+      [mkImport('app/service.py', '.', [{ name: 'auth', kind: 'module' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('authenticate', 'app/auth.py')).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('authenticate', 'app/legacy.py')).toHaveLength(0);
+  });
+
+  it('weakly includes member refs through unresolvable absolute Python imports', () => {
+    const idx = new CodeIndex();
+    const helper = mkSym({
+      name: 'format_date',
+      file: 'app/utils.py',
+      language: 'python',
+      exported: true,
+    });
+    idx.addFile(makeFileInfo('python', 'app/utils.py'), [helper], [], []);
+
+    const caller = mkSym({ name: 'render', file: 'app/view.py', language: 'python' });
+    idx.addFile(
+      makeFileInfo('python', 'app/view.py'),
+      [caller],
+      [mkMemberRef(caller, 'format_date', 'utils')],
+      [mkImport('app/view.py', 'utils', [{ name: 'utils', kind: 'module' }])],
+    );
+
+    // `import utils` is absolute — unresolvable without sys.path; best effort.
+    expect(idx.getReferencesByNameOrAlias('format_date', 'app/utils.py')).toHaveLength(1);
+  });
+
+  it('drops member refs through type-only namespace imports', () => {
+    const idx = new CodeIndex();
+    const helper = mkSym({ name: 'helper', file: 'src/utils.ts', exported: true });
+    idx.addFile(makeFileInfo('typescript', 'src/utils.ts'), [helper], [], []);
+
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkMemberRef(caller, 'helper', 'T')],
+      [mkImport('src/app.ts', './utils', [{ name: '*', alias: 'T', kind: 'type' }])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('helper', 'src/utils.ts')).toHaveLength(0);
+  });
+
+  it('drops namespace-receiver refs for class-member targets', () => {
+    // `utils.save()` through `import * as utils` reaches only TOP-LEVEL
+    // exports of utils.ts — it can never invoke Cache.prototype.save.
+    const idx = new CodeIndex();
+    const methodSave = mkSym({
+      name: 'save',
+      kind: 'method',
+      parent: 'Cache',
+      file: 'src/utils.ts',
+      exported: true,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/utils.ts'), [methodSave], [], []);
+
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkMemberRef(caller, 'save', 'u')],
+      [mkImport('src/app.ts', './utils', [{ name: '*', alias: 'u', kind: 'namespace' }])],
+    );
+
+    // Member target (Cache.save): the namespace ref is out of reach.
+    expect(
+      idx.getReferencesByNameOrAlias('save', 'src/utils.ts', true),
+    ).toHaveLength(0);
+    // Top-level target in the same file: admitted.
+    expect(
+      idx.getReferencesByNameOrAlias('save', 'src/utils.ts', false),
+    ).toHaveLength(1);
+  });
+
+  it("resolves `import * as pkg from '.'` without mangling the specifier", () => {
+    // The namespace sentinel '*' must not be appended to the dots —
+    // the specifier is '.' itself, resolving to the directory's index.
+    const idx = new CodeIndex();
+    const helper = mkSym({ name: 'helper', file: 'src/index.ts', exported: true });
+    idx.addFile(makeFileInfo('typescript', 'src/index.ts'), [helper], [], []);
+    const homonym = mkSym({ name: 'helper', file: 'lib/other.ts', exported: true });
+    idx.addFile(makeFileInfo('typescript', 'lib/other.ts'), [homonym], [], []);
+
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkMemberRef(caller, 'helper', 'pkg')],
+      [mkImport('src/app.ts', '.', [{ name: '*', alias: 'pkg', kind: 'namespace' }])],
+    );
+
+    // Precise resolution to src/index.ts: admit there, drop the homonym.
+    expect(idx.getReferencesByNameOrAlias('helper', 'src/index.ts')).toHaveLength(1);
+    expect(idx.getReferencesByNameOrAlias('helper', 'lib/other.ts')).toHaveLength(0);
+  });
+
+  it('weakly includes member refs with unknown receivers', () => {
+    const idx = new CodeIndex();
+    const save = mkSym({
+      name: 'save',
+      kind: 'method',
+      parent: 'Repo',
+      file: 'src/repo.ts',
+      exported: true,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/repo.ts'), [save], [], []);
+
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkMemberRef(caller, 'save', 'repo')],
+      [],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('save', 'src/repo.ts')).toHaveLength(1);
+  });
+
+  it('weakly includes member refs whose receiver is a value import', () => {
+    const idx = new CodeIndex();
+    const save = mkSym({
+      name: 'save',
+      kind: 'method',
+      parent: 'Repo',
+      file: 'src/repo.ts',
+      exported: true,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/repo.ts'), [save], [], []);
+
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkMemberRef(caller, 'save', 'repo')],
+      // `import { repo } from './instances'` — the object may be of any
+      // class; weak include.
+      [mkImport('src/app.ts', './instances', ['repo'])],
+    );
+
+    expect(idx.getReferencesByNameOrAlias('save', 'src/repo.ts')).toHaveLength(1);
+  });
+
+  it('does not pull member refs in through the import-alias path', () => {
+    const idx = new CodeIndex();
+    const hash = mkSym({ name: 'hash', file: 'src/utils.ts', exported: true });
+    idx.addFile(makeFileInfo('typescript', 'src/utils.ts'), [hash], [], []);
+
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [
+        // Bare alias call h() — binds through the import, included.
+        mkUnresolvedRef(caller, 'h'),
+        // obj.h() — the property coincides with the alias but never
+        // binds through a top-level import; excluded.
+        mkMemberRef(caller, 'h', 'obj'),
+      ],
+      [mkImport('src/app.ts', './utils', [{ name: 'hash', alias: 'h' }])],
+    );
+
+    const refs = idx.getReferencesByNameOrAlias('hash', 'src/utils.ts');
+    expect(refs).toHaveLength(1);
+    expect(refs[0].receiver).toBeUndefined();
+  });
+});
+
+describe('CodeIndex member-ref adjacency and counts', () => {
+  it('builds caller/callee edges from extract-time-resolved this.x() refs', () => {
+    const idx = new CodeIndex();
+    const helper = mkSym({ name: 'helper', kind: 'method', parent: 'C', file: 'src/c.ts' });
+    const run = mkSym({ name: 'run', kind: 'method', parent: 'C', file: 'src/c.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [helper, run],
+      [mkMemberRef(run, 'helper', 'this', { targetId: helper.id })],
+      [],
+    );
+
+    expect(idx.getCallers(helper.id).map((s) => s.id)).toEqual([run.id]);
+    expect(idx.getCallees(run.id).map((s) => s.id)).toEqual([helper.id]);
+    expect(idx.getCallerEdges(helper.id)).toHaveLength(1);
+  });
+
+  it('counts cross-file member refs in getCallerCount for methods', () => {
+    const idx = new CodeIndex();
+    const save = mkSym({
+      name: 'save',
+      kind: 'method',
+      parent: 'Repo',
+      file: 'src/repo.ts',
+      exported: true,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/repo.ts'), [save], [], []);
+
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkMemberRef(caller, 'save', 'repo')],
+      [],
+    );
+
+    expect(idx.getCallerCount(save.id)).toBe(1);
+  });
+
+  it('cascade-deletes member refs when their source file is removed', () => {
+    const idx = new CodeIndex();
+    const caller = mkSym({ name: 'caller', file: 'src/app.ts' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/app.ts'),
+      [caller],
+      [mkMemberRef(caller, 'save', 'repo')],
+      [],
+    );
+    expect(idx.getReferencesByName('save')).toHaveLength(1);
+
+    idx.removeFile('src/app.ts');
+    expect(idx.getReferencesByName('save')).toHaveLength(0);
+  });
 });

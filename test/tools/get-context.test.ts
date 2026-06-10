@@ -13,6 +13,7 @@ import {
   makeFileInfo,
   makeProjectDir,
   mkImport,
+  mkMemberRef,
   mkModuleRef,
   mkRef,
   mkSym,
@@ -1354,5 +1355,74 @@ describe('runGetContext — banner and validation', () => {
     );
 
     expect(result.content[0].text).toBe('Error: boom');
+  });
+});
+
+describe('runGetContext — member-ref method adjacency', () => {
+  it('renders sibling-method callers and callees from resolved this.x() refs', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const source = [
+      'class Service {',
+      '  helper() {',
+      '    return 1;',
+      '  }',
+      '  run() {',
+      '    return this.helper();',
+      '  }',
+      '}',
+      '',
+    ].join('\n');
+    writeTree(tmpRoot, { 'src/service.ts': source });
+
+    const cls = mkSym({
+      name: 'Service',
+      kind: 'class',
+      file: 'src/service.ts',
+      signature: 'class Service',
+      startLine: 1,
+      endLine: 8,
+    });
+    const helper = mkSym({
+      name: 'helper',
+      kind: 'method',
+      parent: 'Service',
+      file: 'src/service.ts',
+      signature: 'helper()',
+      startLine: 2,
+      endLine: 4,
+    });
+    const run = mkSym({
+      name: 'run',
+      kind: 'method',
+      parent: 'Service',
+      file: 'src/service.ts',
+      signature: 'run()',
+      startLine: 5,
+      endLine: 7,
+    });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/service.ts'),
+      [cls, helper, run],
+      [mkMemberRef(run, 'helper', 'this', { targetId: helper.id, line: 6 })],
+      [],
+    );
+
+    const callersText = (
+      await runGetContext(
+        { file: 'src/service.ts', symbol: 'helper' },
+        makeDeps(idx),
+      )
+    ).content[0].text;
+    expect(callersText).toContain('### Callers');
+    expect(callersText).toContain('src/service.ts:5 — run() [structural]');
+
+    const calleesText = (
+      await runGetContext(
+        { file: 'src/service.ts', symbol: 'run' },
+        makeDeps(idx),
+      )
+    ).content[0].text;
+    expect(calleesText).toContain('### Callees');
+    expect(calleesText).toContain('src/service.ts:2 — helper() [structural]');
   });
 });

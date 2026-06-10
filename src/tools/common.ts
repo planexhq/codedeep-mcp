@@ -1,6 +1,7 @@
-import { relative, resolve } from 'node:path';
+import { promises as fs } from 'node:fs';
+import { join, relative, resolve, sep } from 'node:path';
 
-import type { Symbol } from '../types.js';
+import type { ProbeConfig, Symbol } from '../types.js';
 
 // Index signature required to satisfy the MCP SDK's CallToolResult shape.
 export interface ToolResponse {
@@ -22,10 +23,58 @@ export function normalizeFilePath(input: string, projectRoot: string): string | 
   return rel;
 }
 
+// projectRoot is fixed for the process lifetime, so its realpath is too —
+// caching it spares one syscall per safeReadIndexedFile call (pattern
+// scans call this once per candidate file).
+const realRootCache = new Map<string, string>();
+async function realProjectRoot(projectRoot: string): Promise<string> {
+  let cached = realRootCache.get(projectRoot);
+  if (cached === undefined) {
+    cached = await fs.realpath(projectRoot);
+    realRootCache.set(projectRoot, cached);
+  }
+  return cached;
+}
+
+// Re-check scanner admission rules at read time so stale on-disk
+// state (symlink-swap, growth past cap, became-directory) can't
+// bypass the indexer's contract.
+export async function safeReadIndexedFile(
+  relPath: string,
+  config: ProbeConfig,
+): Promise<string> {
+  const abs = join(config.projectRoot, relPath);
+  const stats = await fs.lstat(abs);
+  if (stats.isSymbolicLink()) {
+    throw new Error('refusing to follow symlink');
+  }
+  if (!stats.isFile()) {
+    throw new Error('not a regular file');
+  }
+  if (stats.size > config.maxFileSize) {
+    throw new Error(
+      `exceeds maxFileSize (${stats.size} > ${config.maxFileSize})`,
+    );
+  }
+  // lstat only checks the final component. Resolve parent-directory
+  // symlinks so a swap higher up in the path can't escape projectRoot.
+  const [real, realRoot] = await Promise.all([
+    fs.realpath(abs),
+    realProjectRoot(config.projectRoot),
+  ]);
+  if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+    throw new Error('path escapes project root');
+  }
+  return fs.readFile(abs, 'utf8');
+}
+
 // Among ranges that contain `line`, pick the smallest — targets the innermost
-// match (e.g. a method inside a same-named class). Otherwise pick the candidate
-// nearest by startLine.
-export function pickByLine(candidates: Symbol[], line: number): Symbol {
+// match (e.g. a method inside a same-named class). Returns null when no
+// candidate spans `line`; callers that want a fallback handle it themselves.
+export function innermostEnclosing(
+  candidates: Symbol[],
+  line: number,
+): Symbol | null {
   let innermost: Symbol | null = null;
   let innermostSize = Infinity;
   for (const s of candidates) {
@@ -36,6 +85,13 @@ export function pickByLine(candidates: Symbol[], line: number): Symbol {
       innermostSize = size;
     }
   }
+  return innermost;
+}
+
+// Innermost containing range when one exists; otherwise the candidate
+// nearest by startLine.
+export function pickByLine(candidates: Symbol[], line: number): Symbol {
+  const innermost = innermostEnclosing(candidates, line);
   if (innermost) return innermost;
   let best = candidates[0];
   let bestDist = Math.abs(line - best.startLine);
@@ -109,6 +165,11 @@ export const MODULE_LEVEL = '(module-level)';
 // Shared between `find_references` and `get_context`'s file-mode export
 // caller summary — both render the same data path.
 export const NAME_MATCH_TAG = '[name match, unverified]';
+
+// Tag for unresolved member-call rows (`obj.method()` / `ns.fn()`):
+// noisier than bare-name matches because the receiver could bind to any
+// object, so the property match alone carries the evidence.
+export const MEMBER_MATCH_TAG = '[member call, unverified]';
 
 // Heading qualifier that pairs with `NAME_MATCH_TAG`. Section headers
 // compose their own prefix and append this so the precision tier is

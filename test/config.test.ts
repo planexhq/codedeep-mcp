@@ -67,6 +67,44 @@ describe('loadConfig', () => {
     expect(cfg.maxFiles).toBe(100_000);
     expect(cfg.maxFileSize).toBe(1_048_576);
     expect(cfg.cacheDir).toBe(resolve(root, '.probe', 'cache'));
+    expect(cfg.watch).toBe(true);
+  });
+
+  it('file watch flag overrides the default', () => {
+    writeConfig(root, JSON.stringify({ watch: false }));
+    expect(loadConfig(root).watch).toBe(false);
+
+    writeConfig(root, JSON.stringify({ watch: true }));
+    expect(loadConfig(root).watch).toBe(true);
+  });
+
+  it('ignores a non-boolean file watch value', () => {
+    writeConfig(root, JSON.stringify({ watch: 'no' }));
+    expect(loadConfig(root).watch).toBe(true);
+  });
+
+  it.each([
+    ['0', false],
+    ['false', false],
+    ['1', true],
+    ['true', true],
+  ])('PROBE_WATCH=%s sets watch to %s', (raw, expected) => {
+    vi.stubEnv('PROBE_WATCH', raw);
+    expect(loadConfig(root).watch).toBe(expected);
+  });
+
+  it('PROBE_WATCH overrides the file watch flag', () => {
+    writeConfig(root, JSON.stringify({ watch: false }));
+    vi.stubEnv('PROBE_WATCH', '1');
+    expect(loadConfig(root).watch).toBe(true);
+  });
+
+  it('warns and keeps the default for an unrecognized PROBE_WATCH', () => {
+    const spy = silenceStderr();
+    vi.stubEnv('PROBE_WATCH', 'maybe');
+    expect(loadConfig(root).watch).toBe(true);
+    expect(spy).toHaveBeenCalled();
+    expect(String(spy.mock.calls[0]?.[0])).toContain('PROBE_WATCH');
   });
 
   it('full config file overrides each scalar field and unions excludes', () => {

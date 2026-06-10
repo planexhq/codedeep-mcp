@@ -4,7 +4,12 @@ import { basename, dirname, join, posix } from 'node:path';
 import MiniSearch from 'minisearch';
 
 import { errMsg, log } from '../logger.js';
-import { IMPORT_DEFAULT, IMPORT_NAMESPACE, NON_CALLABLE_KINDS } from '../types.js';
+import {
+  IMPORT_DEFAULT,
+  IMPORT_NAMESPACE,
+  NON_CALLABLE_KINDS,
+  classNameFromFqn,
+} from '../types.js';
 import type {
   FileInfo,
   ImportedName,
@@ -15,17 +20,29 @@ import type {
   SymbolKind,
 } from '../types.js';
 
-// v3 adds the optional `kind` discriminator on ImportedName so non-value
-// bindings (TS `import type`, `import * as`, Python `import x`) don't
-// surface bare callee names as cross-file callers. Older caches lack
-// the field — equivalent to kind='value' — so attribution silently
-// degrades unless we re-extract; bumping forces a rebuild.
-const SCHEMA_VERSION = 3;
+// v4 adds the optional `receiver` field on Reference and, more
+// importantly, starts emitting member-expression call refs
+// (`obj.method()`, `this.x()`). A v3 cache read by v4 code would
+// silently lack every member ref until files were re-extracted;
+// bumping forces the rebuild. (v3 added ImportedName.kind for the
+// same re-extraction reason.)
+const SCHEMA_VERSION = 4;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both
 // fall back to precise within-file resolution at or below this threshold.
 export const SHORT_NAME_THRESHOLD = 4;
+
+// Score multiplier for exported symbols in `searchSymbols` — public API
+// is the more likely target when exploring by keyword.
+const EXPORTED_BOOST = 1.5;
+
+export interface SearchSymbolsOptions {
+  limit: number;
+  // Index-internal language ids ('typescript', 'tsx', ...); callers expand
+  // user-facing aliases before querying.
+  languages?: ReadonlySet<string>;
+}
 
 // Suffix candidates appended to a relative-import resolution to match an
 // indexed file path. Order encodes language-specific resolution preference;
@@ -136,6 +153,22 @@ export class CodeIndex {
   private callerCountById = new Map<string, number>();
   private callerCountsDirty = true;
 
+  // Inverted index of renaming value imports (`import { X as Y }`) keyed
+  // by the EXPORTED name X. Rebuilt lazily like the caches above — without
+  // it, every getReferencesByNameOrAlias call would scan every file's
+  // imports (and the caller-count rebuild multiplies that by symbol count).
+  private renamingAliasesByName = new Map<
+    string,
+    Array<{ filePath: string; sourceModule: string; alias: string }>
+  >();
+  private aliasIndexDirty = true;
+
+  // Sorted file paths for hasFileUnder's binary search — the watcher
+  // calls it per deleted path, so a linear scan would make bulk
+  // deletions O(deletedPaths × indexedFiles).
+  private sortedFilePaths: string[] = [];
+  private filePathsDirty = true;
+
   private writeLock: Promise<unknown> = Promise.resolve();
   private readonly projectRoot: string;
 
@@ -172,11 +205,15 @@ export class CodeIndex {
 
     this.namesDirty = true;
     this.callerCountsDirty = true;
+    this.aliasIndexDirty = true;
+    this.filePathsDirty = true;
   }
 
-  removeFile(path: string): void {
+  // Returns true when the file was actually in the index (cascade ran);
+  // false for a no-op so callers can tell mutation from idle work.
+  removeFile(path: string): boolean {
     const symsInFile = this.symbolsByFile.get(path);
-    if (!symsInFile) return;
+    if (!symsInFile) return false;
 
     const deletedIds = new Set<string>();
     for (const sym of symsInFile) {
@@ -224,6 +261,9 @@ export class CodeIndex {
     this.symbolsByFile.delete(path);
     this.namesDirty = true;
     this.callerCountsDirty = true;
+    this.aliasIndexDirty = true;
+    this.filePathsDirty = true;
+    return true;
   }
 
   updateFile(
@@ -287,6 +327,47 @@ export class CodeIndex {
     return out;
   }
 
+  // Keyword search across names, signatures, and docstrings for
+  // `search_structure`. Unlike `suggest` (did-you-mean, name-focused),
+  // this widens to all indexed fields and boosts exported symbols.
+  // `total` is the full match count so callers can report exactly how
+  // many results the limit cut.
+  searchSymbols(
+    query: string,
+    opts: SearchSymbolsOptions,
+  ): { symbols: Symbol[]; total: number } {
+    if (!query || opts.limit <= 0) return { symbols: [], total: 0 };
+    this.rebuildIndexesIfDirty();
+    if (!this.searchIndex) return { symbols: [], total: 0 };
+    const { languages } = opts;
+    const results = this.searchIndex.search(query, {
+      fields: ['name', 'signature', 'doc', 'fqn'],
+      boost: { name: 3, signature: 1.5, doc: 1, fqn: 1 },
+      fuzzy: 0.2,
+      prefix: true,
+      // Equivalent to post-multiplying the total score (each term's
+      // contribution is scaled), but lets MiniSearch do the re-ranking
+      // so the limit slice below stays correct.
+      boostDocument: (id) =>
+        this.symbolById.get(id as string)?.exported ? EXPORTED_BOOST : 1,
+      // Filter inside search (not after the limit slice) so results
+      // under-fill only when there genuinely aren't enough matches.
+      filter: languages
+        ? (r) => {
+            const sym = this.symbolById.get(r.id as string);
+            return sym !== undefined && languages.has(sym.language);
+          }
+        : undefined,
+    });
+    const symbols: Symbol[] = [];
+    for (const r of results) {
+      if (symbols.length >= opts.limit) break;
+      const sym = this.symbolById.get(r.id as string);
+      if (sym) symbols.push(sym);
+    }
+    return { symbols, total: results.length };
+  }
+
   getSymbolsInFile(path: string): Symbol[] {
     const list = this.symbolsByFile.get(path);
     return list ? [...list] : [];
@@ -298,6 +379,36 @@ export class CodeIndex {
 
   hasFile(path: string): boolean {
     return this.fileByPath.has(path);
+  }
+
+  getFile(path: string): FileInfo | undefined {
+    return this.fileByPath.get(path);
+  }
+
+  get fileCount(): number {
+    return this.fileByPath.size;
+  }
+
+  // True when any indexed file lives under `dirPrefix` (must end with '/').
+  // Binary search over the lazily-sorted path list: any key under the
+  // directory sorts >= the prefix and shares it, so checking the first
+  // key at the insertion point suffices.
+  hasFileUnder(dirPrefix: string): boolean {
+    this.rebuildFilePathsIfDirty();
+    const at = lowerBound(this.sortedFilePaths, dirPrefix);
+    return this.sortedFilePaths[at]?.startsWith(dirPrefix) ?? false;
+  }
+
+  // All indexed file paths under `dirPrefix` (must end with '/') — the
+  // contiguous sorted range starting at the prefix's insertion point.
+  filesUnder(dirPrefix: string): string[] {
+    this.rebuildFilePathsIfDirty();
+    const out: string[] = [];
+    for (let i = lowerBound(this.sortedFilePaths, dirPrefix); i < this.sortedFilePaths.length; i++) {
+      if (!this.sortedFilePaths[i].startsWith(dirPrefix)) break;
+      out.push(this.sortedFilePaths[i]);
+    }
+    return out;
   }
 
   getCallees(symbolId: string): Symbol[] {
@@ -361,43 +472,44 @@ export class CodeIndex {
   // when two files define a symbol with the same name. Within-file resolved
   // refs (targetId !== null) flow through; the caller's `isCallerOf` filter
   // rejects refs that precisely resolve to a different homonym.
-  getReferencesByNameOrAlias(name: string, targetFile?: string): Reference[] {
+  getReferencesByNameOrAlias(
+    name: string,
+    targetFile?: string,
+    targetIsMember = false,
+  ): Reference[] {
     const primary = this.referencesByTargetName.get(name) ?? [];
     const filteredPrimary =
       targetFile === undefined
         ? primary
-        : primary.filter((ref) => this.primaryRefMatchesTarget(ref, name, targetFile));
+        : primary.filter((ref) =>
+            this.primaryRefMatchesTarget(ref, name, targetFile, targetIsMember),
+          );
     const out = filteredPrimary.slice();
     const seen = new Set<Reference>(filteredPrimary);
-    for (const [filePath, imports] of this.importsByFile) {
-      for (const imp of imports) {
-        for (const named of imp.importedNames) {
-          if (named.name !== name || !named.alias || named.alias === name) {
-            continue;
-          }
-          // Renaming type-only aliases (`import type { X as Y }`) are
-          // erased at runtime; their alias-named call sites can't bind
-          // through the import.
-          if (!isValueBinding(named)) continue;
-          if (targetFile !== undefined) {
-            const importingFile = this.fileByPath.get(filePath);
-            if (!importingFile) continue;
-            const resolved = this.resolveImportTarget(importingFile, imp.sourceModule);
-            // Skip ONLY when the specifier resolves to a known different
-            // file. null (unresolvable specifier — TS path alias, workspace
-            // pkg, Python absolute import) falls through to best-effort
-            // include; same policy as primaryRefMatchesTarget.
-            if (resolved !== null && resolved !== targetFile) continue;
-          }
-          const aliasRefs = this.referencesByTargetName.get(named.alias);
-          if (!aliasRefs) continue;
-          for (const ref of aliasRefs) {
-            if (ref.file !== filePath) continue;
-            if (seen.has(ref)) continue;
-            seen.add(ref);
-            out.push(ref);
-          }
-        }
+    this.rebuildAliasIndexIfDirty();
+    for (const entry of this.renamingAliasesByName.get(name) ?? []) {
+      const { filePath, sourceModule, alias } = entry;
+      if (targetFile !== undefined) {
+        const importingFile = this.fileByPath.get(filePath);
+        if (!importingFile) continue;
+        const resolved = this.resolveImportTarget(importingFile, sourceModule);
+        // Skip ONLY when the specifier resolves to a known different
+        // file. null (unresolvable specifier — TS path alias, workspace
+        // pkg, Python absolute import) falls through to best-effort
+        // include; same policy as primaryRefMatchesTarget.
+        if (resolved !== null && resolved !== targetFile) continue;
+      }
+      const aliasRefs = this.referencesByTargetName.get(alias);
+      if (!aliasRefs) continue;
+      for (const ref of aliasRefs) {
+        if (ref.file !== filePath) continue;
+        // `obj.h()` where h happens to equal a local import alias —
+        // a member call's property never binds through a top-level
+        // import; only bare `h()` sites do.
+        if (ref.receiver !== undefined) continue;
+        if (seen.has(ref)) continue;
+        seen.add(ref);
+        out.push(ref);
       }
     }
     return out;
@@ -581,6 +693,8 @@ export class CodeIndex {
     this.namesDirty = true;
     this.callerCountById.clear();
     this.callerCountsDirty = true;
+    this.aliasIndexDirty = true;
+    this.filePathsDirty = true;
 
     return true;
   }
@@ -609,10 +723,20 @@ export class CodeIndex {
     pairs.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
     this.sortedNames = pairs.map((p) => p[0]);
     this.sortedNamesLower = pairs.map((p) => p[1]);
+    // All four fields are indexed so `searchSymbols` can match signatures
+    // and docstrings, but the DEFAULT search options pin `fields` to
+    // name+fqn — `suggest` (did-you-mean) must not surface doc-only hits.
+    // BM25 stats are per-field, so suggest's scores are unchanged by the
+    // extra indexed fields.
     this.searchIndex = new MiniSearch<Symbol>({
-      fields: ['name', 'fqn'],
+      fields: ['name', 'fqn', 'signature', 'doc'],
       idField: 'id',
-      searchOptions: { fuzzy: 0.2, prefix: true, boost: { name: 2 } },
+      searchOptions: {
+        fields: ['name', 'fqn'],
+        fuzzy: 0.2,
+        prefix: true,
+        boost: { name: 2 },
+      },
     });
     this.searchIndex.addAll([...this.symbolById.values()]);
     this.namesDirty = false;
@@ -621,10 +745,34 @@ export class CodeIndex {
   private rebuildCallerCountsIfDirty(): void {
     if (!this.callerCountsDirty) return;
     this.callerCountById.clear();
+    // isCallerOf rejects every UNRESOLVED ref for short names, so the
+    // hot homonym buckets (`get`/`set`/`run` — mostly unresolved member
+    // calls) are pre-filtered to resolved refs ONCE per name instead of
+    // rescanned in full per same-named symbol. The predicate stays
+    // isCallerOf so counts can never desync from find_references' rows.
+    const resolvedShortRefs = new Map<string, Reference[]>();
     for (const sym of this.symbolById.values()) {
       let count = 0;
-      for (const ref of this.getReferencesByNameOrAlias(sym.name, sym.file)) {
-        if (isCallerOf(ref, sym)) count++;
+      if (sym.name.length < SHORT_NAME_THRESHOLD) {
+        let resolved = resolvedShortRefs.get(sym.name);
+        if (!resolved) {
+          resolved = (this.referencesByTargetName.get(sym.name) ?? []).filter(
+            (r) => r.targetId !== null,
+          );
+          resolvedShortRefs.set(sym.name, resolved);
+        }
+        for (const ref of resolved) {
+          if (isCallerOf(ref, sym)) count++;
+        }
+      } else {
+        const refs = this.getReferencesByNameOrAlias(
+          sym.name,
+          sym.file,
+          isClassMember(sym),
+        );
+        for (const ref of refs) {
+          if (isCallerOf(ref, sym)) count++;
+        }
       }
       // Skip zero-count entries — getCallerCount returns `?? 0`, so the
       // observable behavior is identical and we save one Map slot per
@@ -632,6 +780,34 @@ export class CodeIndex {
       if (count > 0) this.callerCountById.set(sym.id, count);
     }
     this.callerCountsDirty = false;
+  }
+
+  private rebuildFilePathsIfDirty(): void {
+    if (!this.filePathsDirty) return;
+    this.sortedFilePaths = [...this.fileByPath.keys()].sort();
+    this.filePathsDirty = false;
+  }
+
+  private rebuildAliasIndexIfDirty(): void {
+    if (!this.aliasIndexDirty) return;
+    this.renamingAliasesByName.clear();
+    for (const [filePath, imports] of this.importsByFile) {
+      for (const imp of imports) {
+        for (const named of imp.importedNames) {
+          if (!named.alias || named.alias === named.name) continue;
+          // Renaming type-only aliases (`import type { X as Y }`) are
+          // erased at runtime; their alias-named call sites can't bind
+          // through the import.
+          if (!isValueBinding(named)) continue;
+          pushOrInit(this.renamingAliasesByName, named.name, {
+            filePath,
+            sourceModule: imp.sourceModule,
+            alias: named.alias,
+          });
+        }
+      }
+    }
+    this.aliasIndexDirty = false;
   }
 
   private resolveIds(ids: Iterable<string> | undefined): Symbol[] {
@@ -671,8 +847,12 @@ export class CodeIndex {
     ref: Reference,
     name: string,
     targetFile: string,
+    targetIsMember: boolean,
   ): boolean {
     if (ref.targetId !== null) return true;
+    if (ref.receiver !== undefined) {
+      return this.memberRefMatchesTarget(ref, ref.receiver, targetFile, targetIsMember);
+    }
     const importingFile = this.fileByPath.get(ref.file);
     if (!importingFile) return true;
     const imports = this.importsByFile.get(ref.file) ?? [];
@@ -708,6 +888,50 @@ export class CodeIndex {
       }
     }
     return hasUnresolvableMatch;
+  }
+
+  // Scoping for unresolved member refs (`receiver.name()`). Deliberately
+  // asymmetric with the bare-name policy above: a bare `save()` with no
+  // matching import provably binds locally (drop), but `obj.save()` says
+  // nothing about where obj's class lives — and methods are unreachable
+  // by any other Phase-1 mechanism — so unknown receivers weakly include
+  // (recall over precision; isCallerOf and output labeling counterbalance).
+  // Module/namespace receivers ARE statically resolvable: `utils.foo()`
+  // binds to an export of whatever module `utils` names, so those admit
+  // or drop precisely.
+  private memberRefMatchesTarget(
+    ref: Reference,
+    receiver: string,
+    targetFile: string,
+    targetIsMember: boolean,
+  ): boolean {
+    const importingFile = this.fileByPath.get(ref.file);
+    if (!importingFile) return true;
+    for (const imp of this.importsByFile.get(ref.file) ?? []) {
+      for (const named of imp.importedNames) {
+        if ((named.alias ?? named.name) !== receiver) continue;
+        if (named.kind === 'namespace' || named.kind === 'module') {
+          // Module-object access reaches only TOP-LEVEL exports —
+          // `utils.save()` can never invoke `Cache.prototype.save`, so a
+          // class-member target is out of reach through this binding.
+          if (targetIsMember) return false;
+          const resolved = this.resolveImportTarget(
+            importingFile,
+            moduleSpecifierFor(imp, named),
+          );
+          if (resolved === null) return true; // path alias / absolute py — best effort
+          return resolved === targetFile;
+        }
+        // Type-only bindings are erased at runtime; member access through
+        // them can't be a call into the target.
+        if (named.kind === 'type') return false;
+        // Value binding: the receiver is an object, and the defining file
+        // of its class is statically unknowable — weak include.
+        return true;
+      }
+    }
+    // Unknown receiver (local, parameter, field) — weak name-grade match.
+    return true;
   }
 
   // Returns the indexed file the specifier resolves to, or null if the
@@ -804,6 +1028,20 @@ function normalizeImportSpecifier(
   return { specifier: sourceModule, candidates: TS_CANDIDATES };
 }
 
+// Resolvable specifier for a module-object binding. Python's bare-dot form
+// (`from . import x`, `from .. import x`) binds the SUBMODULE x — the real
+// specifier is the dots plus the bound name; everything else (TS namespace
+// imports, Python `import a.b`) resolves by sourceModule directly. The
+// kind gate matters: a TS `import * as pkg from '.'` has named.name '*'
+// (the namespace sentinel), which must NOT be appended to the dots.
+function moduleSpecifierFor(imp: ImportInfo, named: ImportedName): string {
+  return named.kind === 'module' &&
+    /^\.+$/.test(imp.sourceModule) &&
+    named.name !== imp.sourceModule
+    ? `${imp.sourceModule}${named.name}`
+    : imp.sourceModule;
+}
+
 // `import { X as Y }` where X is a regular identifier (not default or
 // namespace) and X !== Y. The local binding Y points to export X — bare
 // `Y()` calls bind to X, so same-name scoping by Y would misattribute.
@@ -841,29 +1079,37 @@ export function isCallerOf(ref: Reference, target: Symbol): boolean {
   if (ref.sourceId === target.id) return false;
   // Homonym already resolved precisely to a different same-named symbol.
   if (ref.targetId !== null && ref.targetId !== target.id) return false;
-  // method/interface/type are excluded from precise call resolution (the
-  // extractor's resolver skips these kinds when building `nameToId` —
-  // see NON_CALLABLE_KINDS in types.ts), so any name-only match is by
-  // definition not a real call to this target — bare `save()` calls a
-  // top-level function, not `C.prototype.save`; `AuthToken()` calls a
-  // function, not the interface; a `type X` is never invoked.
-  if (ref.targetId === null && NON_CALLABLE_KINDS.has(target.kind)) {
-    return false;
-  }
-  // Short names like `do`/`is` flood with cross-file false matches; only
-  // count precisely-resolved refs (targetId === target.id).
-  if (target.name.length < SHORT_NAME_THRESHOLD && ref.targetId === null) {
-    return false;
+  if (ref.targetId === null) {
+    const isMember = ref.receiver !== undefined;
+    // Self-receiver refs (extractor-determined: TS `this` node, Python
+    // self/cls) that extract-time resolution did NOT bind to a sibling
+    // method can only target an inherited method — LSP territory. An
+    // ordinary receiver merely NAMED `self` is not affected.
+    if (isMember && ref.selfReceiver) return false;
+    // Bare-name matches never bind to method/interface/type — bare
+    // `save()` calls a top-level function, not `C.prototype.save`.
+    // Member matches (`obj.save()`) ARE evidence for methods — the point
+    // of member extraction — but still never for interface/type, which
+    // are never invoked at runtime.
+    if (
+      NON_CALLABLE_KINDS.has(target.kind) &&
+      !(isMember && target.kind === 'method')
+    ) {
+      return false;
+    }
+    // Short names like `do`/`is` (and `x.get()`/`x.set()`) flood with
+    // cross-file false matches; only count precisely-resolved refs.
+    if (target.name.length < SHORT_NAME_THRESHOLD) return false;
+    // Cross-file member access can only reach exported targets. (Python
+    // exported-ness is the __all__/underscore heuristic, so legal
+    // `utils._helper()` access is filtered — accepted Phase-1 precision.)
+    if (isMember && ref.file !== target.file && !target.exported) return false;
   }
   return true;
 }
 
 export function isClassMember(s: Symbol): boolean {
-  // FQNs use `<file>:<name>` for top-level and `<file>:<Class>.<method>`
-  // for class members. File paths can contain dots, so check for a dot
-  // *after* the colon, not anywhere in the FQN.
-  const colonIdx = s.fqn.indexOf(':');
-  return colonIdx !== -1 && s.fqn.indexOf('.', colonIdx) !== -1;
+  return classNameFromFqn(s.fqn) !== null;
 }
 
 export function matchesKindScope(
@@ -933,7 +1179,9 @@ function isPersistedReference(ref: unknown): ref is Reference {
     typeof r.targetName === 'string' &&
     typeof r.kind === 'string' &&
     typeof r.file === 'string' &&
-    typeof r.line === 'number'
+    typeof r.line === 'number' &&
+    (r.receiver === undefined || typeof r.receiver === 'string') &&
+    (r.selfReceiver === undefined || typeof r.selfReceiver === 'boolean')
   );
 }
 

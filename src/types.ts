@@ -14,11 +14,12 @@ export type SymbolKind =
   | 'method'
   | 'module';
 
-// SymbolKinds that aren't callable at the syntactic level: methods are only
-// reached via `obj.method()` (member expressions, filtered by call selectors);
-// interfaces and types never appear at runtime. Used by the extractor's call
-// resolver to exclude these from `nameToId`, and by `isCallerOf` to reject
-// name-only matches against these kinds.
+// SymbolKinds that bare-identifier calls (`foo()`) can never bind to:
+// methods require member access (resolved separately via the receiver and
+// `methodsByClass`); interfaces and types never appear at runtime. Used by
+// the extractor's call resolver to exclude these from `nameToId`, and by
+// `isCallerOf` to reject bare-name matches against these kinds (member
+// refs — `receiver` present — may still match methods).
 export const NON_CALLABLE_KINDS: ReadonlySet<SymbolKind> = new Set<SymbolKind>([
   'method',
   'interface',
@@ -47,6 +48,19 @@ export type ImportKind = 'value' | 'type' | 'namespace' | 'module';
 // at parse/extract time.
 export const LANGUAGE_UNKNOWN = 'unknown' as const;
 
+// Extracts `Class` from a member FQN `<file>:<Class>.<member>`; null for
+// top-level FQNs (`<file>:<name>`). File paths can contain dots, so the
+// split is the first `.` AFTER the first `:` — this function is the one
+// parser of that contract (extractor member resolution and code-index
+// member gating both rely on it).
+export function classNameFromFqn(fqn: string): string | null {
+  const colon = fqn.indexOf(':');
+  if (colon === -1) return null;
+  const dot = fqn.indexOf('.', colon + 1);
+  if (dot === -1) return null;
+  return fqn.slice(colon + 1, dot);
+}
+
 export interface Symbol {
   id: string;
   name: string;
@@ -66,13 +80,27 @@ export interface Reference {
   // symbol's body (e.g. `import { foo } from './x'; foo();` at file scope).
   sourceId: string | null;
   // null when the call's target couldn't be resolved within the source file
-  // (cross-file calls, unknown names). targetName carries the bare-identifier
-  // call token regardless, so cross-file lookups go through name, not id.
+  // (cross-file calls, unknown names). targetName carries the called name
+  // regardless, so cross-file lookups go through name, not id.
   targetId: string | null;
   targetName: string;
   kind: RefKind;
   file: string;
   line: number;
+  // Present iff the call site was a member expression whose receiver is a
+  // single identifier or this/self/cls — the literal source token ('this',
+  // 'self', 'utils', 'Class', ...). Deeper chains (`a.b.c()`) are never
+  // emitted, so `receiver !== undefined` ⟺ member-call ref. Drives
+  // enclosing-class resolution, namespace-import resolution, and noise
+  // gating in `isCallerOf`. The key is omitted (never set to undefined)
+  // for bare calls so persisted JSON stays clean.
+  receiver?: string;
+  // True when the language extractor determined the receiver refers to
+  // the enclosing class instance (TS `this` node; Python `self`/`cls`
+  // parameters). Recorded by the extractor — NOT derivable from the
+  // receiver token, since a TS identifier merely named `self` is an
+  // ordinary object receiver. Set only for member refs.
+  selfReceiver?: boolean;
 }
 
 export interface ImportedName {
@@ -97,6 +125,11 @@ export interface FileInfo {
   lastModified: number;
   lastIndexed: number;
   symbolCount: number;
+  // sha1 (first 16 hex) of the content that was indexed. Lets the
+  // watcher distinguish an atomic-save echo from a real second edit when
+  // mtime+size collide on coarse-mtime filesystems. Absent for
+  // unknown-language files (never read) and pre-existing cache entries.
+  contentHash?: string;
 }
 
 export interface IndexStats {
@@ -114,4 +147,7 @@ export interface ProbeConfig {
   readonly maxFiles: number;
   readonly maxFileSize: number;
   readonly cacheDir: string;
+  // Live re-indexing via fs.watch. Env PROBE_WATCH overrides the config
+  // file's `watch`; defaults to true.
+  readonly watch: boolean;
 }

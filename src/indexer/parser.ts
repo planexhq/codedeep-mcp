@@ -38,6 +38,12 @@ export function initParser(): Promise<void> {
         parsers.set(lang, parser);
       }
     })();
+    // A cached rejection would otherwise disable parsing (and pattern
+    // validation) for the process lifetime after one transient failure
+    // (EMFILE during the WASM reads) — reset so the next call retries.
+    initPromise.catch(() => {
+      initPromise = null;
+    });
   }
   return initPromise;
 }

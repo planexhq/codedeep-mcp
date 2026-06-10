@@ -1,6 +1,3 @@
-import { promises as fs } from 'node:fs';
-import { join, sep } from 'node:path';
-
 import {
   type CallerEdge,
   type CodeIndex,
@@ -22,6 +19,7 @@ import {
   readinessBanner,
   renderAmbiguous,
   renderSuggestions,
+  safeReadIndexedFile,
   sectionOrEmpty,
   sectionOrNone,
   textResponse,
@@ -89,38 +87,6 @@ async function renderBudgeted(
   }
   if (truncatedAt) blocks.push(truncationNote(truncatedAt, maxTokens));
   return blocks.join('\n\n');
-}
-
-// Re-check scanner admission rules at read time so stale on-disk
-// state (symlink-swap, growth past cap, became-directory) can't
-// bypass the indexer's contract.
-async function safeReadIndexedFile(
-  relPath: string,
-  config: ProbeConfig,
-): Promise<string> {
-  const abs = join(config.projectRoot, relPath);
-  const stats = await fs.lstat(abs);
-  if (stats.isSymbolicLink()) {
-    throw new Error('refusing to follow symlink');
-  }
-  if (!stats.isFile()) {
-    throw new Error('not a regular file');
-  }
-  if (stats.size > config.maxFileSize) {
-    throw new Error(
-      `exceeds maxFileSize (${stats.size} > ${config.maxFileSize})`,
-    );
-  }
-  // lstat only checks the final component. Resolve parent-directory
-  // symlinks so a swap higher up in the path can't escape projectRoot.
-  const [real, realRoot] = await Promise.all([
-    fs.realpath(abs),
-    fs.realpath(config.projectRoot),
-  ]);
-  if (real !== realRoot && !real.startsWith(realRoot + sep)) {
-    throw new Error('path escapes project root');
-  }
-  return fs.readFile(abs, 'utf8');
 }
 
 export async function runGetContext(
@@ -379,6 +345,9 @@ async function renderFileMode(
 // benefits from including import-scoped name-match refs. The
 // `[name match, unverified]` tag matches find_references's caller list
 // so consumers know the data is approximate (same precision tier).
+// Member refs to top-level exports (`utils.foo()` through a namespace
+// import) flow in here via getReferencesByNameOrAlias like bare-name
+// refs; the aggregate per-file rows keep the shared name-match tag.
 function collectExportCallers(
   exportedSyms: Symbol[],
   index: CodeIndex,

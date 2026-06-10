@@ -66,6 +66,7 @@ export function makeConfig(
     maxFiles: overrides.maxFiles ?? base.maxFiles,
     maxFileSize: overrides.maxFileSize ?? base.maxFileSize,
     cacheDir: overrides.cacheDir ?? base.cacheDir,
+    watch: overrides.watch ?? base.watch,
   }) as ProbeConfig;
 }
 
@@ -144,6 +145,34 @@ export function mkUnresolvedRef(
     file,
     line,
   };
+}
+
+// Member-expression call site (`receiver.targetName()`). Unresolved by
+// default (targetId=null, the common cross-file case); pass targetId for
+// extract-time-resolved member calls, and selfReceiver for this/self/cls
+// call sites (the extractor records that flag, not the receiver token).
+export function mkMemberRef(
+  source: Symbol | null,
+  targetName: string,
+  receiver: string,
+  opts: {
+    targetId?: string | null;
+    file?: string;
+    line?: number;
+    selfReceiver?: boolean;
+  } = {},
+): Reference {
+  const ref: Reference = {
+    sourceId: source?.id ?? null,
+    targetId: opts.targetId ?? null,
+    targetName,
+    kind: 'calls',
+    file: opts.file ?? source?.file ?? 'src/test.ts',
+    line: opts.line ?? 1,
+    receiver,
+  };
+  if (opts.selfReceiver) ref.selfReceiver = true;
+  return ref;
 }
 
 export function mkImport(

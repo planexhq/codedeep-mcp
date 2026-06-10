@@ -34,6 +34,7 @@ interface PartialFileConfig {
   maxFiles?: unknown;
   maxFileSize?: unknown;
   cacheDir?: unknown;
+  watch?: unknown;
 }
 
 function readFileConfig(root: string): PartialFileConfig {
@@ -75,6 +76,19 @@ function asNonBlankString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function parseEnvWatch(): boolean | undefined {
+  const raw = process.env.PROBE_WATCH?.trim().toLowerCase();
+  if (raw === undefined || raw === '') return undefined;
+  if (raw === '0' || raw === 'false') return false;
+  if (raw === '1' || raw === 'true') return true;
+  log.warn(`config: PROBE_WATCH=${raw} not recognized; expected 0/1/true/false`);
+  return undefined;
 }
 
 function parseEnvExclude(): string[] {
@@ -148,6 +162,7 @@ export function loadConfig(projectRoot: string = process.cwd()): ProbeConfig {
     maxFiles: fileMaxFiles ?? DEFAULT_MAX_FILES,
     maxFileSize: fileMaxFileSize ?? DEFAULT_MAX_FILE_SIZE,
     cacheDir: resolvedCacheDir,
+    watch: parseEnvWatch() ?? asBoolean(fileCfg.watch) ?? true,
   };
   return Object.freeze(cfg);
 }
