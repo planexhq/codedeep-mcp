@@ -5,3 +5,7 @@ grammars/
 .probe/
 *.log
 .DS_Store
+
+# Dogfooding harness (scripts/dogfood): cloned repos + run outputs
+dogfood-cache/
+dogfood-runs/
