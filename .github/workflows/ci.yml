@@ -1,0 +1,37 @@
+# Test matrix across the three platforms probe-mcp ships to. npm ci runs
+# the prepare lifecycle (tsc build + grammar copy from the
+# @repomix/tree-sitter-wasms devDep into the gitignored grammars/ dir),
+# so no extra setup precedes `npm test`. ~16 tests self-skip on Windows
+# (symlinks/chmod/POSIX stub scripts) via the skipOnWindows helper.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs, but never main: a cancelled main run leaves
+  # that commit permanently without a verdict.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    strategy:
+      # Platform failures should all surface in one run, not mask each other.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [20, 24]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
