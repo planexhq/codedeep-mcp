@@ -17,6 +17,7 @@ const LANG_TO_WASM: Record<string, string> = {
   tsx: 'tree-sitter-tsx.wasm',
   javascript: 'tree-sitter-javascript.wasm',
   python: 'tree-sitter-python.wasm',
+  java: 'tree-sitter-java.wasm',
 };
 
 const parsers = new Map<string, Parser>();

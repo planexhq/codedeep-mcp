@@ -2,7 +2,13 @@ import type { Node, Tree } from 'web-tree-sitter';
 
 import { IMPORT_DEFAULT, IMPORT_NAMESPACE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
-import { bareDecoratorIdentifier, resolveCalls, symbolId } from '../extractor.js';
+import {
+  bareDecoratorIdentifier,
+  commentDocLine,
+  normalizeSignature,
+  resolveCalls,
+  symbolId,
+} from '../extractor.js';
 import type {
   CallSelector,
   ExtractResult,
@@ -406,37 +412,8 @@ function variableSignature(declarator: Node, value: Node | null, content: string
   return normalizeSignature(content.slice(declarator.startIndex, declarator.endIndex));
 }
 
-function normalizeSignature(raw: string): string {
-  return raw.trim().replace(WS_REGEX, ' ').slice(0, 120);
-}
-
 function extractDoc(node: Node): string | null {
   const prev = node.previousNamedSibling;
   if (!prev || prev.type !== 'comment') return null;
-  const text = prev.text;
-
-  if (text.startsWith('/**')) {
-    const inner = text.slice(3, text.endsWith('*/') ? -2 : undefined);
-    for (const line of inner.split('\n')) {
-      const cleaned = line.replace(/^\s*\*?\s?/, '').trimEnd();
-      if (cleaned) return cleaned;
-    }
-    return null;
-  }
-
-  if (text.startsWith('/*')) {
-    const inner = text.slice(2, text.endsWith('*/') ? -2 : undefined);
-    for (const line of inner.split('\n')) {
-      const cleaned = line.trim();
-      if (cleaned) return cleaned;
-    }
-    return null;
-  }
-
-  if (text.startsWith('//')) {
-    const cleaned = text.replace(/^\/\/+\s?/, '').trim();
-    return cleaned || null;
-  }
-
-  return null;
+  return commentDocLine(prev.text);
 }

@@ -2,15 +2,13 @@ import type { Node, Tree } from 'web-tree-sitter';
 
 import { IMPORT_NAMESPACE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
-import { bareDecoratorIdentifier, resolveCalls, symbolId } from '../extractor.js';
+import { bareDecoratorIdentifier, normalizeSignature, resolveCalls, symbolId } from '../extractor.js';
 import type {
   CallSelector,
   ExtractResult,
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
-
-const WS_REGEX = /\s+/g;
 
 // Function-like nodes whose bodies contain calls that shouldn't attribute
 // to an enclosing body. walkDecorators uses this subset so it still
@@ -407,8 +405,4 @@ function stripPyStringQuotes(text: string): string {
     return s.slice(1, -1);
   }
   return s;
-}
-
-function normalizeSignature(raw: string): string {
-  return raw.trim().replace(WS_REGEX, ' ').slice(0, 120);
 }

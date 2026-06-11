@@ -71,6 +71,18 @@ export const REPOS: RepoSpec[] = [
     lang: 'go',
     dimension: 'UNSUPPORTED language -> scanned, zero symbols; Other-files accuracy; pattern-mode refusal',
   },
+  {
+    name: 'gson',
+    url: 'https://github.com/google/gson.git',
+    lang: 'java',
+    dimension: 'plain-Java baseline: extraction density, implicit-this resolution rate, overloads, Maven target/ exclusion',
+  },
+  {
+    name: 'junit5',
+    url: 'https://github.com/junit-team/junit5.git',
+    lang: 'java',
+    dimension: 'nested-class recursion (@Nested), annotation-heavy signatures, interfaces with default methods, Gradle monorepo',
+  },
 ];
 
 export function reposByName(names: string[]): RepoSpec[] {

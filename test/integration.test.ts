@@ -32,7 +32,9 @@ const FIXTURES_ROOT = join(
   'fixtures',
 );
 
-const FIXTURE_FILES: Record<'small-ts' | 'small-py', readonly string[]> = {
+type FixtureName = 'small-ts' | 'small-py' | 'small-java';
+
+const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-ts': [
     'src/index.ts',
     'src/auth.ts',
@@ -41,10 +43,11 @@ const FIXTURE_FILES: Record<'small-ts' | 'small-py', readonly string[]> = {
     'src/service.ts',
   ],
   'small-py': ['app/auth.py', 'app/models.py', 'app/service.py'],
+  'small-java': ['Greeter.java', 'Shape.java', 'App.java'],
 };
 
 async function copyFixtureToTmp(
-  name: 'small-ts' | 'small-py',
+  name: FixtureName,
 ): Promise<string> {
   const root = makeProjectDir(`probe-int-${name}-`);
   const tree: Record<string, string> = {};
@@ -68,7 +71,7 @@ beforeAll(async () => {
 describe('integration: end-to-end pipeline + tools', () => {
   let root = '';
 
-  async function setup(fixture: 'small-ts' | 'small-py'): Promise<{
+  async function setup(fixture: FixtureName): Promise<{
     index: CodeIndex;
     indexer: Indexer;
     config: ProbeConfig;
@@ -388,5 +391,81 @@ describe('integration: end-to-end pipeline + tools', () => {
     const hasPerm = index.findSymbolByName('has_permission')[0];
     expect(hasPerm?.kind).toBe('method');
     expect(hasPerm?.fqn).toContain('User.has_permission');
+  });
+
+  it('indexes the Java fixture end-to-end', async () => {
+    const { index } = await setup('small-java');
+
+    expect(index.getStats().totalFiles).toBe(3);
+
+    for (const name of [
+      'Greeter',
+      'greet',
+      'format',
+      'Builder',
+      'Shape',
+      'describe',
+      'Color',
+      'hex',
+      'Point',
+      'origin',
+      'App',
+      'main',
+    ]) {
+      expect(
+        index.findSymbolByName(name).length,
+        `expected to find symbol "${name}"`,
+      ).toBeGreaterThan(0);
+    }
+
+    // Implicit-this call edge resolved at extract time: greet() → format().
+    const greet = index.findSymbolByName('greet')[0]!;
+    const format = index.findSymbolByName('format')[0]!;
+    expect(index.getCallees(greet.id).map((s) => s.id)).toContain(format.id);
+
+    // Visibility-based exported-ness.
+    expect(greet.exported).toBe(true);
+    expect(format.exported).toBe(false);
+
+    // Constructor convention + nested-class simple-name FQN.
+    const ctors = index.findSymbolByName('constructor');
+    expect(
+      ctors.some((s) => s.fqn === 'Greeter.java:Greeter.constructor'),
+    ).toBe(true);
+    expect(index.findSymbolByName('Builder')[0]!.fqn).toBe(
+      'Greeter.java:Builder',
+    );
+  });
+
+  it('overview shows Java language stats and the App.java entry point', async () => {
+    const deps = await setup('small-java');
+    const text = (await runOverview({}, deps)).content[0].text;
+
+    expect(text).toContain('- Java: 3 files (100%)');
+    expect(text).toContain('### Entry Points');
+    expect(text).toContain('App.java');
+  });
+
+  it('java tools: find_symbol, get_context callees, find_references member callers', async () => {
+    const deps = await setup('small-java');
+
+    const found = (await runFindSymbol({ name: 'greet' }, deps)).content[0]
+      .text;
+    expect(found).toContain('Greeter.java:');
+    expect(found).toContain('| method');
+    expect(found).toContain('public String greet(String name)');
+
+    const ctx = (
+      await runGetContext({ file: 'Greeter.java', symbol: 'greet' }, deps)
+    ).content[0].text;
+    expect(ctx).toContain('### Body');
+    expect(sectionAfter(ctx, '### Callees')).toContain('format');
+
+    // Cross-file member ref: App.main calls g.greet(...) — unknown receiver,
+    // weakly included because the method target is exported.
+    const refs = (
+      await runFindReferences({ file: 'Greeter.java', symbol: 'greet' }, deps)
+    ).content[0].text;
+    expect(sectionAfter(refs, '### Callers')).toContain('App.java:');
   });
 });

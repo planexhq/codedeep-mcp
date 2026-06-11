@@ -1,0 +1,472 @@
+import type { Node, Tree } from 'web-tree-sitter';
+
+import { IMPORT_NAMESPACE } from '../../types.js';
+import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
+import { commentDocLine, normalizeSignature, resolveCalls, symbolId } from '../extractor.js';
+import type {
+  CallSelector,
+  ExtractResult,
+  MemberCallInfo,
+  PendingBody,
+} from '../extractor.js';
+
+// Function-like nodes whose bodies contain calls that shouldn't attribute
+// to an enclosing body. lambda_expression is deliberately absent: Java
+// lambdas can never be symbols of their own (unlike TS arrows assigned to
+// consts), so pruning them would drop their calls entirely — calls inside
+// `x -> f(x)` attribute to the enclosing method instead. A documented
+// divergence from the TS arrow rule.
+const JAVA_FUNCTION_BODY_SKIP_TYPES: ReadonlySet<string> = new Set([
+  'method_declaration',
+  'constructor_declaration',
+  'compact_constructor_declaration',
+]);
+
+const JAVA_SKIP_TYPES: ReadonlySet<string> = new Set([
+  ...JAVA_FUNCTION_BODY_SKIP_TYPES,
+  'class_declaration',
+  'interface_declaration',
+  'enum_declaration',
+  'record_declaration',
+  'annotation_type_declaration',
+  // Anonymous classes: object_creation_expression carries a field-less
+  // class_body child; pruning keeps anonymous internals (including field
+  // initializers) out of every walk. Harmless as a PendingBody root —
+  // walkCalls never checks the root's own type, only children.
+  'class_body',
+]);
+
+// `object_creation_expression`'s callee is a type_identifier, never a plain
+// identifier — without this, every `new X()` ref would be dropped.
+const JAVA_BARE_CALLEE_TYPES: ReadonlySet<string> = new Set(['identifier', 'type_identifier']);
+
+// A bare `foo()` in Java is ALWAYS a method call — fields and classes are
+// never bare-callable — so identifier callees bind only through the
+// enclosing-class fallback, never the callable-name map.
+const JAVA_BARE_CALLABLE_KINDS: ReadonlySet<string> = new Set();
+
+// `new X()` binds to classes (records included) and interfaces — anonymous
+// implementations (`new Iface() { ... }`) are real instantiation sites.
+// Enums can't be instantiated, so they stay out.
+const JAVA_CONSTRUCTOR_KINDS: ReadonlySet<string> = new Set(['class', 'interface']);
+
+const JAVA_SELECTORS: ReadonlyArray<CallSelector> = [
+  // method_invocation has no single callee field: bare calls expose only
+  // `name:`, member calls `object:` + `name:`. Return the node itself for
+  // the member form so javaMemberCallInfo can read both fields.
+  {
+    nodeType: 'method_invocation',
+    getCallee: (n) => (n.childForFieldName('object') ? n : n.childForFieldName('name')),
+  },
+  { nodeType: 'object_creation_expression', getCallee: objectCreationCallee },
+];
+
+// Symbol kinds for the five type-declaration node types; doubles as the
+// "is this a type declaration" test during body iteration.
+const TYPE_KIND: Record<string, SymbolKind> = {
+  class_declaration: 'class',
+  interface_declaration: 'interface',
+  enum_declaration: 'enum',
+  record_declaration: 'class',
+  annotation_type_declaration: 'interface',
+};
+
+// `new Widget()` → type_identifier (bare path, binds to the class symbol);
+// `new ArrayList<String>()` → generic_type wrapping the real type;
+// `new pkg.Thing()` / `new Outer.Inner()` → scoped_type_identifier
+// (member path, single level only).
+function objectCreationCallee(node: Node): Node | null {
+  let type = node.childForFieldName('type');
+  if (type?.type === 'generic_type') type = type.firstNamedChild;
+  if (!type) return null;
+  if (type.type === 'type_identifier' || type.type === 'scoped_type_identifier') return type;
+  return null;
+}
+
+function isComment(node: Node): boolean {
+  return node.type === 'line_comment' || node.type === 'block_comment';
+}
+
+// Single-level member callees only, mirroring TS/Python: `this.x()` and
+// `obj.x()` qualify; chained (`a.b.c()`, `System.out.println()`), computed
+// (`foo().bar()`), and `super.x()` (object is a `super` node — the grammar
+// has no super_method_invocation) return null and emit nothing.
+function javaMemberCallInfo(callee: Node): MemberCallInfo | null {
+  if (callee.type === 'method_invocation') {
+    const obj = callee.childForFieldName('object');
+    const prop = callee.childForFieldName('name');
+    if (!obj || !prop || prop.type !== 'identifier') return null;
+    if (obj.type === 'this') return { receiver: 'this', property: prop.text, isSelf: true };
+    if (obj.type === 'identifier') {
+      return { receiver: obj.text, property: prop.text, isSelf: false };
+    }
+    return null;
+  }
+  if (callee.type === 'scoped_type_identifier') {
+    // Positional children, no fields — and comments are NAMED extras that
+    // can sit between the two type_identifiers, so filter them out before
+    // indexing. Deeper qualification nests another scoped_type_identifier
+    // in slot 0 and is skipped (chained analog).
+    const parts = callee.namedChildren.filter((c) => !isComment(c));
+    const scope = parts[0];
+    const name = parts[1];
+    if (scope?.type !== 'type_identifier' || name?.type !== 'type_identifier') return null;
+    return { receiver: scope.text, property: name.text, isSelf: false };
+  }
+  return null;
+}
+
+export function extractJava(
+  tree: Tree,
+  content: string,
+  fileInfo: FileInfo,
+): ExtractResult {
+  const symbols: Symbol[] = [];
+  const imports: ImportInfo[] = [];
+  const bodies: PendingBody[] = [];
+
+  for (const child of tree.rootNode.namedChildren) {
+    if (child.type === 'import_declaration') {
+      extractImport(child, fileInfo, imports);
+    } else if (TYPE_KIND[child.type] !== undefined) {
+      extractType(child, content, fileInfo, '', true, false, symbols, bodies);
+    }
+    // package_declaration, comments, module_declaration — no symbols.
+  }
+
+  // Two same-named types in one file (e.g. a `Builder` under two different
+  // outers) share the simple-name FQN; resolving through them first-wins
+  // would bind calls to the WRONG class, so their names are excluded from
+  // extract-time resolution entirely (calls stay unresolved instead).
+  const typeNameSeen = new Set<string>();
+  const ambiguousTypeNames = new Set<string>();
+  for (const s of symbols) {
+    if (s.kind !== 'class' && s.kind !== 'interface' && s.kind !== 'enum') continue;
+    if (typeNameSeen.has(s.name)) ambiguousTypeNames.add(s.name);
+    else typeNameSeen.add(s.name);
+  }
+
+  const references = resolveCalls(
+    bodies,
+    tree.rootNode,
+    symbols,
+    fileInfo,
+    JAVA_SELECTORS,
+    JAVA_SKIP_TYPES,
+    JAVA_FUNCTION_BODY_SKIP_TYPES,
+    javaMemberCallInfo,
+    // Implicit this: a bare `foo()` inside a class body is a method call on
+    // the enclosing class (Java has no top-level functions), so bare calls
+    // resolve against the enclosing class's methods and nothing else.
+    {
+      bareCalleeTypes: JAVA_BARE_CALLEE_TYPES,
+      bareCallsBindToEnclosingClass: true,
+      bareCallableKinds: JAVA_BARE_CALLABLE_KINDS,
+      constructorKinds: JAVA_CONSTRUCTOR_KINDS,
+      ambiguousClassNames: ambiguousTypeNames,
+    },
+  );
+  return { symbols, references, imports };
+}
+
+// Extracts a type declaration and recurses through its body. Recursion only
+// ever enters type bodies (class/interface/enum) — local classes inside
+// method blocks and anonymous classes are never reached, which implements
+// the "top-level and class-level only" scope rule structurally.
+function extractType(
+  decl: Node,
+  content: string,
+  fileInfo: FileInfo,
+  qualifier: string,
+  containerExported: boolean,
+  inInterface: boolean,
+  outSymbols: Symbol[],
+  outBodies: PendingBody[],
+): void {
+  const name = decl.childForFieldName('name')?.text;
+  if (!name) return;
+  const kind = TYPE_KIND[decl.type];
+  const mods = findModifiers(decl);
+  // Member types of interfaces are implicitly public (JLS 9.5 — and unlike
+  // methods, they can't be declared private).
+  const exported = containerExported && (inInterface || hasModifier(mods, 'public', 'protected'));
+  // Nested types keep a simple-name FQN (`file:Inner` — a deeper dotted FQN
+  // would trip classNameFromFqn's member parsing); the enclosing chain goes
+  // into the hashed qualifier instead, so same-named nested types in one
+  // file keep distinct ids.
+  const sym = makeJavaSymbol(
+    decl,
+    javaSignature(decl, content, mods),
+    fileInfo,
+    kind,
+    name,
+    `${fileInfo.path}:${name}`,
+    exported,
+    qualifier,
+  );
+  outSymbols.push(sym);
+
+  // @interface is declaration-only: elements mirror the enum-constant
+  // exclusion, and annotation bodies carry no executable code.
+  if (decl.type === 'annotation_type_declaration') return;
+  const body = decl.childForFieldName('body');
+  if (!body) return;
+
+  // Walk the type body as the type's own PendingBody: field initializers,
+  // static/instance initializer blocks, and enum constant arguments
+  // (`RED(2)`) attribute to the type symbol. JAVA_SKIP_TYPES keeps
+  // method-body calls attributed to the methods.
+  outBodies.push({ symbolId: sym.id, body, className: name });
+
+  const memberQualifier = qualifier ? `${qualifier}.${name}` : name;
+  const isInterfaceBody = decl.type === 'interface_declaration';
+  // Enum members hide one level deeper: enum_body holds enum_constants plus
+  // an enum_body_declarations section after the `;`. Constants are never
+  // symbols (the enum-member rule); constant bodies (`BLUE { ... }`) are
+  // class_body nodes pruned like anonymous classes.
+  const members = decl.type === 'enum_declaration' ? enumMemberNodes(body) : body.namedChildren;
+  for (const member of members) {
+    if (TYPE_KIND[member.type] !== undefined) {
+      extractType(member, content, fileInfo, memberQualifier, exported, isInterfaceBody, outSymbols, outBodies);
+    } else {
+      extractMember(member, content, fileInfo, name, memberQualifier, exported, isInterfaceBody, outSymbols, outBodies);
+    }
+  }
+}
+
+function enumMemberNodes(enumBody: Node): readonly Node[] {
+  for (const child of enumBody.namedChildren) {
+    if (child.type === 'enum_body_declarations') return child.namedChildren;
+  }
+  return [];
+}
+
+function extractMember(
+  member: Node,
+  content: string,
+  fileInfo: FileInfo,
+  className: string,
+  qualifier: string,
+  containerExported: boolean,
+  inInterface: boolean,
+  outSymbols: Symbol[],
+  outBodies: PendingBody[],
+): void {
+  // Interface members are implicitly public — except explicitly `private`
+  // ones (legal on interface methods since Java 9). Elsewhere a member is
+  // exported only when it carries its own public/protected modifier AND
+  // every enclosing type is exported.
+  const mods = findModifiers(member);
+  const exported =
+    containerExported &&
+    (inInterface ? !hasModifier(mods, 'private') : hasModifier(mods, 'public', 'protected'));
+
+  switch (member.type) {
+    case 'method_declaration': {
+      const methodName = member.childForFieldName('name')?.text;
+      if (!methodName) return;
+      extractCallable(member, methodName, content, fileInfo, className, qualifier, exported, mods, outSymbols, outBodies);
+      return;
+    }
+    case 'constructor_declaration':
+    case 'compact_constructor_declaration': {
+      // Named `constructor` per the established convention (FQN
+      // `file:Class.constructor`) — the AST name field repeats the class
+      // name, which would pair a same-named method with the class symbol in
+      // every lookup. `new C()` refs bind to the CLASS symbol instead.
+      extractCallable(member, 'constructor', content, fileInfo, className, qualifier, exported, mods, outSymbols, outBodies);
+      return;
+    }
+    case 'field_declaration':
+    case 'constant_declaration': {
+      // constant_declaration is the interface-constant variant — a distinct
+      // node type with the same internal shape. One field_declaration can
+      // carry multiple declarator: fields (`int a = 1, b;`) — one symbol per
+      // variable_declarator; the shared signature is fine, ids differ by name.
+      const signature = normalizeSignature(
+        content.slice(signatureStart(member, mods), member.endIndex).replace(/;\s*$/, ''),
+      );
+      for (const declarator of member.childrenForFieldName('declarator')) {
+        if (declarator?.type !== 'variable_declarator') continue;
+        const fieldName = declarator.childForFieldName('name')?.text;
+        if (!fieldName) continue;
+        outSymbols.push(
+          makeJavaSymbol(
+            member,
+            signature,
+            fileInfo,
+            'variable',
+            fieldName,
+            `${fileInfo.path}:${className}.${fieldName}`,
+            exported,
+            qualifier,
+          ),
+        );
+      }
+      return;
+    }
+    // static_initializer, enum constants, annotation elements, stray `;` —
+    // no symbol; initializer-block calls attribute via the type-body walk.
+    default:
+      return;
+  }
+}
+
+function extractCallable(
+  member: Node,
+  symName: string,
+  content: string,
+  fileInfo: FileInfo,
+  className: string,
+  qualifier: string,
+  exported: boolean,
+  mods: Node | null,
+  outSymbols: Symbol[],
+  outBodies: PendingBody[],
+): void {
+  const sym = makeJavaSymbol(
+    member,
+    javaSignature(member, content, mods),
+    fileInfo,
+    'method',
+    symName,
+    `${fileInfo.path}:${className}.${symName}`,
+    exported,
+    qualifier,
+  );
+  outSymbols.push(sym);
+  // The body field is `block` for methods and compact record constructors
+  // but `constructor_body` for constructors; abstract/interface methods
+  // have none (the symbol is still extracted, mirroring TS signatures).
+  const body = member.childForFieldName('body');
+  if (body) outBodies.push({ symbolId: sym.id, body, className });
+}
+
+function extractImport(stmt: Node, fileInfo: FileInfo, out: ImportInfo[]): void {
+  // Payload is a scoped_identifier (fields scope:/name:) or a bare
+  // identifier; wildcard imports add a named `asterisk` child. The `static`
+  // keyword is an anonymous token and needs no special handling — the
+  // scope/name split already yields `a.b.C` + `m` for static imports.
+  let payload: Node | null = null;
+  let wildcard = false;
+  for (const child of stmt.namedChildren) {
+    if (child.type === 'scoped_identifier' || child.type === 'identifier') payload = child;
+    else if (child.type === 'asterisk') wildcard = true;
+  }
+  if (!payload) return;
+
+  let sourceModule: string;
+  const importedNames: ImportedName[] = [];
+  if (wildcard) {
+    sourceModule = payload.text;
+    importedNames.push({ name: IMPORT_NAMESPACE });
+  } else if (payload.type === 'scoped_identifier') {
+    const nameNode = payload.childForFieldName('name');
+    if (!nameNode) return;
+    sourceModule = payload.childForFieldName('scope')?.text ?? '';
+    importedNames.push({ name: nameNode.text });
+  } else {
+    // Bare `import Foo;` — default-package import, rare/legacy.
+    sourceModule = payload.text;
+    importedNames.push({ name: payload.text });
+  }
+
+  out.push({
+    file: fileInfo.path,
+    sourceModule,
+    importedNames,
+    line: stmt.startPosition.row + 1,
+  });
+}
+
+function makeJavaSymbol(
+  decl: Node,
+  signature: string,
+  fileInfo: FileInfo,
+  kind: SymbolKind,
+  name: string,
+  fqn: string,
+  exported: boolean,
+  qualifier = '',
+): Symbol {
+  return {
+    id: symbolId(fileInfo.path, name, kind, signature, qualifier),
+    name,
+    fqn,
+    kind,
+    file: fileInfo.path,
+    // Annotations live inside the declaration node (its modifiers child),
+    // so startLine is the first annotation's line — same as Python's
+    // decorated_definition range.
+    startLine: decl.startPosition.row + 1,
+    endLine: decl.endPosition.row + 1,
+    signature,
+    doc: extractJavaDoc(decl),
+    exported,
+    language: fileInfo.language,
+  };
+}
+
+// `modifiers` is a named CHILD, not a field — childForFieldName('modifiers')
+// returns null despite "modifiers" appearing in the grammar's field table.
+// Absent entirely on modifier-less declarations, so never address children
+// by index. Each declaration finds its modifiers ONCE and threads the node
+// through the exported/signature helpers.
+function findModifiers(decl: Node): Node | null {
+  for (const child of decl.namedChildren) {
+    if (child.type === 'modifiers') return child;
+  }
+  return null;
+}
+
+// Keyword tokens inside `modifiers` are anonymous children whose type IS the
+// literal text; annotations are named marker_annotation/annotation children.
+function hasModifier(mods: Node | null, ...wanted: string[]): boolean {
+  if (!mods) return false;
+  for (const child of mods.children) {
+    if (child && wanted.includes(child.type)) return true;
+  }
+  return false;
+}
+
+// Signature runs from the first non-annotation modifier token (or the
+// declaration start) to the body start. Annotations are excluded — unlike
+// Python's decorators-in-signature — because Spring/JUnit annotation blocks
+// routinely exceed the 120-char cap, which would truncate the declaration
+// proper out of the display and let same-name overloads collide on
+// identical truncated signatures (= identical symbol ids). Body-less
+// callables (abstract/interface methods) run to the declaration end with
+// the trailing `;` stripped, matching the field path.
+function javaSignature(decl: Node, content: string, mods: Node | null): string {
+  const body = decl.childForFieldName('body');
+  const raw = body
+    ? content.slice(signatureStart(decl, mods), body.startIndex)
+    : content.slice(signatureStart(decl, mods), decl.endIndex).replace(/;\s*$/, '');
+  return normalizeSignature(raw);
+}
+
+function signatureStart(decl: Node, mods: Node | null): number {
+  if (!mods) return decl.startIndex;
+  for (const child of mods.children) {
+    if (!child || child.type === 'marker_annotation' || child.type === 'annotation' || isComment(child)) {
+      continue;
+    }
+    return child.startIndex;
+  }
+  // All-annotation modifiers (`@Override void f()`): start past them.
+  return mods.endIndex;
+}
+
+// Javadoc (and plain comments) precede the declaration as named
+// block_comment/line_comment siblings — annotations don't break adjacency
+// because they live inside the declaration's modifiers child.
+function extractJavaDoc(decl: Node): string | null {
+  const prev = decl.previousNamedSibling;
+  if (!prev || !isComment(prev)) return null;
+  // A comment sharing its line with the END of an earlier sibling is a
+  // TRAILING comment on that statement (`int a = 1; // about a`), not
+  // documentation for the next declaration.
+  const before = prev.previousSibling;
+  if (before && before.endPosition.row === prev.startPosition.row) return null;
+  return commentDocLine(prev.text);
+}

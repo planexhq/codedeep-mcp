@@ -245,6 +245,32 @@ describe('Indexer.indexChanged', () => {
     expect(fresh.findSymbolByName('bar')).toHaveLength(1);
   });
 
+  it('re-indexes unchanged files whose detected language changed (cache from an older build)', async () => {
+    // An upgrade that teaches the scanner a new extension reclassifies
+    // files an old cache recorded as 'unknown' — mtime+size still match,
+    // so only the language comparison forces re-extraction.
+    writeTree(root, { 'src/Widget.java': 'public class Widget { }\n' });
+    await indexer.indexAll();
+    expect(index.findSymbolByName('Widget')).toHaveLength(1);
+
+    // Simulate the pre-Java cache entry: same stat fingerprint, language
+    // 'unknown', no symbols, no content hash.
+    const cached = index.getFile('src/Widget.java')!;
+    index.updateFile(
+      { ...cached, language: 'unknown', symbolCount: 0, contentHash: undefined },
+      [],
+      [],
+      [],
+    );
+    expect(index.findSymbolByName('Widget')).toEqual([]);
+
+    await indexer.indexChanged();
+
+    expect(indexer.progress).toEqual({ done: 1, total: 1 });
+    expect(index.findSymbolByName('Widget')).toHaveLength(1);
+    expect(index.getFile('src/Widget.java')!.language).toBe('java');
+  });
+
   it('drops stale symbols when extractSymbols throws on a modified file', async () => {
     const aPath = join(root, 'src/a.ts');
     writeTree(root, { 'src/a.ts': 'export function foo() {}\n' });

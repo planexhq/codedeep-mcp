@@ -15,6 +15,7 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   '.mjs': 'javascript',
   '.cjs': 'javascript',
   '.py': 'python',
+  '.java': 'java',
 };
 
 const BINARY_EXT = new Set([
@@ -24,7 +25,7 @@ const BINARY_EXT = new Set([
   '.zip', '.tar', '.gz',
   '.wasm', '.pdf',
   '.exe', '.dll', '.so', '.dylib', '.o', '.a',
-  '.class', '.pyc', '.pyo',
+  '.class', '.pyc', '.pyo', '.jar', '.war',
 ]);
 
 const GLOB_CHARS = /[*?[\]{}!]/;

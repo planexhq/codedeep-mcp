@@ -18,6 +18,7 @@ const LANG_GLOB: Record<string, string> = {
   tsx: '*.tsx',
   javascript: '*.{js,jsx,mjs,cjs}',
   python: '*.py',
+  java: '*.java',
 };
 
 const DECL_RE: Record<string, string> = {
@@ -25,6 +26,10 @@ const DECL_RE: Record<string, string> = {
   tsx: '^\\s*(export\\s+)?(default\\s+)?(declare\\s+)?(abstract\\s+)?(async\\s+)?(function|class|interface|type|enum)\\s',
   javascript: '^\\s*(export\\s+)?(default\\s+)?(async\\s+)?(function|class)\\s',
   python: '^\\s*(async\\s+)?(def|class)\\s',
+  // Type declarations only — probe also extracts methods/fields, so the
+  // probe/naive ratio runs well above 1 for Java (info-only, same accepted
+  // skew as TS; suspicious fires only on symbols === 0).
+  java: '^\\s*((public|protected|private|abstract|final|static|sealed|non-sealed|strictfp)\\s+)*(class|interface|enum|record|@interface)\\s',
 };
 
 // null = rg unusable on this machine; the density check is skipped rather

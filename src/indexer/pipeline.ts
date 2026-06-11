@@ -24,12 +24,23 @@ const BATCH_SIZE = 50;
 // preserves timestamps; comparing size catches the common case cheaply.
 // indexFile additionally hash-verifies (see indexFileInner) because it
 // runs in response to an explicit fs event.
+// `language` is the freshly DETECTED language for the path: an upgrade
+// that teaches the scanner a new extension (e.g. `.java`) reclassifies
+// files a cached index recorded as 'unknown' — those must re-index even
+// though their bytes never changed, or the new language stays inert on
+// every warm cache.
 function isUnchanged(
   prev: FileInfo | undefined,
   mtimeMs: number,
   size: number,
+  language: string,
 ): boolean {
-  return prev !== undefined && prev.lastModified === mtimeMs && prev.size === size;
+  return (
+    prev !== undefined &&
+    prev.lastModified === mtimeMs &&
+    prev.size === size &&
+    prev.language === language
+  );
 }
 
 function hashContent(content: string): string {
@@ -131,7 +142,7 @@ export class Indexer {
       const toIndex: FileInfo[] = [];
       for (const f of current) {
         const prev = previous.get(f.path);
-        if (!isUnchanged(prev, f.lastModified, f.size)) {
+        if (!isUnchanged(prev, f.lastModified, f.size, f.language)) {
           toIndex.push(f);
         }
         previous.delete(f.path);
@@ -234,8 +245,9 @@ export class Indexer {
     // REAL second same-size edit landing in the same coarse-mtime tick
     // (HFS+/FAT/NFS report whole seconds) — an explicit fs event fired,
     // so verify by content hash (read without parse) before skipping.
+    const language = detectLanguage(relPath) ?? LANGUAGE_UNKNOWN;
     const existing = this.index.getFile(relPath);
-    if (isUnchanged(existing, stats.mtimeMs, stats.size)) {
+    if (isUnchanged(existing, stats.mtimeMs, stats.size, language)) {
       if (existing?.contentHash !== undefined) {
         try {
           const content = await fs.readFile(absPath, 'utf8');
@@ -265,7 +277,6 @@ export class Indexer {
       return removed();
     }
 
-    const language = detectLanguage(relPath) ?? LANGUAGE_UNKNOWN;
     if (
       language !== LANGUAGE_UNKNOWN &&
       !this.config.languages.includes(language)
