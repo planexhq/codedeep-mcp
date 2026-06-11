@@ -94,6 +94,24 @@ describe('runOverview — basic rendering', () => {
     expect(text).toContain('- 3 files indexed, 4 total symbols');
   });
 
+  it('tallies and pluralizes enum symbols', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/status.ts'),
+      [
+        mkSym({ name: 'HttpStatus', file: 'src/status.ts', kind: 'enum' }),
+        mkSym({ name: 'Method', file: 'src/status.ts', kind: 'enum' }),
+        mkSym({ name: 'parse', file: 'src/status.ts', kind: 'function' }),
+      ],
+      [],
+      [],
+    );
+
+    const text = (await runOverview({}, makeDeps(idx))).content[0].text;
+    expect(text).toContain('- 2 enums, 1 function');
+    expect(text).toContain('- src/ — 1 file (2 enums, 1 function)');
+  });
+
   it("excludes 'unknown' files from language percentages and reports them in Other files", async () => {
     const idx = new CodeIndex(tmpRoot);
     idx.addFile(

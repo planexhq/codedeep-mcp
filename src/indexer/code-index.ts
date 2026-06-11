@@ -22,13 +22,14 @@ import type {
   SymbolKind,
 } from '../types.js';
 
-// v5 adds persisted git enrichment: FileInfo.commitFrequency, the
-// per-file co-change lists, the hotspot ranking, and gitMeta (analyzed
-// HEAD / window / timestamp) driving staleness detection. A v4 cache
-// has none of these sections; bumping forces a clean rebuild instead of
-// teaching load() about absent maps. (v4 added member-expression call
-// refs; v3 added ImportedName.kind.)
-const SCHEMA_VERSION = 5;
+// v6 adds enum and namespace-declaration extraction. The shape is
+// unchanged, but without a bump a warm cache would never re-extract, so
+// the new symbol kinds would silently stay missing until each file was
+// edited — bumping forces the clean rebuild that surfaces them. (v5
+// added persisted git enrichment: FileInfo.commitFrequency, co-change
+// lists, hotspots, gitMeta; v4 added member-expression call refs; v3
+// added ImportedName.kind.)
+const SCHEMA_VERSION = 6;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both
@@ -127,6 +128,7 @@ export const zeroSymbolsByKind = (): Record<SymbolKind, number> => ({
   variable: 0,
   method: 0,
   module: 0,
+  enum: 0,
 });
 
 interface PersistedSchema {

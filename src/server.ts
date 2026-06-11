@@ -65,6 +65,7 @@ export function createServer(deps: ServerDeps): McpServer {
             "variable",
             "method",
             "module",
+            "enum",
           ])
           .optional()
           .describe("Filter by symbol kind"),

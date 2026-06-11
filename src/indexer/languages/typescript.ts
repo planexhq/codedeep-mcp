@@ -167,6 +167,43 @@ function extractTopLevel(
       );
       return;
     }
+    case 'enum_declaration': {
+      // Covers `enum`, `const enum` (const modifier inside the node), and —
+      // via the ambient_declaration recursion above — `declare enum`. Enum
+      // MEMBERS are not extracted (extraction scope: top-level and
+      // class-level declarations only).
+      const name = target.childForFieldName('name')?.text;
+      if (!name) return;
+      outSymbols.push(
+        makeSymbol(target, outer, declSignature(target, content), fileInfo, 'enum', name, `${fileInfo.path}:${name}`, exported),
+      );
+      return;
+    }
+    // Bare `namespace X {}` parses as expression_statement > internal_module
+    // (grammar quirk); `export namespace` and `declare namespace` surface
+    // internal_module directly via the declaration field / ambient recursion.
+    case 'expression_statement': {
+      const inner = target.firstNamedChild;
+      if (inner && (inner.type === 'internal_module' || inner.type === 'module')) {
+        extractTopLevel(inner, outer, content, fileInfo, exported, outSymbols, outImports, outBodies);
+      }
+      return;
+    }
+    case 'internal_module': // namespace X { … }
+    case 'module': {        // module X { … } (legacy keyword)
+      const nameNode = target.childForFieldName('name');
+      // Simple identifiers only. A dotted `namespace A.B` (nested_identifier)
+      // would put a '.' in the FQN and trip classNameFromFqn's member
+      // parsing (isClassMember → true → dropped from file outlines), and a
+      // string name (`declare module "pkg"`) names a package, not a symbol.
+      // Declaration-only: namespace MEMBERS are not extracted this round —
+      // a member FQN `file:Ns.fn` would collide with class-member semantics.
+      if (nameNode?.type !== 'identifier') return;
+      outSymbols.push(
+        makeSymbol(target, outer, declSignature(target, content), fileInfo, 'module', nameNode.text, `${fileInfo.path}:${nameNode.text}`, exported),
+      );
+      return;
+    }
     case 'lexical_declaration':
     case 'variable_declaration': {
       for (const declarator of target.namedChildren) {

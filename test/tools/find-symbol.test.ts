@@ -171,6 +171,33 @@ describe('runFindSymbol — filters', () => {
     expect(text).not.toContain('| type');
   });
 
+  it('finds enum symbols and honors the enum kind filter', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/status.ts'),
+      [
+        mkSym({
+          name: 'HttpStatus',
+          file: 'src/status.ts',
+          kind: 'enum',
+          exported: true,
+          signature: 'enum HttpStatus',
+        }),
+        mkSym({ name: 'HttpStatus', file: 'src/status.ts', kind: 'variable' }),
+      ],
+      [],
+      [],
+    );
+
+    const text = (
+      await runFindSymbol({ name: 'HttpStatus', kind: 'enum' }, makeDeps(idx))
+    ).content[0].text;
+
+    expect(text).toContain('| enum | exported');
+    expect(text).toContain('enum HttpStatus');
+    expect(text).not.toContain('| variable');
+  });
+
   it('applies the scope filter and normalizes a missing trailing slash', async () => {
     const idx = new CodeIndex(tmpRoot);
     idx.addFile(

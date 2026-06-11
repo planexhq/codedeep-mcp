@@ -221,6 +221,112 @@ describe('typescript extractor — variables, arrows, interfaces, types', () => 
   });
 });
 
+describe('typescript extractor — enums, namespaces, constructors', () => {
+  beforeAll(async () => {
+    await initParser();
+  });
+
+  it('extracts an enum declaration', () => {
+    const result = extract('enum Color { Red, Green }');
+    expect(result.symbols).toHaveLength(1);
+    const sym = result.symbols[0]!;
+    expect(sym.name).toBe('Color');
+    expect(sym.kind).toBe('enum');
+    expect(sym.exported).toBe(false);
+    expect(sym.signature).toBe('enum Color');
+    expect(sym.fqn).toBe('src/test.ts:Color');
+    expect(sym.startLine).toBe(1);
+    expect(sym.endLine).toBe(1);
+  });
+
+  it('marks exported enum and keeps const modifier in the signature', () => {
+    const plain = extract('export enum Color { Red }').symbols[0]!;
+    expect(plain.exported).toBe(true);
+    expect(plain.signature).toBe('enum Color');
+    const constEnum = extract('export const enum Fast { A }').symbols[0]!;
+    expect(constEnum.kind).toBe('enum');
+    expect(constEnum.signature).toBe('const enum Fast');
+  });
+
+  it('extracts declare enum via the ambient_declaration recursion', () => {
+    const sym = extract('declare enum Amb { X }').symbols[0]!;
+    expect(sym.name).toBe('Amb');
+    expect(sym.kind).toBe('enum');
+  });
+
+  it('picks up a doc comment on an enum and never emits members', () => {
+    const result = extract('/** HTTP status codes. */\nenum HttpStatus { OK = 200, NotFound = 404 }');
+    expect(result.symbols).toHaveLength(1);
+    expect(result.symbols[0]!.doc).toBe('HTTP status codes.');
+  });
+
+  it('extracts a bare namespace declaration (expression_statement wrapping) without its members', () => {
+    const result = extract('namespace util {\n  export function assertNever(x: never): void {}\n}');
+    expect(result.symbols).toHaveLength(1);
+    const sym = result.symbols[0]!;
+    expect(sym.name).toBe('util');
+    expect(sym.kind).toBe('module');
+    expect(sym.exported).toBe(false);
+    expect(sym.signature).toBe('namespace util');
+    expect(sym.endLine).toBe(3);
+  });
+
+  it('extracts export namespace and declare namespace', () => {
+    const exported = extract('export namespace util { export const x = 1; }').symbols[0]!;
+    expect(exported.kind).toBe('module');
+    expect(exported.exported).toBe(true);
+    const ambient = extract('declare namespace NodeJS { interface Env {} }').symbols[0]!;
+    expect(ambient.name).toBe('NodeJS');
+    expect(ambient.kind).toBe('module');
+  });
+
+  it('extracts the legacy module keyword form', () => {
+    const sym = extract('module Legacy { const y = 2; }').symbols[0]!;
+    expect(sym.name).toBe('Legacy');
+    expect(sym.kind).toBe('module');
+  });
+
+  it('skips dotted namespace names (nested_identifier would corrupt member FQN parsing)', () => {
+    expect(extract('namespace A.B { const x = 1; }').symbols).toHaveLength(0);
+  });
+
+  it('namespace-function declaration merging: bare call binds to the function, not the namespace', () => {
+    // 'module' must stay in NON_CALLABLE_KINDS — the namespace declaration
+    // precedes the function, and the extractor's nameToId is first-wins, so
+    // a callable namespace kind would steal the function's resolved refs.
+    const result = extract(
+      'declare namespace track { interface Opts {} }\nfunction track(e: string) {}\ntrack("x");',
+    );
+    const fn = result.symbols.find((s) => s.kind === 'function')!;
+    const ns = result.symbols.find((s) => s.kind === 'module')!;
+    expect(fn).toBeDefined();
+    expect(ns).toBeDefined();
+    const ref = result.references.find((r) => r.targetName === 'track')!;
+    expect(ref.targetId).toBe(fn.id);
+  });
+
+  it('skips string-named ambient modules (they name packages, not symbols)', () => {
+    expect(extract('declare module "some-pkg" { export const x: number; }').symbols).toHaveLength(0);
+  });
+
+  // Pins behavior that already existed (a constructor is just a
+  // method_definition whose name is `constructor`) — an earlier exploration
+  // wrongly reported constructors as not extracted; this keeps it true.
+  it('extracts a constructor as a method with its DI parameters in the signature', () => {
+    const result = extract(
+      'class Svc {\n  constructor(private dep: Dep) {\n    init(this.dep);\n  }\n}',
+    );
+    const ctor = result.symbols.find((s) => s.name === 'constructor')!;
+    expect(ctor).toBeDefined();
+    expect(ctor.kind).toBe('method');
+    expect(ctor.fqn).toBe('src/test.ts:Svc.constructor');
+    expect(ctor.signature).toBe('constructor(private dep: Dep)');
+    // Calls inside the constructor body attribute to the constructor symbol.
+    const ref = result.references.find((r) => r.targetName === 'init')!;
+    expect(ref.sourceId).toBe(ctor.id);
+  });
+});
+
 describe('typescript extractor — imports', () => {
   beforeAll(async () => {
     await initParser();

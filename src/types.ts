@@ -12,7 +12,8 @@ export type SymbolKind =
   | 'type'
   | 'variable'
   | 'method'
-  | 'module';
+  | 'module'
+  | 'enum';
 
 // SymbolKinds that bare-identifier calls (`foo()`) can never bind to:
 // methods require member access (resolved separately via the receiver and
@@ -24,6 +25,14 @@ export const NON_CALLABLE_KINDS: ReadonlySet<SymbolKind> = new Set<SymbolKind>([
   'method',
   'interface',
   'type',
+  // Bare `Color()` is never a valid call on an enum, and enums have no
+  // invocable members, so member refs can't target them either.
+  'enum',
+  // Same for namespaces: in declaration merging (`namespace fmt` +
+  // `function fmt`) the call belongs to the function — without this
+  // entry the namespace symbol would win the extractor's first-wins
+  // nameToId and steal the function's resolved refs.
+  'module',
 ]);
 
 export type RefKind = 'calls' | 'imports' | 'implements' | 'type_ref';

@@ -65,6 +65,7 @@ const KIND_PLURAL: Record<SymbolKind, string> = {
   variable: 'variables',
   method: 'methods',
   module: 'modules',
+  enum: 'enums',
 };
 
 export async function runOverview(
