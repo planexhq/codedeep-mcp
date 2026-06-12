@@ -144,6 +144,25 @@ describe('java extractor — methods, constructors, fields', () => {
     const huge = extract(src).symbols.find((s) => s.name === 'huge')!;
     expect(huge.signature).toHaveLength(120);
   });
+
+  it('keeps distinct ids for overloads that differ only past the display cap', () => {
+    // JG1 regression: the id hashes the FULL signature, so overloads whose
+    // visible 120-char signatures are identical must still get distinct ids
+    // (under the old capped hash, rxjava's 10 `just` overloads got 5 ids,
+    // merging their reference graphs).
+    const longParams = Array.from({ length: 6 }, (_, i) => `String extremelyLongParameterName${i}`).join(', ');
+    const src = [
+      'public class Api {',
+      `  public void send(${longParams}, int a) { }`,
+      `  public void send(${longParams}, String b) { }`,
+      '}',
+    ].join('\n');
+    const sends = extract(src).symbols.filter((s) => s.name === 'send');
+    expect(sends).toHaveLength(2);
+    expect(sends[0]!.signature).toHaveLength(120);
+    expect(sends[0]!.signature).toBe(sends[1]!.signature);
+    expect(sends[0]!.id).not.toBe(sends[1]!.id);
+  });
 });
 
 describe('java extractor — annotations', () => {

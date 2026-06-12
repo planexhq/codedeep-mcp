@@ -127,10 +127,18 @@ export function symbolId(
 
 const SIGNATURE_WS = /\s+/g;
 
+// Stored/displayed signatures are capped at this length; the symbol id
+// hashes the FULL normalized signature. Capping the hash input too would
+// collide overloads that differ only past the cap (rxjava's 10 `just`
+// overloads produced 5 ids), silently merging their reference graphs.
+export const SIGNATURE_DISPLAY_CAP = 120;
+
 // Shared by every language module. The output feeds symbolId hashing, so
 // all languages must normalize identically — never fork a local copy.
+// Returns the FULL normalized signature; the language symbol constructors
+// apply SIGNATURE_DISPLAY_CAP to the stored copy only.
 export function normalizeSignature(raw: string): string {
-  return raw.trim().replace(SIGNATURE_WS, ' ').slice(0, 120);
+  return raw.trim().replace(SIGNATURE_WS, ' ');
 }
 
 // First non-empty line of a `/** */`, `/* */`, or `//` comment, cleaned.

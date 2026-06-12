@@ -2,7 +2,13 @@ import type { Node, Tree } from 'web-tree-sitter';
 
 import { IMPORT_NAMESPACE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
-import { commentDocLine, normalizeSignature, resolveCalls, symbolId } from '../extractor.js';
+import {
+  SIGNATURE_DISPLAY_CAP,
+  commentDocLine,
+  normalizeSignature,
+  resolveCalls,
+  symbolId,
+} from '../extractor.js';
 import type {
   CallSelector,
   ExtractResult,
@@ -390,6 +396,9 @@ function makeJavaSymbol(
   qualifier = '',
 ): Symbol {
   return {
+    // The id hashes the FULL signature; only the stored copy is capped —
+    // otherwise overloads differing past the cap share an id (JG1: rxjava's
+    // 10 `just` overloads collapsed to 5 ids).
     id: symbolId(fileInfo.path, name, kind, signature, qualifier),
     name,
     fqn,
@@ -400,7 +409,7 @@ function makeJavaSymbol(
     // decorated_definition range.
     startLine: decl.startPosition.row + 1,
     endLine: decl.endPosition.row + 1,
-    signature,
+    signature: signature.slice(0, SIGNATURE_DISPLAY_CAP),
     doc: extractJavaDoc(decl),
     exported,
     language: fileInfo.language,

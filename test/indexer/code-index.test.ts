@@ -844,7 +844,7 @@ describe('CodeIndex edge cases', () => {
     await idx.save(cachePath);
 
     const data = JSON.parse(readFileSync(cachePath, 'utf8'));
-    expect(data.version).toBe(6);
+    expect(data.version).toBe(7);
     expect(data.projectRoot).toBe(tmpRoot);
     expect(Array.isArray(data.symbols)).toBe(true);
     expect(Array.isArray(data.files)).toBe(true);
@@ -2196,7 +2196,7 @@ describe('CodeIndex persistence — references round-trip', () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
-        version: 6,
+        version: 7,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],
@@ -2741,7 +2741,7 @@ describe('CodeIndex git enrichment (schema v5)', () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
-        version: 6,
+        version: 7,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],
@@ -2764,7 +2764,7 @@ describe('CodeIndex git enrichment (schema v5)', () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
-        version: 6,
+        version: 7,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],

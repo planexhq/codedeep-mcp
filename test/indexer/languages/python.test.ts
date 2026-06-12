@@ -177,6 +177,16 @@ describe('python extractor — module-level variables', () => {
     const result = extract('a, b = 1, 2\n');
     expect(result.symbols).toEqual([]);
   });
+
+  it('caps stored assignment signatures at 120 chars (id hashes the full text)', () => {
+    // JG1 follow-up: extractAssignment constructs its Symbol inline, so it
+    // must apply the display cap itself — a module-level literal can run to
+    // kilobytes and would otherwise persist verbatim into the cache.
+    const entries = Array.from({ length: 60 }, (_, i) => `"key${i}": ${i}`).join(', ');
+    const result = extract(`DATA = {${entries}}\n`);
+    expect(result.symbols).toHaveLength(1);
+    expect(result.symbols[0]!.signature).toHaveLength(120);
+  });
 });
 
 describe('python extractor — imports', () => {

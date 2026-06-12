@@ -22,14 +22,15 @@ import type {
   SymbolKind,
 } from '../types.js';
 
-// v6 adds enum and namespace-declaration extraction. The shape is
-// unchanged, but without a bump a warm cache would never re-extract, so
-// the new symbol kinds would silently stay missing until each file was
-// edited — bumping forces the clean rebuild that surfaces them. (v5
-// added persisted git enrichment: FileInfo.commitFrequency, co-change
-// lists, hotspots, gitMeta; v4 added member-expression call refs; v3
-// added ImportedName.kind.)
-const SCHEMA_VERSION = 6;
+// v7: symbol ids hash the FULL untruncated signature (the stored signature
+// stays capped at 120 chars for display). Under v6, overloads differing
+// only past the cap shared an id, silently merging their reference graphs
+// — the bump forces the rebuild that re-keys every long-signature symbol.
+// (v6 added enum + namespace-declaration extraction; v5 added persisted
+// git enrichment: FileInfo.commitFrequency, co-change lists, hotspots,
+// gitMeta; v4 added member-expression call refs; v3 added
+// ImportedName.kind.)
+const SCHEMA_VERSION = 7;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both

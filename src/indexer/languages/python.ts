@@ -2,7 +2,13 @@ import type { Node, Tree } from 'web-tree-sitter';
 
 import { IMPORT_NAMESPACE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
-import { bareDecoratorIdentifier, normalizeSignature, resolveCalls, symbolId } from '../extractor.js';
+import {
+  SIGNATURE_DISPLAY_CAP,
+  bareDecoratorIdentifier,
+  normalizeSignature,
+  resolveCalls,
+  symbolId,
+} from '../extractor.js';
 import type {
   CallSelector,
   ExtractResult,
@@ -237,6 +243,9 @@ function extractAssignment(
   const kind: SymbolKind = 'variable';
   const signature = normalizeSignature(content.slice(node.startIndex, node.endIndex));
   outSymbols.push({
+    // Inline construction (no doc/range split needed) — but it must mirror
+    // makePythonSymbol's contract: hash the FULL signature, store it capped.
+    // A module-level `DATA = {...}` literal can run to kilobytes.
     id: symbolId(fileInfo.path, name, kind, signature),
     name,
     fqn: `${fileInfo.path}:${name}`,
@@ -244,7 +253,7 @@ function extractAssignment(
     file: fileInfo.path,
     startLine: node.startPosition.row + 1,
     endLine: node.endPosition.row + 1,
-    signature,
+    signature: signature.slice(0, SIGNATURE_DISPLAY_CAP),
     doc: null,
     exported: isExported(name, allNames),
     language: fileInfo.language,
@@ -339,6 +348,8 @@ function makePythonSymbol(
   qualifier = '',
 ): Symbol {
   return {
+    // The id hashes the FULL signature; only the stored copy is capped —
+    // otherwise overloads differing past the cap share an id (JG1).
     id: symbolId(fileInfo.path, name, kind, signature, qualifier),
     name,
     fqn,
@@ -346,7 +357,7 @@ function makePythonSymbol(
     file: fileInfo.path,
     startLine: rangeNode.startPosition.row + 1,
     endLine: rangeNode.endPosition.row + 1,
-    signature,
+    signature: signature.slice(0, SIGNATURE_DISPLAY_CAP),
     doc: extractPythonDoc(innerNode),
     exported,
     language: fileInfo.language,

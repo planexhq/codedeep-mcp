@@ -3,6 +3,7 @@ import type { Node, Tree } from 'web-tree-sitter';
 import { IMPORT_DEFAULT, IMPORT_NAMESPACE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import {
+  SIGNATURE_DISPLAY_CAP,
   bareDecoratorIdentifier,
   commentDocLine,
   normalizeSignature,
@@ -15,8 +16,6 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
-
-const WS_REGEX = /\s+/g;
 
 // Function-like nodes whose bodies contain calls that shouldn't attribute
 // to an enclosing body. walkDecorators uses this subset (NOT the full
@@ -381,6 +380,8 @@ function makeSymbol(
   qualifier = '',
 ): Symbol {
   return {
+    // The id hashes the FULL signature; only the stored copy is capped —
+    // otherwise overloads differing past the cap share an id (JG1).
     id: symbolId(fileInfo.path, name, kind, signature, qualifier),
     name,
     fqn,
@@ -388,7 +389,7 @@ function makeSymbol(
     file: fileInfo.path,
     startLine: decl.startPosition.row + 1,
     endLine: decl.endPosition.row + 1,
-    signature,
+    signature: signature.slice(0, SIGNATURE_DISPLAY_CAP),
     doc: extractDoc(docNode),
     exported,
     language: fileInfo.language,
@@ -405,9 +406,9 @@ function variableSignature(declarator: Node, value: Node | null, content: string
   if (value && (value.type === 'arrow_function' || value.type === 'function_expression')) {
     const body = value.childForFieldName('body');
     const sigEnd = body ? body.startIndex : declarator.endIndex;
-    let sig = content.slice(declarator.startIndex, sigEnd).trim().replace(WS_REGEX, ' ');
+    let sig = normalizeSignature(content.slice(declarator.startIndex, sigEnd));
     if (value.type === 'arrow_function') sig = sig.replace(/=>\s*$/, '').trimEnd();
-    return sig.slice(0, 120);
+    return sig;
   }
   return normalizeSignature(content.slice(declarator.startIndex, declarator.endIndex));
 }

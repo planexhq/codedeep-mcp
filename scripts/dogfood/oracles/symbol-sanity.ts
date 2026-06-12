@@ -1,8 +1,12 @@
-// Two practical sanity checks where no perfect external oracle exists:
+// Three practical sanity checks where no perfect external oracle exists:
 //   (1) re-findability round-trip — every symbol the harness SELECTED from
 //       the index must be returnable by find_symbol exact; a miss is an
 //       internal inconsistency (selection read it from the same index).
-//   (2) coarse extraction density — per language, compare probe's symbol
+//   (2) per-file symbol-id uniqueness — round-trip is structurally blind to
+//       id collisions (a collided symbol still finds *a* symbol), but two
+//       symbols sharing an id merge their reference graphs (JG1: capped-
+//       signature hashing collided long overloads), so check ids directly.
+//   (3) coarse extraction density — per language, compare probe's symbol
 //       count against a naive declaration grep. Exactness is impossible
 //       (probe skips nested defs, counts arrow-consts, etc.), so this only
 //       flags CATASTROPHIC under-extraction (a grammar that silently
@@ -69,7 +73,37 @@ export function symbolSanityOracle(
     data: missing.length > 0 ? { missing: missing.slice(0, 10) } : undefined,
   });
 
-  // (2) per-language density
+  // (2) per-file symbol-id uniqueness (cross-file collisions are practically
+  // impossible — the file path is part of the 64-bit-truncated hash input,
+  // so only a birthday collision on the truncated digest could cross files)
+  let dupCount = 0;
+  const dupSamples: string[] = [];
+  for (const fi of env.index.getAllFiles()) {
+    const seen = new Map<string, string>();
+    for (const s of env.index.getSymbolsInFile(fi.path)) {
+      const prev = seen.get(s.id);
+      if (prev !== undefined) {
+        dupCount++;
+        if (dupSamples.length < 5) {
+          dupSamples.push(`${s.id} shared by ${prev} and ${s.fqn}:${s.startLine} in ${fi.path}`);
+        }
+      } else {
+        seen.set(s.id, s.fqn);
+      }
+    }
+  }
+  out.push({
+    oracle: 'symbol-sanity',
+    target: 'symbol-id uniqueness (per file)',
+    verdict: dupCount > 0 ? 'suspicious' : 'clean',
+    detail:
+      dupCount > 0
+        ? `${dupCount} duplicate symbol id(s) within single files — those symbols' reference graphs are merged`
+        : 'no duplicate symbol ids within any file',
+    data: dupCount > 0 ? { dupCount, samples: dupSamples } : undefined,
+  });
+
+  // (3) per-language density
   const perLangSymbols = new Map<string, number>();
   const perLangFiles = new Map<string, number>();
   for (const fi of env.index.getAllFiles()) {

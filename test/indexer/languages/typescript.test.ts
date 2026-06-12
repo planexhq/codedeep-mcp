@@ -947,6 +947,26 @@ describe('typescript extractor — method ID stability across classes', () => {
     expect(methods).toHaveLength(2);
     expect(methods[0]!.id).not.toBe(methods[1]!.id);
   });
+
+  it('keeps distinct ids for overload signatures that differ only past the display cap', () => {
+    // JG1 regression: the id hashes the FULL signature; the stored signature
+    // is capped at 120 chars for display, so the two overload declarations
+    // render identically but must not share an id.
+    const longParams = Array.from({ length: 5 }, (_, i) => `extremelyLongParameterName${i}: string`).join(', ');
+    const src = [
+      'class Api {',
+      `  send(${longParams}, a: number): void;`,
+      `  send(${longParams}, b: string): void;`,
+      '  send() { }',
+      '}',
+    ].join('\n');
+    const sends = extract(src).symbols.filter((s) => s.name === 'send');
+    expect(sends).toHaveLength(3);
+    const overloads = sends.filter((s) => s.signature.length === 120);
+    expect(overloads).toHaveLength(2);
+    expect(overloads[0]!.signature).toBe(overloads[1]!.signature);
+    expect(overloads[0]!.id).not.toBe(overloads[1]!.id);
+  });
 });
 
 describe('typescript extractor — ambient declarations', () => {
