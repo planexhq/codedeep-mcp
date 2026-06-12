@@ -19,6 +19,8 @@ import { indexWithTiming, timeWarmReload } from './index-and-time.js';
 import { selectInputs, type Selection } from './input-selection.js';
 import { fileSliceOracle } from './oracles/file-slice.js';
 import { gitLogOracle } from './oracles/git-log.js';
+import { resolutionRateOracle } from './oracles/resolution-rate.js';
+import { resolvedEdgeOracle } from './oracles/resolved-edge.js';
 import { ripgrepCallerOracle } from './oracles/ripgrep.js';
 import { symbolSanityOracle } from './oracles/symbol-sanity.js';
 import { rgCountLines } from './oracles/exec.js';
@@ -112,6 +114,7 @@ function detectGaps(
   const langs = stats.filesByLanguage;
   const hasTS = (langs.typescript ?? 0) + (langs.tsx ?? 0) > 0;
   const hasPy = (langs.python ?? 0) > 0;
+  const hasJava = (langs.java ?? 0) > 0;
 
   const threw = calls.filter((c) => c.notes.includes('handler-threw'));
   if (threw.length) {
@@ -180,6 +183,42 @@ function detectGaps(
     }
   }
 
+  // Java type-declaration probe, mirroring the TS enum/namespace probe:
+  // flag only catastrophic under-extraction (declarations exist in source but
+  // the index holds zero type-kind symbols), so it self-corrects rather than
+  // reporting stale claims. Records map to 'class', annotation types and
+  // interfaces to 'interface'.
+  if (hasJava) {
+    const kinds = stats.symbolsByKind;
+    const typeSymbols = (kinds.class ?? 0) + (kinds.interface ?? 0) + (kinds.enum ?? 0);
+    const typeDeclsInSource = rgCount(
+      dir,
+      '^\\s*((public|protected|private|abstract|final|static|sealed|non-sealed|strictfp)\\s+)*(class|interface|enum|record)\\s',
+      '*.java',
+    );
+    if (typeDeclsInSource === null) {
+      gaps.push('ℹ️ ripgrep unavailable — Java type-extraction probe skipped');
+    } else if (typeDeclsInSource > 0 && typeSymbols === 0) {
+      gaps.push(`🟠 P1: ${typeDeclsInSource} Java type declaration(s) in source but 0 class/interface/enum symbols indexed`);
+    }
+    // Info: annotation/@Nested/static-import density — context for the
+    // annotation-ref and nested-type dimensions (extraction is correct; these
+    // just characterize what the repo stresses).
+    const staticImports = rgCount(dir, '^\\s*import\\s+static\\s', '*.java') ?? 0;
+    const nested = rgCount(dir, '^\\s*@Nested\\b', '*.java') ?? 0;
+    if (staticImports > 0 || nested > 0) {
+      gaps.push(`ℹ️ Java: ${staticImports} static import(s), ${nested} @Nested class(es) — static-import call targets stay unresolved by design; @Nested types are extracted with simple-name FQNs`);
+    }
+  }
+
+  const edge = oracles.find((o) => o.oracle === 'resolved-edge' && o.verdict === 'suspicious');
+  if (edge) gaps.push(`🔴 P0: resolved-edge — ${edge.detail}`);
+
+  const bareBroke = oracles.find(
+    (o) => o.oracle === 'resolution-rate' && o.target.startsWith('bare') && o.verdict === 'suspicious',
+  );
+  if (bareBroke) gaps.push(`🟠 P1: bare-call resolution collapsed — ${bareBroke.detail}`);
+
   // Decorators: TS uses PascalCase (@Injectable, @Get) — restrict to @[A-Z]
   // so JSDoc tags (@param/@returns) don't inflate the count. Python @ at
   // line start is always a real decorator (no JSDoc). Info-only line, so a
@@ -247,6 +286,10 @@ async function runOneRepo(repo: RepoSpec, cli: Cli): Promise<RepoResult> {
     }
     oracles.push(...gitLogOracle(env, dir));
     oracles.push(...symbolSanityOracle(env, dir, sel));
+    // Java-only: resolution quality + the field-misbind regression guard.
+    // Both no-op (skipped) on repos without Java references.
+    oracles.push(...resolutionRateOracle(env));
+    oracles.push(...resolvedEdgeOracle(env));
 
     const gaps = detectGaps(env, repo, dir, calls, oracles);
     const otherFilesByExt = computeOtherExts(env);

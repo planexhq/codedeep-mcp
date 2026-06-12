@@ -83,6 +83,42 @@ export const REPOS: RepoSpec[] = [
     lang: 'java',
     dimension: 'nested-class recursion (@Nested), annotation-heavy signatures, interfaces with default methods, Gradle monorepo',
   },
+  {
+    name: 'commons-lang',
+    url: 'https://github.com/apache/commons-lang.git',
+    lang: 'java',
+    dimension: 'light plain-Java baseline: static-util overloads, hand-verifiable density',
+  },
+  {
+    name: 'guava',
+    url: 'https://github.com/google/guava.git',
+    lang: 'java',
+    dimension: 'generics-heavy: Multimap/Immutable* signatures, builder pattern, nested static types',
+  },
+  {
+    name: 'spring-petclinic',
+    url: 'https://github.com/spring-projects/spring-petclinic.git',
+    lang: 'java',
+    dimension: 'annotation/DI (@RestController/@Service/@Autowired), constructor injection, hand-verifiable Spring layout',
+  },
+  {
+    name: 'rxjava',
+    url: 'https://github.com/ReactiveX/RxJava.git',
+    lang: 'java',
+    dimension: 'fluent chaining (Observable.x().y()) -> chained-call blind spot; deep generics; operator-heavy base classes',
+  },
+  {
+    name: 'netty',
+    url: 'https://github.com/netty/netty.git',
+    lang: 'java',
+    dimension: 'industrial scale (Maven multi-module), deep handler/channel hierarchies, generic channel types',
+  },
+  {
+    name: 'jackson-databind',
+    url: 'https://github.com/FasterXML/jackson-databind.git',
+    lang: 'java',
+    dimension: 'annotation-refs (@JsonProperty/@JsonCreator), reflection-heavy, generic TypeReference',
+  },
 ];
 
 export function reposByName(names: string[]): RepoSpec[] {

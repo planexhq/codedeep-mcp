@@ -32,7 +32,7 @@ export interface ToolCallRecord {
 export type OracleVerdict = 'clean' | 'suspicious' | 'mismatch' | 'info' | 'skipped';
 
 export interface OracleResult {
-  oracle: 'ripgrep' | 'file-slice' | 'git-log' | 'symbol-sanity';
+  oracle: 'ripgrep' | 'file-slice' | 'git-log' | 'symbol-sanity' | 'resolution-rate' | 'resolved-edge';
   target: string;
   verdict: OracleVerdict;
   detail: string;

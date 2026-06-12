@@ -498,6 +498,11 @@ export class CodeIndex {
     return list ? [...list] : [];
   }
 
+  getReferencesBySourceFile(path: string): Reference[] {
+    const list = this.referencesBySourceFile.get(path);
+    return list ? [...list] : [];
+  }
+
   getAllFiles(): FileInfo[] {
     return [...this.fileByPath.values()];
   }
