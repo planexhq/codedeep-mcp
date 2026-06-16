@@ -4,7 +4,9 @@ import { IMPORT_NAMESPACE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import {
   SIGNATURE_DISPLAY_CAP,
+  collectAmbiguousTypeNames,
   commentDocLine,
+  isTrailingComment,
   normalizeSignature,
   resolveCalls,
   symbolId,
@@ -55,6 +57,10 @@ const JAVA_BARE_CALLABLE_KINDS: ReadonlySet<string> = new Set();
 // implementations (`new Iface() { ... }`) are real instantiation sites.
 // Enums can't be instantiated, so they stay out.
 const JAVA_CONSTRUCTOR_KINDS: ReadonlySet<string> = new Set(['class', 'interface']);
+
+// Type kinds sharing the simple-name FQN namespace — duplicates among these
+// are excluded from extract-time resolution (collectAmbiguousTypeNames).
+const JAVA_TYPE_KINDS: ReadonlySet<string> = new Set(['class', 'interface', 'enum']);
 
 const JAVA_SELECTORS: ReadonlyArray<CallSelector> = [
   // method_invocation has no single callee field: bare calls expose only
@@ -144,13 +150,7 @@ export function extractJava(
   // outers) share the simple-name FQN; resolving through them first-wins
   // would bind calls to the WRONG class, so their names are excluded from
   // extract-time resolution entirely (calls stay unresolved instead).
-  const typeNameSeen = new Set<string>();
-  const ambiguousTypeNames = new Set<string>();
-  for (const s of symbols) {
-    if (s.kind !== 'class' && s.kind !== 'interface' && s.kind !== 'enum') continue;
-    if (typeNameSeen.has(s.name)) ambiguousTypeNames.add(s.name);
-    else typeNameSeen.add(s.name);
-  }
+  const ambiguousTypeNames = collectAmbiguousTypeNames(symbols, JAVA_TYPE_KINDS);
 
   const references = resolveCalls(
     bodies,
@@ -472,10 +472,8 @@ function signatureStart(decl: Node, mods: Node | null): number {
 function extractJavaDoc(decl: Node): string | null {
   const prev = decl.previousNamedSibling;
   if (!prev || !isComment(prev)) return null;
-  // A comment sharing its line with the END of an earlier sibling is a
-  // TRAILING comment on that statement (`int a = 1; // about a`), not
-  // documentation for the next declaration.
-  const before = prev.previousSibling;
-  if (before && before.endPosition.row === prev.startPosition.row) return null;
+  // A comment trailing an earlier statement on its own line is not doc for
+  // the next declaration.
+  if (isTrailingComment(prev)) return null;
   return commentDocLine(prev.text);
 }

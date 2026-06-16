@@ -2823,3 +2823,157 @@ describe('CodeIndex git enrichment (schema v5)', () => {
     expect(composed.symbols[0].file).toBe('src/hot.ts');
   });
 });
+
+describe('CodeIndex Go same-package attribution (carve-out)', () => {
+  // Go files call same-package siblings with no import statement; one
+  // directory = one package. The carve-out attributes those bare refs —
+  // but only onto Go targets.
+  it('attributes an import-free Go bare ref to a same-directory Go target', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'setupRoutes', file: 'pkg/routes.go', language: 'go' });
+    const caller = mkSym({ name: 'main', file: 'pkg/main.go', language: 'go' });
+    idx.addFile(makeFileInfo('go', 'pkg/routes.go'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('go', 'pkg/main.go'),
+      [caller],
+      [mkUnresolvedRef(caller, 'setupRoutes', 'pkg/main.go', 5)],
+      [],
+    );
+
+    expect(idx.getCallerCount(target.id)).toBe(1);
+  });
+
+  it('does NOT attribute a Go bare ref to a same-named non-Go symbol in the directory', () => {
+    // Mixed-language directory: a bare Go identifier can never bind to a
+    // TS export, even one sharing the name and the directory.
+    const idx = new CodeIndex();
+    const goTarget = mkSym({ name: 'setupRoutes', file: 'pkg/routes.go', language: 'go' });
+    const tsTarget = mkSym({ name: 'setupRoutes', file: 'pkg/server.ts', exported: true });
+    const caller = mkSym({ name: 'main', file: 'pkg/main.go', language: 'go' });
+    idx.addFile(makeFileInfo('go', 'pkg/routes.go'), [goTarget], [], []);
+    idx.addFile(makeFileInfo('typescript', 'pkg/server.ts'), [tsTarget], [], []);
+    idx.addFile(
+      makeFileInfo('go', 'pkg/main.go'),
+      [caller],
+      [mkUnresolvedRef(caller, 'setupRoutes', 'pkg/main.go', 5)],
+      [],
+    );
+
+    expect(idx.getCallerCount(goTarget.id)).toBe(1);
+    expect(idx.getCallerCount(tsTarget.id)).toBe(0);
+  });
+
+  it('does not attribute Go bare refs across directories (different package)', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'setupRoutes', file: 'other/routes.go', language: 'go' });
+    const caller = mkSym({ name: 'main', file: 'pkg/main.go', language: 'go' });
+    idx.addFile(makeFileInfo('go', 'other/routes.go'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('go', 'pkg/main.go'),
+      [caller],
+      [mkUnresolvedRef(caller, 'setupRoutes', 'pkg/main.go', 5)],
+      [],
+    );
+
+    expect(idx.getCallerCount(target.id)).toBe(0);
+  });
+
+  it('does NOT attribute a same-package bare ref to a struct FIELD of the same name', () => {
+    // A bare Go identifier can never reference a field (fields need a
+    // receiver) — the carve-out must not fire for member targets.
+    const idx = new CodeIndex();
+    const field = mkSym({
+      name: 'format',
+      kind: 'variable',
+      parent: 'Greeter',
+      file: 'pkg/greeter.go',
+      language: 'go',
+    });
+    const caller = mkSym({ name: 'run', file: 'pkg/main.go', language: 'go' });
+    idx.addFile(makeFileInfo('go', 'pkg/greeter.go'), [field], [], []);
+    idx.addFile(
+      makeFileInfo('go', 'pkg/main.go'),
+      [caller],
+      [mkUnresolvedRef(caller, 'format', 'pkg/main.go', 7)],
+      [],
+    );
+
+    expect(idx.getCallerCount(field.id)).toBe(0);
+  });
+});
+
+describe('isCallerOf — Go same-package exceptions', () => {
+  it('admits unresolved member refs to unexported Go methods from same-package files', () => {
+    // pkg/client.go: srv.logRequest() reaching the unexported method in
+    // pkg/log.go is legal, dominant Go — the member analog of the bare
+    // carve-out.
+    const target = mkSym({
+      name: 'logRequest',
+      kind: 'method',
+      parent: 'Server',
+      file: 'pkg/log.go',
+      language: 'go',
+      exported: false,
+    });
+    const caller = mkSym({ name: 'Do', kind: 'method', parent: 'Client', file: 'pkg/client.go', language: 'go' });
+    expect(isCallerOf(mkMemberRef(caller, 'logRequest', 'srv'), target)).toBe(true);
+  });
+
+  it('still rejects unexported-method member refs across packages', () => {
+    const target = mkSym({
+      name: 'logRequest',
+      kind: 'method',
+      parent: 'Server',
+      file: 'pkg/log.go',
+      language: 'go',
+      exported: false,
+    });
+    const caller = mkSym({ name: 'Do', file: 'cmd/main.go', language: 'go' });
+    expect(isCallerOf(mkMemberRef(caller, 'logRequest', 'srv'), target)).toBe(false);
+  });
+
+  it('still rejects unexported member refs from non-Go files in the directory', () => {
+    const target = mkSym({
+      name: 'logRequest',
+      kind: 'method',
+      parent: 'Server',
+      file: 'pkg/log.go',
+      language: 'go',
+      exported: false,
+    });
+    const caller = mkSym({ name: 'do', file: 'pkg/glue.ts' });
+    expect(isCallerOf(mkMemberRef(caller, 'logRequest', 'srv'), target)).toBe(false);
+  });
+
+  it('does NOT attribute a member ref to a same-package top-level FUNCTION', () => {
+    // `c.helper()` is a method call on some value — it can never invoke a
+    // package-level func (those are called bare). The same-package member
+    // exception must be gated on the target being a member.
+    const target = mkSym({
+      name: 'helper',
+      kind: 'function',
+      file: 'pkg/log.go',
+      language: 'go',
+      exported: false,
+    });
+    const caller = mkSym({ name: 'Do', kind: 'method', parent: 'Client', file: 'pkg/client.go', language: 'go' });
+    expect(isCallerOf(mkMemberRef(caller, 'helper', 'c'), target)).toBe(false);
+  });
+
+  it('admits bare refs to Go type-kind targets from the same package', () => {
+    // `Pairs{...}` composite literals and `Pairs(x)` conversions are bare
+    // refs; within a package a top-level name is unique, so the match is
+    // sound. Extract-time resolution only covers the defining file.
+    const target = mkSym({ name: 'Pairs', kind: 'type', file: 'pkg/types.go', language: 'go' });
+    const caller = mkSym({ name: 'Build', file: 'pkg/use.go', language: 'go' });
+    expect(isCallerOf(mkUnresolvedRef(caller, 'Pairs', 'pkg/use.go', 7), target)).toBe(true);
+  });
+
+  it('rejects type-kind matches across packages and for member form', () => {
+    const target = mkSym({ name: 'Pairs', kind: 'type', file: 'pkg/types.go', language: 'go' });
+    const farCaller = mkSym({ name: 'Build', file: 'cmd/use.go', language: 'go' });
+    expect(isCallerOf(mkUnresolvedRef(farCaller, 'Pairs', 'cmd/use.go', 7), target)).toBe(false);
+    const nearCaller = mkSym({ name: 'Build', file: 'pkg/use.go', language: 'go' });
+    expect(isCallerOf(mkMemberRef(nearCaller, 'Pairs', 'lib'), target)).toBe(false);
+  });
+});

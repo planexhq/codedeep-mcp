@@ -6,6 +6,7 @@ import {
   SIGNATURE_DISPLAY_CAP,
   bareDecoratorIdentifier,
   commentDocLine,
+  declSignature,
   normalizeSignature,
   resolveCalls,
   symbolId,
@@ -396,11 +397,6 @@ function makeSymbol(
   };
 }
 
-function declSignature(decl: Node, content: string): string {
-  const body = decl.childForFieldName('body');
-  const sigEnd = body ? body.startIndex : decl.endIndex;
-  return normalizeSignature(content.slice(decl.startIndex, sigEnd));
-}
 
 function variableSignature(declarator: Node, value: Node | null, content: string): string {
   if (value && (value.type === 'arrow_function' || value.type === 'function_expression')) {

@@ -1728,3 +1728,93 @@ describe('runGetContext — review hardening', () => {
     expect(text).not.toContain('co-change partners');
   });
 });
+
+describe('runGetContext — file mode member outline (Go split files)', () => {
+  it('lists methods whose receiver type is declared in ANOTHER file', async () => {
+    // Go methods routinely live apart from their type (handlers.go beside
+    // server.go); hiding all members would render "Exports (none)".
+    const idx = new CodeIndex(tmpRoot);
+    const source = [
+      'package main',
+      '',
+      'func (s *Server) HandleGet() {}',
+      '',
+      'func (s *Server) handlePost() {}',
+      '',
+    ].join('\n');
+    writeTree(tmpRoot, { 'pkg/handlers.go': source });
+
+    const handleGet = mkSym({
+      name: 'HandleGet',
+      kind: 'method',
+      parent: 'Server',
+      file: 'pkg/handlers.go',
+      language: 'go',
+      exported: true,
+      signature: 'func (s *Server) HandleGet()',
+      startLine: 3,
+      endLine: 3,
+    });
+    const handlePost = mkSym({
+      name: 'handlePost',
+      kind: 'method',
+      parent: 'Server',
+      file: 'pkg/handlers.go',
+      language: 'go',
+      exported: false,
+      signature: 'func (s *Server) handlePost()',
+      startLine: 5,
+      endLine: 5,
+    });
+    idx.addFile(makeFileInfo('go', 'pkg/handlers.go'), [handleGet, handlePost], [], []);
+
+    const result = await runGetContext({ file: 'pkg/handlers.go' }, makeDeps(idx));
+    const text = result.content[0].text;
+
+    expect(text).toContain('- HandleGet (method, line 3)');
+    expect(text).toContain('- handlePost (method, line 5)');
+    expect(text).not.toContain('### Exports\n(none)');
+  });
+
+  it('still hides members whose enclosing type is declared in the SAME file', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const source = [
+      'package main',
+      '',
+      'type Server struct{}',
+      '',
+      'func (s *Server) HandleGet() {}',
+      '',
+    ].join('\n');
+    writeTree(tmpRoot, { 'pkg/server.go': source });
+
+    const server = mkSym({
+      name: 'Server',
+      kind: 'class',
+      file: 'pkg/server.go',
+      language: 'go',
+      exported: true,
+      signature: 'type Server struct',
+      startLine: 3,
+      endLine: 3,
+    });
+    const handleGet = mkSym({
+      name: 'HandleGet',
+      kind: 'method',
+      parent: 'Server',
+      file: 'pkg/server.go',
+      language: 'go',
+      exported: true,
+      signature: 'func (s *Server) HandleGet()',
+      startLine: 5,
+      endLine: 5,
+    });
+    idx.addFile(makeFileInfo('go', 'pkg/server.go'), [server, handleGet], [], []);
+
+    const result = await runGetContext({ file: 'pkg/server.go' }, makeDeps(idx));
+    const text = result.content[0].text;
+
+    expect(text).toContain('- Server (class, line 3)');
+    expect(text).not.toContain('- HandleGet (method');
+  });
+});

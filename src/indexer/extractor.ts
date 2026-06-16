@@ -4,6 +4,7 @@ import type { Node, Tree } from 'web-tree-sitter';
 import { log } from '../logger.js';
 import { NON_CALLABLE_KINDS, classNameFromFqn } from '../types.js';
 import type { FileInfo, ImportInfo, Reference, Symbol } from '../types.js';
+import { extractGo } from './languages/go.js';
 import { extractJava } from './languages/java.js';
 import { extractPython } from './languages/python.js';
 import { extractTypeScript } from './languages/typescript.js';
@@ -21,6 +22,14 @@ export interface PendingBody {
   // body itself) so `this.x()` / `self.x()` calls resolve against the
   // enclosing class's methods.
   className?: string;
+  // Go method receiver variable ('s' in `func (s *Server) ...`): the
+  // language has no fixed this/self token, so selfness is per-body. When
+  // set, a member call whose receiver token equals it resolves against
+  // `className` and records selfReceiver — a local variable shadowing the
+  // receiver name (`s := other; s.Handle()`) is mis-marked self, the same
+  // accepted error class as Python's self-by-convention. Omitted for
+  // blank/absent receivers and by TS/Py/Java, where it changes nothing.
+  selfReceiverName?: string;
 }
 
 // A member-expression call site reduced to its two identifiers. Returned
@@ -76,6 +85,14 @@ export interface ResolveCallsOptions {
   // maps would merge first-wins and produce confidently WRONG resolved
   // edges. Calls in (and constructions of) those classes stay unresolved.
   ambiguousClassNames?: ReadonlySet<string>;
+  // Bare identifier callees in this set emit NO reference unless they
+  // resolved to a local symbol. Go passes its builtins (make/len/append/
+  // ...): they are package-less names that would otherwise flood the
+  // name-keyed reference store with unresolvable noise. The resolved
+  // escape matters — builtins are shadowable, and pre-1.21 Go code
+  // routinely defines its own max/min/clear, so a file-local definition
+  // still gets its refs.
+  ignoredBareCallees?: ReadonlySet<string>;
 }
 
 const DEFAULT_BARE_CALLEE_TYPES: ReadonlySet<string> = new Set(['identifier']);
@@ -105,6 +122,8 @@ export function extractSymbols(
       return extractPython(tree, content, fileInfo);
     case 'java':
       return extractJava(tree, content, fileInfo);
+    case 'go':
+      return extractGo(tree, content, fileInfo);
     default:
       log.warn(`extractSymbols: unsupported language "${fileInfo.language}"`);
       return { symbols: [], references: [], imports: [] };
@@ -167,6 +186,45 @@ export function commentDocLine(text: string): string | null {
   return null;
 }
 
+// Declaration signature = source from the declaration start to its body
+// (or the declaration end when bodiless). Shared by the TS and Go
+// extractors; feeds symbolId hashing, so — like normalizeSignature — it
+// must stay one copy. Java forks its own (annotation exclusion + trailing
+// `;` strip) and can't share this.
+export function declSignature(decl: Node, content: string): string {
+  const body = decl.childForFieldName('body');
+  const sigEnd = body ? body.startIndex : decl.endIndex;
+  return normalizeSignature(content.slice(decl.startIndex, sigEnd));
+}
+
+// A comment sharing its line with the END of an earlier sibling is a
+// TRAILING comment on that statement (`var z int // about z`), not doc for
+// the next declaration. Shared by the Go and Java doc extractors.
+export function isTrailingComment(comment: Node): boolean {
+  const before = comment.previousSibling;
+  return before !== null && before.endPosition.row === comment.startPosition.row;
+}
+
+// Type names that appear more than once among `symbols` (restricted to
+// `kinds`). Same-name types share a simple-name FQN, so resolving calls
+// through them first-wins would bind to the WRONG type — callers pass the
+// result as `ResolveCallsOptions.ambiguousClassNames` to exclude them from
+// extract-time resolution. Shared by the Go and Java extractors (the kinds
+// set differs: Go class/interface/type, Java class/interface/enum).
+export function collectAmbiguousTypeNames(
+  symbols: readonly Symbol[],
+  kinds: ReadonlySet<string>,
+): Set<string> {
+  const seen = new Set<string>();
+  const ambiguous = new Set<string>();
+  for (const s of symbols) {
+    if (!kinds.has(s.kind)) continue;
+    if (seen.has(s.name)) ambiguous.add(s.name);
+    else seen.add(s.name);
+  }
+  return ambiguous;
+}
+
 export function resolveCalls(
   bodies: PendingBody[],
   moduleRoot: Node | null,
@@ -183,6 +241,7 @@ export function resolveCalls(
   const bareCallableKinds = opts?.bareCallableKinds;
   const constructorKinds = opts?.constructorKinds;
   const ambiguousClassNames = opts?.ambiguousClassNames;
+  const ignoredBareCallees = opts?.ignoredBareCallees;
   const nameToId = new Map<string, string>();
   for (const sym of symbols) {
     if (bareCallableKinds ? !bareCallableKinds.has(sym.kind) : NON_CALLABLE_KINDS.has(sym.kind)) {
@@ -217,7 +276,12 @@ export function resolveCalls(
 
   const references: Reference[] = [];
   const seenCallNodeIds = new Set<number>();
-  const emit = (node: Node, sourceId: string | null, className?: string): void => {
+  const emit = (
+    node: Node,
+    sourceId: string | null,
+    className?: string,
+    selfReceiverName?: string,
+  ): void => {
     if (seenCallNodeIds.has(node.id)) return;
     const getCallee = calleeByType.get(node.type);
     if (!getCallee) return;
@@ -240,6 +304,12 @@ export function resolveCalls(
               : undefined) ??
             nameToId.get(targetName) ??
             null);
+      // Ignored names (Go builtins) are dropped only when unresolved — the
+      // node is already in seenCallNodeIds, so the moduleRoot re-walk stays
+      // cheap and never re-emits it.
+      if (targetId === null && callee.type === 'identifier' && ignoredBareCallees?.has(targetName)) {
+        return;
+      }
       references.push({
         sourceId,
         targetId,
@@ -259,7 +329,13 @@ export function resolveCalls(
     const member = memberCallInfo(callee);
     if (!member) return;
     seenCallNodeIds.add(node.id);
-    const lookupClass = member.isSelf ? className : member.receiver;
+    // Selfness comes from the reader (TS `this` node, Python self/cls) or,
+    // for Go, from the receiver token matching the enclosing method's
+    // declared receiver variable (PendingBody.selfReceiverName).
+    const isSelf =
+      member.isSelf ||
+      (selfReceiverName !== undefined && member.receiver === selfReceiverName);
+    const lookupClass = isSelf ? className : member.receiver;
     const targetId =
       (lookupClass ? methodsByClass.get(lookupClass)?.get(member.property) : undefined) ??
       null;
@@ -277,7 +353,7 @@ export function resolveCalls(
     // Gated on an enclosing class actually existing: `self.x()` in a
     // plain Python function (or `this.x()` in a plain JS function) has
     // no class instance to refer to and stays an ordinary member ref.
-    if (member.isSelf && className !== undefined) ref.selfReceiver = true;
+    if (isSelf && className !== undefined) ref.selfReceiver = true;
     references.push(ref);
   };
 
@@ -288,14 +364,16 @@ export function resolveCalls(
   // Body walks first so a function-nested decorator gets attributed to the
   // enclosing body when reachable; the seen-set then drops the (null-sourced)
   // module-root duplicate.
-  for (const { symbolId: sourceId, body, className } of bodies) {
-    walkCalls(body, calleeByType, skipTypes, (call) => emit(call, sourceId, className));
+  for (const { symbolId: sourceId, body, className, selfReceiverName } of bodies) {
+    walkCalls(body, calleeByType, skipTypes, (call) =>
+      emit(call, sourceId, className, selfReceiverName),
+    );
     // TS decorators sit under skip-typed parents (class_declaration etc.)
     // that walkCalls can't enter — walkDecorators descends through them
     // so nested decorated classes attribute to the enclosing body.
     if (hasDecoratorSelector) {
       walkDecorators(body, calleeByType, skipTypes, functionBodySkipTypes, (call) =>
-        emit(call, sourceId, className),
+        emit(call, sourceId, className, selfReceiverName),
       );
     }
   }

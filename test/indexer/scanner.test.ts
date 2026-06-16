@@ -35,10 +35,10 @@ describe('scanner helpers', () => {
     it('is case-insensitive on the extension', () => {
       expect(detectLanguage('Foo.TS')).toBe('typescript');
       expect(detectLanguage('Bar.PY')).toBe('python');
+      expect(detectLanguage('Main.GO')).toBe('go');
     });
 
     it('returns null for unknown or absent extensions', () => {
-      expect(detectLanguage('a.go')).toBeNull();
       expect(detectLanguage('a.rs')).toBeNull();
       expect(detectLanguage('Makefile')).toBeNull();
       expect(detectLanguage('LICENSE')).toBeNull();
@@ -191,7 +191,6 @@ describe('scanProject', () => {
       'a.ts': '',
       'Makefile': '',
       'README': '',
-      'main.go': '',
       'lib.rs': '',
     });
     const { files } = await scanProject(makeConfig(root));
@@ -199,9 +198,8 @@ describe('scanProject', () => {
     expect(byPath.get('a.ts')).toBe('typescript');
     expect(byPath.get('Makefile')).toBe('unknown');
     expect(byPath.get('README')).toBe('unknown');
-    expect(byPath.get('main.go')).toBe('unknown');
     expect(byPath.get('lib.rs')).toBe('unknown');
-    expect(files).toHaveLength(5);
+    expect(files).toHaveLength(4);
   });
 
   it('skips unknown-extension files containing a null byte', async () => {

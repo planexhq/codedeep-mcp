@@ -1,0 +1,708 @@
+import type { Node, Tree } from 'web-tree-sitter';
+
+import { IMPORT_NAMESPACE } from '../../types.js';
+import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
+import {
+  SIGNATURE_DISPLAY_CAP,
+  collectAmbiguousTypeNames,
+  commentDocLine,
+  declSignature,
+  isTrailingComment,
+  normalizeSignature,
+  resolveCalls,
+  symbolId,
+} from '../extractor.js';
+import type {
+  CallSelector,
+  ExtractResult,
+  MemberCallInfo,
+  PendingBody,
+} from '../extractor.js';
+
+// Function-like nodes whose bodies contain calls that shouldn't attribute
+// to an enclosing body. func_literal is deliberately absent (the Java
+// lambda rule, not the TS arrow rule): an anonymous literal can never be a
+// symbol, so calls inside `go func() { f() }()` attribute to the enclosing
+// function. The one literal that IS a symbol — `var f = func() {...}` —
+// still attributes correctly because its body is walked as f's own
+// PendingBody first and the seen-set drops the moduleRoot duplicate.
+const GO_FUNCTION_BODY_SKIP_TYPES: ReadonlySet<string> = new Set([
+  'function_declaration',
+  'method_declaration',
+]);
+
+// Same set: Go has no class-body analog to skip (type bodies carry no
+// executable code), and function/method declarations can't even nest —
+// the entries are parse-error tolerance, mirroring Java's structure.
+const GO_SKIP_TYPES: ReadonlySet<string> = GO_FUNCTION_BODY_SKIP_TYPES;
+
+// `composite_literal`'s callee is a type_identifier, never a plain
+// identifier — without this, every `Server{}` ref would be dropped.
+const GO_BARE_CALLEE_TYPES: ReadonlySet<string> = new Set(['identifier', 'type_identifier']);
+
+// A bare `foo()` binds to top-level functions only (incl. `var f = func()`
+// promotions). Type conversions parse as identical call_expressions
+// (`MyInt(3)`), so type/class/variable kinds stay out — a conversion is
+// emitted as an unresolved name-keyed ref, never a confidently-wrong edge.
+const GO_BARE_CALLABLE_KINDS: ReadonlySet<string> = new Set(['function']);
+
+// Composite literals bind to structs and to named non-struct types
+// (`type Pairs map[string]int; Pairs{...}`). 'type' matters: unresolved
+// refs to 'type'-kind symbols are rejected at query time (NON_CALLABLE),
+// so without it those literals would be invisible. Interfaces stay out —
+// they cannot be composite-literal constructed.
+const GO_CONSTRUCTOR_KINDS: ReadonlySet<string> = new Set(['class', 'type']);
+
+// Symbol kinds whose names share the simple-name FQN namespace — duplicates
+// among these are excluded from extract-time call resolution. (struct→class,
+// interface→interface, defined/alias→type.)
+const GO_TYPE_KINDS: ReadonlySet<string> = new Set(['class', 'interface', 'type']);
+
+// Predeclared builtins are package-less bare names; unresolved calls to
+// them would flood the name-keyed reference store. The set also covers the
+// predeclared TYPE names: a conversion `string(b)` / `int64(n)` parses as a
+// call_expression with an identifier callee, identical to a builtin call,
+// so without these every conversion site would persist a junk ref. Resolved
+// calls escape the filter (see ignoredBareCallees), so a file-local
+// `clear()` / pre-1.21 `max()` — or a user type shadowing a predeclared
+// name — keeps its refs.
+const GO_IGNORED_BARE_CALLEES: ReadonlySet<string> = new Set([
+  // builtin functions
+  'append', 'cap', 'clear', 'close', 'complex', 'copy', 'delete', 'imag',
+  'len', 'make', 'max', 'min', 'new', 'panic', 'print', 'println', 'real',
+  'recover',
+  // predeclared types (conversion callees)
+  'bool', 'byte', 'rune', 'string', 'error', 'any', 'uintptr',
+  'int', 'int8', 'int16', 'int32', 'int64',
+  'uint', 'uint8', 'uint16', 'uint32', 'uint64',
+  'float32', 'float64', 'complex64', 'complex128',
+]);
+
+const GO_SELECTORS: ReadonlyArray<CallSelector> = [
+  { nodeType: 'call_expression', getCallee: (n) => n.childForFieldName('function') },
+  { nodeType: 'composite_literal', getCallee: compositeLiteralCallee },
+];
+
+// `Server{}` → type_identifier (bare constructor-form, binds via
+// constructorKinds); `Pair[K, V]{}` → generic_type wrapping the real type;
+// `pkg.Config{}` → qualified_type (member path). Slice/map/array literal
+// types (`[]Server{...}`) return null — the element type is buried and the
+// inner typed literals fire their own selectors.
+function compositeLiteralCallee(node: Node): Node | null {
+  let type = node.childForFieldName('type');
+  if (type?.type === 'generic_type') type = type.childForFieldName('type');
+  if (!type) return null;
+  if (type.type === 'type_identifier' || type.type === 'qualified_type') return type;
+  return null;
+}
+
+// Single-level member callees only, mirroring TS/Python/Java: `s.log()`
+// and `pkg.Func()` qualify; chained (`s.conn.Close()`), computed
+// (`f().g()`), and indexed receivers return null and emit nothing.
+// Never returns isSelf — Go has no this/self token; selfness is decided
+// in the engine by matching the receiver token against the enclosing
+// method's PendingBody.selfReceiverName.
+function goMemberCallInfo(callee: Node): MemberCallInfo | null {
+  if (callee.type === 'selector_expression') {
+    const operand = callee.childForFieldName('operand');
+    const field = callee.childForFieldName('field');
+    if (operand?.type !== 'identifier' || field?.type !== 'field_identifier') return null;
+    return { receiver: operand.text, property: field.text, isSelf: false };
+  }
+  // Qualified composite literal `pkg.Config{}` — the constructor analog of
+  // Java's `new pkg.Thing()` member path.
+  if (callee.type === 'qualified_type') {
+    const pkg = callee.childForFieldName('package');
+    const name = callee.childForFieldName('name');
+    if (!pkg || !name) return null;
+    return { receiver: pkg.text, property: name.text, isSelf: false };
+  }
+  return null;
+}
+
+// Per-file duplicate-id disambiguation. Multiple `func init()` in one file
+// are LEGAL Go and byte-identical in (name, kind, signature) — the only
+// language where the full-signature hash (v7) still collides by
+// construction. Repeats get an ordinal qualifier; ids shift only when an
+// EARLIER duplicate is added/removed, which is the best line-free option.
+type OccurrenceCounter = Map<string, number>;
+
+export function extractGo(
+  tree: Tree,
+  content: string,
+  fileInfo: FileInfo,
+): ExtractResult {
+  const symbols: Symbol[] = [];
+  const imports: ImportInfo[] = [];
+  const bodies: PendingBody[] = [];
+  const occurrences: OccurrenceCounter = new Map();
+
+  for (const child of tree.rootNode.namedChildren) {
+    switch (child.type) {
+      case 'import_declaration':
+        extractImport(child, fileInfo, imports);
+        break;
+      case 'function_declaration':
+        extractFunction(child, content, fileInfo, occurrences, symbols, bodies);
+        break;
+      case 'method_declaration':
+        extractMethod(child, content, fileInfo, occurrences, symbols, bodies);
+        break;
+      case 'type_declaration':
+        extractTypeDeclaration(child, content, fileInfo, occurrences, symbols);
+        break;
+      case 'const_declaration':
+        extractConstVar(child, 'const', content, fileInfo, occurrences, symbols, bodies);
+        break;
+      case 'var_declaration':
+        extractConstVar(child, 'var', content, fileInfo, occurrences, symbols, bodies);
+        break;
+      // package_clause, comments — no symbols.
+      default:
+        break;
+    }
+  }
+
+  // Same-file duplicate type names are invalid Go, so this only fires on
+  // broken parses — where refusing resolution beats binding through a
+  // half-parsed type (Java's nested-Builder rationale, kept as tolerance).
+  const ambiguousTypeNames = collectAmbiguousTypeNames(symbols, GO_TYPE_KINDS);
+
+  const references = resolveCalls(
+    bodies,
+    tree.rootNode,
+    symbols,
+    fileInfo,
+    GO_SELECTORS,
+    GO_SKIP_TYPES,
+    GO_FUNCTION_BODY_SKIP_TYPES,
+    goMemberCallInfo,
+    {
+      bareCalleeTypes: GO_BARE_CALLEE_TYPES,
+      // A bare `foo()` in a method body is a package-level call — Go has
+      // no implicit method receiver (the opposite of Java).
+      bareCallsBindToEnclosingClass: false,
+      bareCallableKinds: GO_BARE_CALLABLE_KINDS,
+      constructorKinds: GO_CONSTRUCTOR_KINDS,
+      ambiguousClassNames: ambiguousTypeNames,
+      ignoredBareCallees: GO_IGNORED_BARE_CALLEES,
+    },
+  );
+  return { symbols, references, imports };
+}
+
+function extractFunction(
+  decl: Node,
+  content: string,
+  fileInfo: FileInfo,
+  occurrences: OccurrenceCounter,
+  outSymbols: Symbol[],
+  outBodies: PendingBody[],
+): void {
+  const name = decl.childForFieldName('name')?.text;
+  // `func _() { ... }` is legal Go — stringer/enumer emit one such
+  // compile-time assertion per enum. The blank identifier is never a real
+  // symbol; skip it as every other extraction path does.
+  if (!name || name === '_') return;
+  const sym = makeGoSymbol(
+    decl,
+    declSignature(decl, content),
+    fileInfo,
+    'function',
+    name,
+    `${fileInfo.path}:${name}`,
+    isExportedName(name),
+    goDoc(decl),
+    occurrences,
+  );
+  outSymbols.push(sym);
+  // Assembly stubs (`func Stub(x int) int` with the body in a .s file)
+  // have no body field — the symbol is still extracted.
+  const body = decl.childForFieldName('body');
+  if (body) outBodies.push({ symbolId: sym.id, body });
+}
+
+function extractMethod(
+  decl: Node,
+  content: string,
+  fileInfo: FileInfo,
+  occurrences: OccurrenceCounter,
+  outSymbols: Symbol[],
+  outBodies: PendingBody[],
+): void {
+  const name = decl.childForFieldName('name')?.text;
+  // `func (s *T) _() {}` is legal (blank method); never a real symbol.
+  if (!name || name === '_') return;
+  const recv = receiverInfo(decl);
+  if (!recv) return;
+  // Exported by METHOD-name case only — an exported method on an
+  // unexported type is reachable through interfaces and embedding
+  // promotion, so the receiver type's case doesn't gate it.
+  const sym = makeGoSymbol(
+    decl,
+    declSignature(decl, content),
+    fileInfo,
+    'method',
+    name,
+    // FQN uses the receiver base type as the "class" — slots straight
+    // into classNameFromFqn/methodsByClass. The receiver type also goes
+    // into the hashed qualifier: same-name same-signature methods on
+    // different receivers already differ via the signature, but the
+    // qualifier keeps the id stable if signatures ever normalize closer.
+    `${fileInfo.path}:${recv.typeName}.${name}`,
+    isExportedName(name),
+    goDoc(decl),
+    occurrences,
+    recv.typeName,
+  );
+  outSymbols.push(sym);
+  const body = decl.childForFieldName('body');
+  if (body) {
+    outBodies.push({
+      symbolId: sym.id,
+      body,
+      className: recv.typeName,
+      selfReceiverName: recv.varName,
+    });
+  }
+}
+
+// First named child that isn't a comment. pointer_type / parenthesized_type
+// hold their wrapped type positionally, and tree-sitter-go attaches comments
+// as named extras, so a naive firstNamedChild can return the comment.
+function firstTypeChild(node: Node): Node | null {
+  for (const child of node.namedChildren) {
+    if (child && child.type !== 'comment') return child;
+  }
+  return null;
+}
+
+// Receiver base type and variable name. `func (s *Server)` → {Server, s};
+// `func (S) f()` / `func (_ *S) f()` → varName undefined (no token can
+// reference the receiver, so no self-call resolution either).
+function receiverInfo(decl: Node): { typeName: string; varName?: string } | null {
+  const receiver = decl.childForFieldName('receiver');
+  const param = receiver?.namedChildren.find((c) => c?.type === 'parameter_declaration');
+  if (!param) return null;
+  let type = param.childForFieldName('type');
+  // `*Server` → pointer_type wrapping the real type (no field name);
+  // `(T)` / `(*T)` → parenthesized_type (legal, if unusual, Go);
+  // `List[T]` → generic_type with the base name in its `type` field.
+  // Unwrap in any nesting order. pointer_type/parenthesized_type expose the
+  // wrapped type positionally — comments are NAMED extras in tree-sitter-go,
+  // so firstNamedChild can land on a comment (`* /*x*/ Server`) and silently
+  // drop the whole method; skip them.
+  for (;;) {
+    if (type?.type === 'pointer_type' || type?.type === 'parenthesized_type') {
+      type = firstTypeChild(type);
+    } else if (type?.type === 'generic_type') {
+      type = type.childForFieldName('type');
+    } else {
+      break;
+    }
+  }
+  if (type?.type !== 'type_identifier') return null;
+  const nameNode = param.childForFieldName('name');
+  const varName = nameNode && nameNode.text !== '_' ? nameNode.text : undefined;
+  return { typeName: type.text, varName };
+}
+
+// Symbol kinds for type_spec by the shape of its `type` field; anything
+// that isn't a struct or interface (defined types, function types, map
+// types...) is a plain 'type'.
+function typeSpecKind(typeNode: Node | null): SymbolKind {
+  if (typeNode?.type === 'struct_type') return 'class';
+  if (typeNode?.type === 'interface_type') return 'interface';
+  return 'type';
+}
+
+function extractTypeDeclaration(
+  decl: Node,
+  content: string,
+  fileInfo: FileInfo,
+  occurrences: OccurrenceCounter,
+  outSymbols: Symbol[],
+): void {
+  // Grouped `type ( A struct{...} ; B int )` puts the specs as direct
+  // children; `type A = B` is a distinct type_alias node, same fields.
+  const specs = decl.namedChildren.filter(
+    (c): c is Node => c?.type === 'type_spec' || c?.type === 'type_alias',
+  );
+  for (const spec of specs) {
+    const name = spec.childForFieldName('name')?.text;
+    if (!name) continue;
+    const typeNode = spec.childForFieldName('type');
+    const kind = spec.type === 'type_alias' ? 'type' : typeSpecKind(typeNode);
+    const exported = isExportedName(name);
+    outSymbols.push(
+      makeGoSymbol(
+        spec,
+        typeSpecSignature(spec, typeNode, content),
+        fileInfo,
+        kind,
+        name,
+        `${fileInfo.path}:${name}`,
+        exported,
+        // Ungrouped specs carry no preceding sibling inside the decl, so
+        // the doc sits on the declaration; grouped specs document
+        // individually (no group-comment fan-out — const/var rule).
+        goDoc(spec) ?? (specs.length === 1 ? goDoc(decl) : null),
+        occurrences,
+      ),
+    );
+    // Type bodies carry no executable code (no field initializers in Go),
+    // so unlike Java there is no type-body PendingBody.
+    if (typeNode?.type === 'struct_type') {
+      extractStructFields(typeNode, content, fileInfo, name, exported, occurrences, outSymbols);
+    } else if (typeNode?.type === 'interface_type') {
+      extractInterfaceMembers(typeNode, content, fileInfo, name, exported, occurrences, outSymbols);
+    }
+  }
+}
+
+function extractStructFields(
+  structType: Node,
+  content: string,
+  fileInfo: FileInfo,
+  typeName: string,
+  typeExported: boolean,
+  occurrences: OccurrenceCounter,
+  outSymbols: Symbol[],
+): void {
+  const list = structType.namedChildren.find((c) => c?.type === 'field_declaration_list');
+  if (!list) return;
+  for (const field of list.namedChildren) {
+    if (field?.type !== 'field_declaration') continue;
+    // Embedded fields (`io.Reader`, `*Conn`) have no name children — the
+    // promoted members belong to the embedded type, not this struct.
+    // Anonymous nested struct types are not recursed either (no FQN scheme
+    // below one member level).
+    const signature = normalizeSignature(field.text);
+    const doc = goDoc(field);
+    for (const nameNode of field.childrenForFieldName('name')) {
+      const fieldName = nameNode?.text;
+      if (!fieldName || fieldName === '_') continue;
+      outSymbols.push(
+        makeGoSymbol(
+          field,
+          signature,
+          fileInfo,
+          'variable',
+          fieldName,
+          `${fileInfo.path}:${typeName}.${fieldName}`,
+          typeExported && isExportedName(fieldName),
+          doc,
+          occurrences,
+          typeName,
+        ),
+      );
+    }
+  }
+}
+
+// Interface method specs are declaration-only members (Java-interface
+// precedent): they populate methodsByClass under the interface name, so
+// method expressions (`Shape.Area`) and same-named lookups resolve.
+// Embedded interfaces and type-set elements (type_elem) carry no name of
+// their own and are skipped.
+function extractInterfaceMembers(
+  ifaceType: Node,
+  content: string,
+  fileInfo: FileInfo,
+  ifaceName: string,
+  ifaceExported: boolean,
+  occurrences: OccurrenceCounter,
+  outSymbols: Symbol[],
+): void {
+  for (const member of ifaceType.namedChildren) {
+    if (member?.type !== 'method_elem') continue;
+    const name = member.childForFieldName('name')?.text;
+    if (!name) continue;
+    outSymbols.push(
+      makeGoSymbol(
+        member,
+        normalizeSignature(member.text),
+        fileInfo,
+        'method',
+        name,
+        `${fileInfo.path}:${ifaceName}.${name}`,
+        ifaceExported && isExportedName(name),
+        goDoc(member),
+        occurrences,
+        ifaceName,
+      ),
+    );
+  }
+}
+
+function extractConstVar(
+  decl: Node,
+  kindWord: 'const' | 'var',
+  content: string,
+  fileInfo: FileInfo,
+  occurrences: OccurrenceCounter,
+  outSymbols: Symbol[],
+  outBodies: PendingBody[],
+): void {
+  // Spec collection handles the grammar's asymmetry: const_declaration
+  // holds const_spec children DIRECTLY even when grouped, var_declaration
+  // wraps grouped specs in a var_spec_list.
+  const specs: Node[] = [];
+  for (const child of decl.namedChildren) {
+    if (!child) continue;
+    if (child.type === 'const_spec' || child.type === 'var_spec') specs.push(child);
+    else if (child.type === 'var_spec_list') {
+      for (const inner of child.namedChildren) {
+        if (inner?.type === 'var_spec') specs.push(inner);
+      }
+    }
+  }
+
+  for (const spec of specs) {
+    // const_spec (unlike var_spec/field_declaration) puts the WHOLE name
+    // list under the `name:` field, so the anonymous `,` tokens carry it
+    // too — filter to identifiers or `const A, B = 1, 2` grows a phantom
+    // symbol named ','.
+    const nameNodes = spec
+      .childrenForFieldName('name')
+      .filter((n): n is Node => n?.type === 'identifier');
+    const doc = goDoc(spec) ?? (specs.length === 1 ? goDoc(decl) : null);
+
+    // `var f = func(...) ... { ... }` is a function symbol, mirroring the
+    // TS arrow-const rule; its literal body becomes f's own PendingBody.
+    // const can't hold a func value, and multi-name specs stay variables.
+    if (kindWord === 'var' && nameNodes.length === 1) {
+      const literal = singleFuncLiteralValue(spec);
+      const name = nameNodes[0]?.text;
+      if (literal && name && name !== '_') {
+        const literalBody = literal.childForFieldName('body');
+        const raw = literalBody
+          ? content.slice(spec.startIndex, literalBody.startIndex)
+          : spec.text;
+        const sym = makeGoSymbol(
+          spec,
+          normalizeSignature(`${kindWord} ${raw}`),
+          fileInfo,
+          'function',
+          name,
+          `${fileInfo.path}:${name}`,
+          isExportedName(name),
+          doc,
+          occurrences,
+        );
+        outSymbols.push(sym);
+        if (literalBody) outBodies.push({ symbolId: sym.id, body: literalBody });
+        continue;
+      }
+    }
+
+    // One symbol per name (`var x, y = 1, 2` → two); the shared spec
+    // signature is fine — ids differ by name (Java declarator precedent).
+    const signature = normalizeSignature(`${kindWord} ${spec.text}`);
+    for (const nameNode of nameNodes) {
+      const name = nameNode.text;
+      if (!name || name === '_') continue;
+      outSymbols.push(
+        makeGoSymbol(
+          spec,
+          signature,
+          fileInfo,
+          'variable',
+          name,
+          `${fileInfo.path}:${name}`,
+          isExportedName(name),
+          doc,
+          occurrences,
+        ),
+      );
+    }
+  }
+}
+
+// The spec's value expression list when it is exactly one func_literal.
+function singleFuncLiteralValue(spec: Node): Node | null {
+  const value = spec.childForFieldName('value');
+  if (!value) return null;
+  const exprs = value.namedChildren;
+  if (exprs.length !== 1) return null;
+  return exprs[0]?.type === 'func_literal' ? exprs[0] : null;
+}
+
+function extractImport(decl: Node, fileInfo: FileInfo, out: ImportInfo[]): void {
+  // Single import → import_spec direct child; grouped → import_spec_list.
+  // One ImportInfo per spec keeps per-spec line attribution.
+  const specs: Node[] = [];
+  for (const child of decl.namedChildren) {
+    if (child?.type === 'import_spec') specs.push(child);
+    else if (child?.type === 'import_spec_list') {
+      for (const inner of child.namedChildren) {
+        if (inner?.type === 'import_spec') specs.push(inner);
+      }
+    }
+  }
+  for (const spec of specs) {
+    const pathNode = spec.childForFieldName('path');
+    if (!pathNode) continue;
+    // interpreted_string_literal or raw_string_literal — strip the quotes.
+    const sourceModule = pathNode.text.replace(/^["`]|["`]$/g, '');
+    if (!sourceModule) continue;
+
+    // Whole-package imports map to Python's `'module'` shape: the local
+    // binding is the package name (or alias), members reach top-level
+    // exports only. Dot imports ARE wildcard imports (`from x import *`),
+    // and blank imports get an inert '_' binding (it can never be a
+    // receiver or bare callee, so it matches nothing downstream).
+    const nameNode = spec.childForFieldName('name');
+    let imported: ImportedName;
+    if (!nameNode) {
+      imported = { name: defaultPackageName(sourceModule), kind: 'module' };
+    } else if (nameNode.type === 'dot') {
+      imported = { name: IMPORT_NAMESPACE };
+    } else if (nameNode.text === '_') {
+      imported = { name: '_', kind: 'module' };
+    } else {
+      imported = { name: defaultPackageName(sourceModule), alias: nameNode.text, kind: 'module' };
+    }
+    out.push({
+      file: fileInfo.path,
+      sourceModule,
+      importedNames: [imported],
+      line: spec.startPosition.row + 1,
+    });
+  }
+}
+
+// Best-effort package name from an import path. Wrong guesses fail open:
+// a receiver that matches no import falls to the weak-include branch
+// instead of being dropped.
+function defaultPackageName(importPath: string): string {
+  const segments = importPath.split('/');
+  let last = segments[segments.length - 1] ?? importPath;
+  // Module major-version suffix: `github.com/x/y/v2` → package y.
+  if (/^v\d+$/.test(last) && segments.length > 1) {
+    last = segments[segments.length - 2] ?? last;
+  }
+  // gopkg.in style: `gopkg.in/yaml.v2` → package yaml.
+  return last.replace(/\.v\d+$/, '');
+}
+
+// Exported in Go = first rune is an UPPERCASE LETTER — exact, no heuristic
+// caveat (\p{Lu} covers the unicode classes the spec names).
+function isExportedName(name: string): boolean {
+  return /^\p{Lu}/u.test(name);
+}
+
+function makeGoSymbol(
+  node: Node,
+  signature: string,
+  fileInfo: FileInfo,
+  kind: SymbolKind,
+  name: string,
+  fqn: string,
+  exported: boolean,
+  doc: string | null,
+  occurrences: OccurrenceCounter,
+  qualifier = '',
+): Symbol {
+  // Repeated identical (name, kind, signature, qualifier) tuples — legal
+  // only for `func init()` — get an ordinal so ids stay unique per file.
+  const key = `${name}\0${kind}\0${signature}\0${qualifier}`;
+  const n = (occurrences.get(key) ?? 0) + 1;
+  occurrences.set(key, n);
+  const effectiveQualifier = n === 1 ? qualifier : `${qualifier}#${n}`;
+  return {
+    // The id hashes the FULL signature; only the stored copy is capped.
+    id: symbolId(fileInfo.path, name, kind, signature, effectiveQualifier),
+    name,
+    fqn,
+    kind,
+    file: fileInfo.path,
+    startLine: node.startPosition.row + 1,
+    endLine: node.endPosition.row + 1,
+    signature: signature.slice(0, SIGNATURE_DISPLAY_CAP),
+    doc,
+    exported,
+    language: fileInfo.language,
+  };
+}
+
+// `type Server struct` / `type Handler interface` (keeps `[T any]` type
+// params, drops the member block); other specs keep their full text
+// (`type MyInt int`, `type A = B`). The uniform 'type ' prefix is added
+// here because grouped specs don't contain the keyword.
+function typeSpecSignature(spec: Node, typeNode: Node | null, content: string): string {
+  const bodyStart = typeBodyStart(typeNode);
+  const raw =
+    bodyStart !== null ? content.slice(spec.startIndex, bodyStart) : spec.text;
+  return normalizeSignature(`type ${raw}`);
+}
+
+// Where a struct/interface member block opens. struct_type wraps members
+// in a field_declaration_list; interface_type holds them directly, so the
+// anonymous '{' token is the marker (scanning children rather than text
+// keeps generic constraints containing braces out of the signature).
+function typeBodyStart(typeNode: Node | null): number | null {
+  if (typeNode?.type === 'struct_type') {
+    const list = typeNode.namedChildren.find((c) => c?.type === 'field_declaration_list');
+    return list ? list.startIndex : null;
+  }
+  if (typeNode?.type === 'interface_type') {
+    for (const child of typeNode.children) {
+      if (child?.type === '{') return child.startIndex;
+    }
+    return null;
+  }
+  return null;
+}
+
+// Godoc extraction — two deliberate divergences from extractJavaDoc:
+// the block must be ADJACENT (a blank line detaches it, per godoc), and
+// the FIRST line of the comment block wins, not the last comment node
+// (consecutive `//` lines are separate AST siblings; godoc's summary is
+// the block's opening sentence). `//go:` directives inside the block
+// (build tags, noinline, generate) are skipped wherever they sit.
+function goDoc(decl: Node): string | null {
+  const nearest = decl.previousNamedSibling;
+  if (!nearest || nearest.type !== 'comment') return null;
+  if (nearest.endPosition.row !== decl.startPosition.row - 1) return null;
+  if (isTrailingComment(nearest)) return null;
+  if (!nearest.text.startsWith('//')) return commentDocLine(nearest.text);
+
+  // Walk up the contiguous `//` chain (each comment exactly one line above
+  // the next, none of them trailing an earlier statement).
+  const chain: Node[] = [nearest];
+  for (;;) {
+    const bottom = chain[chain.length - 1];
+    if (!bottom) break;
+    const prev = bottom.previousNamedSibling;
+    if (
+      !prev ||
+      prev.type !== 'comment' ||
+      !prev.text.startsWith('//') ||
+      prev.endPosition.row !== bottom.startPosition.row - 1 ||
+      isTrailingComment(prev)
+    ) {
+      break;
+    }
+    chain.push(prev);
+  }
+  chain.reverse(); // document order
+  for (const comment of chain) {
+    if (isDirectiveComment(comment.text)) continue;
+    // Empty `//` separator lines yield null — keep scanning the block
+    // (godoc's summary is the first line with content).
+    const line = commentDocLine(comment.text);
+    if (line) return line;
+  }
+  return null;
+}
+
+// go/ast's directive rule (what go/doc strips from doc text): `//`
+// immediately followed by `word:x` — a [a-z0-9]+ tag, a colon, then a
+// [a-z0-9] char (//go:embed, //nolint:gocyclo) — or by `line `, with no
+// space after the slashes. The trailing-char requirement matters: `//see:
+// RFC` (space after colon) and `//https://x` (slash after colon) are prose
+// go/doc keeps, not directives.
+function isDirectiveComment(text: string): boolean {
+  return /^\/\/(line |[a-z0-9]+:[a-z0-9])/.test(text);
+}

@@ -110,7 +110,7 @@ const TS_FROM_JS_CANDIDATES: readonly string[] = [
 ];
 
 export const ENTRY_POINT_FILENAME_RE =
-  /^(index|main|app|server|cli|__main__|__init__)\.(ts|tsx|js|mjs|cjs|jsx|py|java)$/i;
+  /^(index|main|app|server|cli|__main__|__init__)\.(ts|tsx|js|mjs|cjs|jsx|py|java|go)$/i;
 
 // `symbol` is set when the caller is a declared source symbol; absent for
 // module-level call sites. Invariant: when `symbol` is set, `file` and
@@ -1011,6 +1011,23 @@ export class CodeIndex {
     }
     const importingFile = this.fileByPath.get(ref.file);
     if (!importingFile) return true;
+    // Go: files of one package call each other's top-level functions with
+    // NO import statement (the no-matching-import drop below would hide
+    // every sibling-file caller — the dominant Go call pattern). One
+    // directory = one package, so a same-directory bare ref is attributed
+    // directly — but only to a top-level Go target: a bare Go identifier
+    // can never bind to a same-named TS/Python symbol that happens to share
+    // the directory, nor to a struct FIELD or other member (members are
+    // reachable only through a receiver). `_test` files share the directory
+    // and slip through; acceptable — they really do call the target.
+    if (
+      !targetIsMember &&
+      importingFile.language === 'go' &&
+      this.fileByPath.get(targetFile)?.language === 'go' &&
+      posix.dirname(ref.file) === posix.dirname(targetFile)
+    ) {
+      return true;
+    }
     const imports = this.importsByFile.get(ref.file) ?? [];
     let hasUnresolvableMatch = false;
     for (const imp of imports) {
@@ -1237,6 +1254,17 @@ export function isCallerOf(ref: Reference, target: Symbol): boolean {
   if (ref.targetId !== null && ref.targetId !== target.id) return false;
   if (ref.targetId === null) {
     const isMember = ref.receiver !== undefined;
+    // Go package scope: a top-level name is unique within a package (one
+    // directory), so same-directory Go refs warrant two exceptions below —
+    // unexported MEMBERS are reachable package-wide, and a bare `Pairs{}`
+    // composite literal / `Pairs(x)` conversion can only mean THE type.
+    // Computed lazily: only the two carve-out branches consult it, and the
+    // dominant refs (exported members, bare function calls, short names)
+    // never reach them, so the dirname work is usually skipped.
+    const goSamePackage = (): boolean =>
+      target.language === 'go' &&
+      ref.file.endsWith('.go') &&
+      posix.dirname(ref.file) === posix.dirname(target.file);
     // Self-receiver refs (extractor-determined: TS `this` node, Python
     // self/cls) that extract-time resolution did NOT bind to a sibling
     // method can only target an inherited method — LSP territory. An
@@ -1246,10 +1274,14 @@ export function isCallerOf(ref: Reference, target: Symbol): boolean {
     // `save()` calls a top-level function, not `C.prototype.save`.
     // Member matches (`obj.save()`) ARE evidence for methods — the point
     // of member extraction — but still never for interface/type, which
-    // are never invoked at runtime.
+    // are never invoked at runtime. Go 'type'-kind symbols are the
+    // exception: a same-package BARE composite literal / conversion
+    // (`Pairs{}`, `Pairs(x)`) does target the type, and extract-time
+    // resolution covers same-file only.
     if (
       NON_CALLABLE_KINDS.has(target.kind) &&
-      !(isMember && target.kind === 'method')
+      !(isMember && target.kind === 'method') &&
+      !(!isMember && target.kind === 'type' && goSamePackage())
     ) {
       return false;
     }
@@ -1259,7 +1291,18 @@ export function isCallerOf(ref: Reference, target: Symbol): boolean {
     // Cross-file member access can only reach exported targets. (Python
     // exported-ness is the __all__/underscore heuristic, so legal
     // `utils._helper()` access is filtered — accepted Phase-1 precision.)
-    if (isMember && ref.file !== target.file && !target.exported) return false;
+    // Go same-package siblings reach unexported MEMBERS (methods and
+    // func-typed fields) legally — the member analog of the same-package
+    // bare carve-out. Gated on the target actually being a member: a member
+    // ref (`x.foo()`) can never reach a top-level function or variable.
+    if (
+      isMember &&
+      ref.file !== target.file &&
+      !target.exported &&
+      !(isClassMember(target) && goSamePackage())
+    ) {
+      return false;
+    }
   }
   return true;
 }

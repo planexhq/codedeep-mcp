@@ -16,6 +16,7 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   '.cjs': 'javascript',
   '.py': 'python',
   '.java': 'java',
+  '.go': 'go',
 };
 
 const BINARY_EXT = new Set([

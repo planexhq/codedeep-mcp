@@ -56,6 +56,7 @@ const LANGUAGE_DISPLAY: Readonly<Partial<Record<string, string>>> = {
   javascript: 'JavaScript',
   python: 'Python',
   java: 'Java',
+  go: 'Go',
 };
 
 const KIND_PLURAL: Record<SymbolKind, string> = {

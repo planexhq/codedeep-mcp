@@ -38,7 +38,7 @@ const EXPECTED_DEFAULT_EXCLUDES = [
   '.probe/cache/**',
 ];
 
-const EXPECTED_DEFAULT_LANGUAGES = ['typescript', 'tsx', 'javascript', 'python', 'java'];
+const EXPECTED_DEFAULT_LANGUAGES = ['typescript', 'tsx', 'javascript', 'python', 'java', 'go'];
 
 function writeConfig(root: string, contents: string): void {
   mkdirSync(join(root, '.probe'), { recursive: true });

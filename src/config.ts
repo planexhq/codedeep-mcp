@@ -24,7 +24,7 @@ const DEFAULT_EXCLUDES: readonly string[] = [
   '*.bundle.js',
 ];
 
-const DEFAULT_LANGUAGES: readonly string[] = ['typescript', 'tsx', 'javascript', 'python', 'java'];
+const DEFAULT_LANGUAGES: readonly string[] = ['typescript', 'tsx', 'javascript', 'python', 'java', 'go'];
 const DEFAULT_MAX_FILES = 100_000;
 const DEFAULT_MAX_FILE_SIZE = 1_048_576;
 const DEFAULT_GIT_WINDOW = 180;

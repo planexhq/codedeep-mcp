@@ -32,7 +32,7 @@ const FIXTURES_ROOT = join(
   'fixtures',
 );
 
-type FixtureName = 'small-ts' | 'small-py' | 'small-java';
+type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go';
 
 const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-ts': [
@@ -44,6 +44,7 @@ const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   ],
   'small-py': ['app/auth.py', 'app/models.py', 'app/service.py'],
   'small-java': ['Greeter.java', 'Shape.java', 'App.java'],
+  'small-go': ['greeter.go', 'shape.go', 'main.go'],
 };
 
 async function copyFixtureToTmp(
@@ -467,5 +468,93 @@ describe('integration: end-to-end pipeline + tools', () => {
       await runFindReferences({ file: 'Greeter.java', symbol: 'greet' }, deps)
     ).content[0].text;
     expect(sectionAfter(refs, '### Callers')).toContain('App.java:');
+  });
+
+  it('indexes the Go fixture end-to-end', async () => {
+    const { index } = await setup('small-go');
+
+    expect(index.getStats().totalFiles).toBe(3);
+
+    for (const name of [
+      'Greeter',
+      'NewGreeter',
+      'Greet',
+      'format',
+      'Shape',
+      'Area',
+      'Pi',
+      'Circle',
+      'Radius',
+      'defaultShape',
+      'main',
+    ]) {
+      expect(
+        index.findSymbolByName(name).length,
+        `expected to find symbol "${name}"`,
+      ).toBeGreaterThan(0);
+    }
+
+    // Receiver self-call edge resolved at extract time: Greet() → format().
+    const greet = index.findSymbolByName('Greet')[0]!;
+    const format = index.findSymbolByName('format')[0]!;
+    expect(index.getCallees(greet.id).map((s) => s.id)).toContain(format.id);
+
+    // Capitalization-based exported-ness.
+    expect(greet.exported).toBe(true);
+    expect(format.exported).toBe(false);
+
+    // Receiver type is the "class" in the member FQN.
+    expect(greet.fqn).toBe('greeter.go:Greeter.Greet');
+
+    // Composite-literal constructor edge: defaultShape() → Circle{...}.
+    const defaultShape = index.findSymbolByName('defaultShape')[0]!;
+    const circle = index
+      .findSymbolByName('Circle')
+      .find((s) => s.kind === 'class')!;
+    expect(index.getCallees(defaultShape.id).map((s) => s.id)).toContain(
+      circle.id,
+    );
+  });
+
+  it('overview shows Go language stats and the main.go entry point', async () => {
+    const deps = await setup('small-go');
+    const text = (await runOverview({}, deps)).content[0].text;
+
+    expect(text).toContain('- Go: 3 files (100%)');
+    expect(text).toContain('### Entry Points');
+    expect(text).toContain('main.go');
+  });
+
+  it('go tools: find_symbol, get_context callees, find_references callers', async () => {
+    const deps = await setup('small-go');
+
+    const found = (await runFindSymbol({ name: 'Greet' }, deps)).content[0]
+      .text;
+    expect(found).toContain('greeter.go:');
+    expect(found).toContain('| method');
+    expect(found).toContain('func (g *Greeter) Greet(name string) string');
+
+    const ctx = (
+      await runGetContext({ file: 'greeter.go', symbol: 'Greet' }, deps)
+    ).content[0].text;
+    expect(ctx).toContain('### Body');
+    expect(sectionAfter(ctx, '### Callees')).toContain('format');
+
+    // Cross-file member ref: main calls g.Greet(...) — unknown receiver,
+    // weakly included because the method target is exported.
+    const memberRefs = (
+      await runFindReferences({ file: 'greeter.go', symbol: 'Greet' }, deps)
+    ).content[0].text;
+    expect(sectionAfter(memberRefs, '### Callers')).toContain('main.go:');
+
+    // Cross-file BARE ref: main calls NewGreeter() with no import — the
+    // same-directory (= same package) carve-out attributes it.
+    const bareRefs = (
+      await runFindReferences(
+        { file: 'greeter.go', symbol: 'NewGreeter' },
+        deps,
+      )
+    ).content[0].text;
+    expect(sectionAfter(bareRefs, '### Callers')).toContain('main.go:');
   });
 });

@@ -7,6 +7,7 @@ import {
 import type { GitService } from '../git/git-service.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
+import { classNameFromFqn } from '../types.js';
 import type { ImportInfo, ProbeConfig, Symbol } from '../types.js';
 
 import {
@@ -377,9 +378,19 @@ async function renderFileMode(
   const header = `## File: ${file} (${lineCount} ${plural('line', lineCount)}, ${symbols.length} ${plural('symbol', symbols.length)})${indexedNote}`;
 
   // Methods/getters/setters inherit `exported` from their enclosing class;
-  // the file-mode outline lists only top-level definitions to avoid
-  // duplicating each class's surface area in the export list.
-  const topLevel = symbols.filter((s) => !isClassMember(s));
+  // the file-mode outline hides members to avoid duplicating each class's
+  // surface area in the export list — but only when that class is declared
+  // in THIS file. Go methods routinely live apart from their receiver type
+  // (handlers.go beside server.go); a methods-only file would otherwise
+  // render as "Exports (none)". TS/Py/Java members are always co-located
+  // with their class, so their outlines are unchanged.
+  const typeNamesInFile = new Set(
+    symbols.filter((s) => !isClassMember(s)).map((s) => s.name),
+  );
+  const topLevel = symbols.filter((s) => {
+    const cls = classNameFromFqn(s.fqn);
+    return cls === null || !typeNamesInFile.has(cls);
+  });
   const exported = topLevel.filter((s) => s.exported);
   const internal = topLevel.filter((s) => !s.exported);
 
@@ -437,7 +448,11 @@ function collectExportCallers(
 ): string[] {
   const byFile = new Map<string, Set<string>>();
   for (const exp of exportedSyms) {
-    for (const ref of index.getReferencesByNameOrAlias(exp.name, exp.file)) {
+    // Pass targetIsMember so member-ref scoping matches find_references
+    // exactly — the file-mode outline now admits members (a Go method whose
+    // receiver type lives in another file), and a `pkg.Method()` module call
+    // must not be scoped as if it could reach a member.
+    for (const ref of index.getReferencesByNameOrAlias(exp.name, exp.file, isClassMember(exp))) {
       if (!isCallerOf(ref, exp)) continue;
       let set = byFile.get(ref.file);
       if (!set) {
