@@ -61,11 +61,11 @@ describe('parser', () => {
   it('returns null for an unsupported language and logs a warning', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const tree = parseFile('fn main() {}', 'rust');
+      const tree = parseFile('puts 1', 'ruby');
       expect(tree).toBeNull();
 
       const warned = stderr.mock.calls.some((c) =>
-        String(c[0]).includes('unsupported language "rust"'),
+        String(c[0]).includes('unsupported language "ruby"'),
       );
       expect(warned).toBe(true);
     } finally {

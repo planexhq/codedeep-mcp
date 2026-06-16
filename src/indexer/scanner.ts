@@ -17,6 +17,7 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   '.py': 'python',
   '.java': 'java',
   '.go': 'go',
+  '.rs': 'rust',
 };
 
 const BINARY_EXT = new Set([

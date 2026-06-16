@@ -32,7 +32,7 @@ const FIXTURES_ROOT = join(
   'fixtures',
 );
 
-type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go';
+type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust';
 
 const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-ts': [
@@ -45,6 +45,7 @@ const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-py': ['app/auth.py', 'app/models.py', 'app/service.py'],
   'small-java': ['Greeter.java', 'Shape.java', 'App.java'],
   'small-go': ['greeter.go', 'shape.go', 'main.go'],
+  'small-rust': ['lib.rs', 'shape.rs', 'main.rs'],
 };
 
 async function copyFixtureToTmp(
@@ -556,5 +557,94 @@ describe('integration: end-to-end pipeline + tools', () => {
       )
     ).content[0].text;
     expect(sectionAfter(bareRefs, '### Callers')).toContain('main.go:');
+  });
+
+  it('indexes the Rust fixture end-to-end', async () => {
+    const { index } = await setup('small-rust');
+
+    expect(index.getStats().totalFiles).toBe(3);
+
+    for (const name of [
+      'Greeter',
+      'new',
+      'greet',
+      'format',
+      'normalize',
+      'MAX_LEN',
+      'util',
+      'helper',
+      'Shape',
+      'Circle',
+      'area',
+      'Kind',
+      'default_circle',
+      'main',
+    ]) {
+      expect(
+        index.findSymbolByName(name).length,
+        `expected to find symbol "${name}"`,
+      ).toBeGreaterThan(0);
+    }
+
+    // self-call edge resolved at extract time: greet() → self.format().
+    const greet = index.findSymbolByName('greet')[0]!;
+    const format = index.findSymbolByName('format')[0]!;
+    expect(index.getCallees(greet.id).map((s) => s.id)).toContain(format.id);
+
+    // bare call edge within a file: format() → normalize().
+    const normalize = index.findSymbolByName('normalize')[0]!;
+    expect(index.getCallees(format.id).map((s) => s.id)).toContain(normalize.id);
+
+    // struct-expression constructor edge: default_circle() → Circle { .. }.
+    const defaultCircle = index.findSymbolByName('default_circle')[0]!;
+    const circle = index
+      .findSymbolByName('Circle')
+      .find((s) => s.kind === 'class')!;
+    expect(index.getCallees(defaultCircle.id).map((s) => s.id)).toContain(
+      circle.id,
+    );
+
+    // module recursion: util::helper() → util::inner_helper().
+    const helper = index.findSymbolByName('helper')[0]!;
+    const innerHelper = index.findSymbolByName('inner_helper')[0]!;
+    expect(index.getCallees(helper.id).map((s) => s.id)).toContain(
+      innerHelper.id,
+    );
+
+    // `pub fn` is exported; a private `fn` is not. The impl method's "class"
+    // is the implementing type.
+    expect(greet.exported).toBe(true);
+    expect(format.exported).toBe(false);
+    expect(greet.fqn).toBe('lib.rs:Greeter.greet');
+  });
+
+  it('overview shows Rust language stats and the main.rs entry point', async () => {
+    const deps = await setup('small-rust');
+    const text = (await runOverview({}, deps)).content[0].text;
+
+    expect(text).toContain('- Rust: 3 files (100%)');
+    expect(text).toContain('### Entry Points');
+    expect(text).toContain('main.rs');
+  });
+
+  it('rust tools: find_symbol, get_context callees, cross-file member callers', async () => {
+    const deps = await setup('small-rust');
+
+    const found = (await runFindSymbol({ name: 'greet' }, deps)).content[0].text;
+    expect(found).toContain('lib.rs:');
+    expect(found).toContain('| method');
+    expect(found).toContain('pub fn greet(&self, name: &str) -> String');
+
+    const ctx = (await runGetContext({ file: 'lib.rs', symbol: 'greet' }, deps))
+      .content[0].text;
+    expect(ctx).toContain('### Body');
+    expect(sectionAfter(ctx, '### Callees')).toContain('format');
+
+    // Cross-file member ref: main calls g.greet(...) — unknown receiver,
+    // weakly included because the method target is exported.
+    const memberRefs = (
+      await runFindReferences({ file: 'lib.rs', symbol: 'greet' }, deps)
+    ).content[0].text;
+    expect(sectionAfter(memberRefs, '### Callers')).toContain('main.rs:');
   });
 });

@@ -36,10 +36,10 @@ describe('extractSymbols dispatcher', () => {
     const tree = parseFile('const x = 1;', 'typescript')!;
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const result = extractSymbols(tree, 'const x = 1;', makeFileInfo('rust'));
+      const result = extractSymbols(tree, 'const x = 1;', makeFileInfo('ruby'));
       expect(result).toEqual({ symbols: [], references: [], imports: [] });
       const warned = stderr.mock.calls.some((c) =>
-        String(c[0]).includes('unsupported language "rust"'),
+        String(c[0]).includes('unsupported language "ruby"'),
       );
       expect(warned).toBe(true);
     } finally {

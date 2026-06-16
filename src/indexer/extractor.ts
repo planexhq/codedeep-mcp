@@ -6,6 +6,7 @@ import { NON_CALLABLE_KINDS, classNameFromFqn } from '../types.js';
 import type { FileInfo, ImportInfo, Reference, Symbol } from '../types.js';
 import { extractGo } from './languages/go.js';
 import { extractJava } from './languages/java.js';
+import { extractRust } from './languages/rust.js';
 import { extractPython } from './languages/python.js';
 import { extractTypeScript } from './languages/typescript.js';
 
@@ -124,6 +125,8 @@ export function extractSymbols(
       return extractJava(tree, content, fileInfo);
     case 'go':
       return extractGo(tree, content, fileInfo);
+    case 'rust':
+      return extractRust(tree, content, fileInfo);
     default:
       log.warn(`extractSymbols: unsupported language "${fileInfo.language}"`);
       return { symbols: [], references: [], imports: [] };
