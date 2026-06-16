@@ -10,6 +10,9 @@
 export const ALLOWED_TARGET_KINDS: Record<string, ReadonlySet<string>> = {
   java: new Set(['method', 'class', 'interface']),
   go: new Set(['function', 'method', 'class', 'type']),
+  // struct/union→class, trait→interface, enum, type alias→type; bare calls
+  // and Self/Type:: associated-fn calls resolve to function/method.
+  rust: new Set(['function', 'method', 'class', 'interface', 'enum', 'type']),
 };
 
 // The language list, for skip messages and per-language iteration.

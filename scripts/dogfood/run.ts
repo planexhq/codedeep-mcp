@@ -115,6 +115,7 @@ function detectGaps(
   const hasTS = (langs.typescript ?? 0) + (langs.tsx ?? 0) > 0;
   const hasPy = (langs.python ?? 0) > 0;
   const hasJava = (langs.java ?? 0) > 0;
+  const hasRust = (langs.rust ?? 0) > 0;
 
   const threw = calls.filter((c) => c.notes.includes('handler-threw'));
   if (threw.length) {
@@ -211,6 +212,27 @@ function detectGaps(
     }
   }
 
+  if (hasRust) {
+    const kinds = stats.symbolsByKind;
+    const typeSymbols = (kinds.class ?? 0) + (kinds.interface ?? 0) + (kinds.enum ?? 0);
+    const typeDeclsInSource = rgCount(
+      dir,
+      '^\\s*(pub(\\([^)]*\\))?\\s+)?(struct|enum|trait|union)\\s',
+      '*.rs',
+    );
+    if (typeDeclsInSource === null) {
+      gaps.push('ℹ️ ripgrep unavailable — Rust type-extraction probe skipped');
+    } else if (typeDeclsInSource > 0 && typeSymbols === 0) {
+      gaps.push(`🟠 P1: ${typeDeclsInSource} Rust type declaration(s) in source but 0 class/interface/enum symbols indexed`);
+    }
+    // Info: macros are findable as symbols, but their invocations emit no call
+    // refs (token-tree args are opaque to tree-sitter) — characterizes recall.
+    const macros = rgCount(dir, '^\\s*macro_rules!\\s', '*.rs') ?? 0;
+    if (macros > 0) {
+      gaps.push(`ℹ️ Rust: ${macros} macro_rules! definition(s) — extracted as findable symbols; macro INVOCATIONS emit no call refs (token-tree args opaque)`);
+    }
+  }
+
   const edge = oracles.find((o) => o.oracle === 'resolved-edge' && o.verdict === 'suspicious');
   if (edge) gaps.push(`🔴 P0: resolved-edge — ${edge.detail}`);
 
@@ -236,7 +258,7 @@ function detectGaps(
   }
 
   const unknownCount = langs.unknown ?? 0;
-  if (repo.lang === 'rust' && unknownCount > 0) {
+  if (repo.lang === 'ruby' && unknownCount > 0) {
     const recognized = env.index.getStats().totalFiles - unknownCount;
     gaps.push(`✅ unsupported-language graceful: ${unknownCount} ${repo.lang} (+other) files scanned, 0 parsed; ${recognized} recognized source file(s)`);
   }

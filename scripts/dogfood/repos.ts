@@ -81,6 +81,24 @@ export const REPOS: RepoSpec[] = [
     name: 'fd',
     url: 'https://github.com/sharkdp/fd.git',
     lang: 'rust',
+    dimension: 'Rust baseline: impl-block methods, self/Self/Type:: resolution, struct-expression ctors, trait impls, modules, Some/Ok/Err filtering',
+  },
+  {
+    name: 'ripgrep',
+    url: 'https://github.com/BurntSushi/ripgrep.git',
+    lang: 'rust',
+    dimension: 'Rust workspace scale: multi-crate modules, trait/impl-heavy, crate:: multi-segment path-call cross-file recall, ~4k symbols',
+  },
+  {
+    name: 'serde',
+    url: 'https://github.com/serde-rs/serde.git',
+    lang: 'rust',
+    dimension: 'Rust proc-macro/derive heavy: trait-dense, declaration-only crates, generic bounds, associated types/consts',
+  },
+  {
+    name: 'sinatra',
+    url: 'https://github.com/sinatra/sinatra.git',
+    lang: 'ruby',
     dimension: 'UNSUPPORTED language -> scanned, zero symbols; Other-files accuracy; pattern-mode refusal',
   },
   {

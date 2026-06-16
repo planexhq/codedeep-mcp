@@ -24,6 +24,7 @@ const LANG_GLOB: Record<string, string> = {
   python: '*.py',
   java: '*.java',
   go: '*.go',
+  rust: '*.rs',
 };
 
 const DECL_RE: Record<string, string> = {
@@ -39,6 +40,10 @@ const DECL_RE: Record<string, string> = {
   // interface members (one symbol per NAME in grouped specs), so the ratio
   // runs above 1 like Java's; suspicious fires only on symbols === 0.
   go: '^\\s*(func|type|const|var)\\s',
+  // Top-level decl keywords only — probe also extracts struct/union fields,
+  // trait/impl members, and recurses modules, so the ratio runs above 1 like
+  // Java's/Go's; suspicious fires only on symbols === 0.
+  rust: '^\\s*(pub(\\([^)]*\\))?\\s+)?(async\\s+)?(unsafe\\s+)?(fn|struct|enum|trait|impl|type|const|static|union|mod|macro_rules!)\\s',
 };
 
 // null = rg unusable on this machine; the density check is skipped rather
