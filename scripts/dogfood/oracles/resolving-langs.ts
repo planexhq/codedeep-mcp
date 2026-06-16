@@ -13,6 +13,9 @@ export const ALLOWED_TARGET_KINDS: Record<string, ReadonlySet<string>> = {
   // struct/union→class, trait→interface, enum, type alias→type; bare calls
   // and Self/Type:: associated-fn calls resolve to function/method.
   rust: new Set(['function', 'method', 'class', 'interface', 'enum', 'type']),
+  // bare calls → function; member/self/Self/static calls → method;
+  // construction Type(...) resolves to the class (struct/actor/class→class).
+  swift: new Set(['function', 'method', 'class']),
 };
 
 // The language list, for skip messages and per-language iteration.

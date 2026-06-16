@@ -116,6 +116,7 @@ function detectGaps(
   const hasPy = (langs.python ?? 0) > 0;
   const hasJava = (langs.java ?? 0) > 0;
   const hasRust = (langs.rust ?? 0) > 0;
+  const hasSwift = (langs.swift ?? 0) > 0;
 
   const threw = calls.filter((c) => c.notes.includes('handler-threw'));
   if (threw.length) {
@@ -230,6 +231,29 @@ function detectGaps(
     const macros = rgCount(dir, '^\\s*macro_rules!\\s', '*.rs') ?? 0;
     if (macros > 0) {
       gaps.push(`ℹ️ Rust: ${macros} macro_rules! definition(s) — extracted as findable symbols; macro INVOCATIONS emit no call refs (token-tree args opaque)`);
+    }
+  }
+
+  if (hasSwift) {
+    const kinds = stats.symbolsByKind;
+    const typeSymbols = (kinds.class ?? 0) + (kinds.interface ?? 0) + (kinds.enum ?? 0);
+    const typeDeclsInSource = rgCount(
+      dir,
+      '^\\s*((public|private|internal|fileprivate|open|final)\\s+)*(class|struct|actor|enum|protocol)\\s',
+      '*.swift',
+    );
+    if (typeDeclsInSource === null) {
+      gaps.push('ℹ️ ripgrep unavailable — Swift type-extraction probe skipped');
+    } else if (typeDeclsInSource > 0 && typeSymbols === 0) {
+      gaps.push(`🟠 P1: ${typeDeclsInSource} Swift type declaration(s) in source but 0 class/interface/enum symbols indexed`);
+    }
+    // Info: extensions are methods-apart (members keyed on the extended type,
+    // like Go receivers); macro INVOCATIONS and #if-guarded decls characterize
+    // recall (calls inside macro args are opaque; #if directive lines are ERROR
+    // nodes but the guarded declarations still extract).
+    const extensions = rgCount(dir, '^\\s*(public\\s+|private\\s+|internal\\s+|fileprivate\\s+)?extension\\s', '*.swift') ?? 0;
+    if (extensions > 0) {
+      gaps.push(`ℹ️ Swift: ${extensions} extension(s) — methods/properties extracted as members of their extended type (methods-apart)`);
     }
   }
 

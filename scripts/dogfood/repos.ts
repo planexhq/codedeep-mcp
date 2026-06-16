@@ -96,6 +96,30 @@ export const REPOS: RepoSpec[] = [
     dimension: 'Rust proc-macro/derive heavy: trait-dense, declaration-only crates, generic bounds, associated types/consts',
   },
   {
+    name: 'swift-argument-parser',
+    url: 'https://github.com/apple/swift-argument-parser.git',
+    lang: 'swift',
+    dimension: 'Swift baseline (small/idiomatic): struct/enum/protocol-dense, extensions methods-apart, computed properties, init resolution, internal-default exportedness',
+  },
+  {
+    name: 'alamofire',
+    url: 'https://github.com/Alamofire/Alamofire.git',
+    lang: 'swift',
+    dimension: 'Swift networking lib: class/protocol/extension density, closures descended, property observers, construction-as-call (Type()) edges',
+  },
+  {
+    name: 'swift-nio',
+    url: 'https://github.com/apple/swift-nio.git',
+    lang: 'swift',
+    dimension: 'Swift scale: large multi-module, generics/inout-heavy, actors, deep protocol/extension hierarchies',
+  },
+  {
+    name: 'vapor',
+    url: 'https://github.com/vapor/vapor.git',
+    lang: 'swift',
+    dimension: 'Swift server framework: protocol/extension-heavy, result builders, async/throws, property wrappers',
+  },
+  {
     name: 'sinatra',
     url: 'https://github.com/sinatra/sinatra.git',
     lang: 'ruby',

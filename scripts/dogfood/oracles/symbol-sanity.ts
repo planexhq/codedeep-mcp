@@ -25,6 +25,7 @@ const LANG_GLOB: Record<string, string> = {
   java: '*.java',
   go: '*.go',
   rust: '*.rs',
+  swift: '*.swift',
 };
 
 const DECL_RE: Record<string, string> = {
@@ -44,6 +45,10 @@ const DECL_RE: Record<string, string> = {
   // trait/impl members, and recurses modules, so the ratio runs above 1 like
   // Java's/Go's; suspicious fires only on symbols === 0.
   rust: '^\\s*(pub(\\([^)]*\\))?\\s+)?(async\\s+)?(unsafe\\s+)?(fn|struct|enum|trait|impl|type|const|static|union|mod|macro_rules!)\\s',
+  // Top-level decl keywords only — probe also extracts members (methods,
+  // properties, extension methods keyed apart), so the ratio runs above 1
+  // like Java's/Go's/Rust's; suspicious fires only on symbols === 0.
+  swift: '^\\s*((public|private|internal|fileprivate|open|final|indirect)\\s+)*(class|struct|actor|enum|protocol|extension|func|typealias)\\s',
 };
 
 // null = rg unusable on this machine; the density check is skipped rather
