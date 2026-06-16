@@ -69,6 +69,18 @@ export const REPOS: RepoSpec[] = [
     name: 'gin',
     url: 'https://github.com/gin-gonic/gin.git',
     lang: 'go',
+    dimension: 'Go baseline: receiver self-call resolution, composite-literal refs, capitalization exportedness, builtin filtering, same-package carve-out',
+  },
+  {
+    name: 'cobra',
+    url: 'https://github.com/spf13/cobra.git',
+    lang: 'go',
+    dimension: 'light Go CLI lib: method-heavy Command type, _test.go files indexed, grouped const/var blocks',
+  },
+  {
+    name: 'fd',
+    url: 'https://github.com/sharkdp/fd.git',
+    lang: 'rust',
     dimension: 'UNSUPPORTED language -> scanned, zero symbols; Other-files accuracy; pattern-mode refusal',
   },
   {

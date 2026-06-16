@@ -23,6 +23,7 @@ const LANG_GLOB: Record<string, string> = {
   javascript: '*.{js,jsx,mjs,cjs}',
   python: '*.py',
   java: '*.java',
+  go: '*.go',
 };
 
 const DECL_RE: Record<string, string> = {
@@ -34,6 +35,10 @@ const DECL_RE: Record<string, string> = {
   // probe/naive ratio runs well above 1 for Java (info-only, same accepted
   // skew as TS; suspicious fires only on symbols === 0).
   java: '^\\s*((public|protected|private|abstract|final|static|sealed|non-sealed|strictfp)\\s+)*(class|interface|enum|record|@interface)\\s',
+  // Top-level decl keywords only — probe also extracts struct fields and
+  // interface members (one symbol per NAME in grouped specs), so the ratio
+  // runs above 1 like Java's; suspicious fires only on symbols === 0.
+  go: '^\\s*(func|type|const|var)\\s',
 };
 
 // null = rg unusable on this machine; the density check is skipped rather

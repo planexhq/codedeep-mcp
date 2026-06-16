@@ -215,7 +215,10 @@ function detectGaps(
   if (edge) gaps.push(`🔴 P0: resolved-edge — ${edge.detail}`);
 
   const bareBroke = oracles.find(
-    (o) => o.oracle === 'resolution-rate' && o.target.startsWith('bare') && o.verdict === 'suspicious',
+    (o) =>
+      o.oracle === 'resolution-rate' &&
+      o.target.includes('bare call resolution') &&
+      o.verdict === 'suspicious',
   );
   if (bareBroke) gaps.push(`🟠 P1: bare-call resolution collapsed — ${bareBroke.detail}`);
 
@@ -233,7 +236,7 @@ function detectGaps(
   }
 
   const unknownCount = langs.unknown ?? 0;
-  if ((repo.lang === 'go' || repo.lang === 'rust') && unknownCount > 0) {
+  if (repo.lang === 'rust' && unknownCount > 0) {
     const recognized = env.index.getStats().totalFiles - unknownCount;
     gaps.push(`✅ unsupported-language graceful: ${unknownCount} ${repo.lang} (+other) files scanned, 0 parsed; ${recognized} recognized source file(s)`);
   }
