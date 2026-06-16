@@ -7,6 +7,7 @@ import type { FileInfo, ImportInfo, Reference, Symbol } from '../types.js';
 import { extractGo } from './languages/go.js';
 import { extractJava } from './languages/java.js';
 import { extractRust } from './languages/rust.js';
+import { extractSwift } from './languages/swift.js';
 import { extractPython } from './languages/python.js';
 import { extractTypeScript } from './languages/typescript.js';
 
@@ -94,6 +95,15 @@ export interface ResolveCallsOptions {
   // routinely defines its own max/min/clear, so a file-local definition
   // still gets its refs.
   ignoredBareCallees?: ReadonlySet<string>;
+  // Callee node type treated as a plain bare name — resolved via the
+  // enclosing-class fallback then nameToId, and subject to ignoredBareCallees.
+  // Every OTHER bareCalleeType is constructor-form (resolves via
+  // constructorKinds/typeNameToId only). Defaults to 'identifier'
+  // (TS/JS/Py/Java/Go/Rust). Swift passes 'simple_identifier': its bare and
+  // constructor callees are both `simple_identifier` nodes (no separate
+  // construction node), so without this they'd misroute to the constructor-form
+  // branch and never resolve to functions or implicit-self methods.
+  plainCalleeType?: string;
 }
 
 const DEFAULT_BARE_CALLEE_TYPES: ReadonlySet<string> = new Set(['identifier']);
@@ -127,6 +137,8 @@ export function extractSymbols(
       return extractGo(tree, content, fileInfo);
     case 'rust':
       return extractRust(tree, content, fileInfo);
+    case 'swift':
+      return extractSwift(tree, content, fileInfo);
     default:
       log.warn(`extractSymbols: unsupported language "${fileInfo.language}"`);
       return { symbols: [], references: [], imports: [] };
@@ -245,6 +257,7 @@ export function resolveCalls(
   const constructorKinds = opts?.constructorKinds;
   const ambiguousClassNames = opts?.ambiguousClassNames;
   const ignoredBareCallees = opts?.ignoredBareCallees;
+  const plainCalleeType = opts?.plainCalleeType ?? 'identifier';
   const nameToId = new Map<string, string>();
   for (const sym of symbols) {
     if (bareCallableKinds ? !bareCallableKinds.has(sym.kind) : NON_CALLABLE_KINDS.has(sym.kind)) {
@@ -300,7 +313,7 @@ export function resolveCalls(
       // when configured, then the callable-name map. Either way the ref
       // stays a plain bare ref — the call site has no receiver token.
       const targetId =
-        callee.type !== 'identifier'
+        callee.type !== plainCalleeType
           ? typeNameToId.get(targetName) ?? null
           : ((bindToEnclosingClass && className !== undefined
               ? methodsByClass.get(className)?.get(targetName)
@@ -310,7 +323,7 @@ export function resolveCalls(
       // Ignored names (Go builtins) are dropped only when unresolved — the
       // node is already in seenCallNodeIds, so the moduleRoot re-walk stays
       // cheap and never re-emits it.
-      if (targetId === null && callee.type === 'identifier' && ignoredBareCallees?.has(targetName)) {
+      if (targetId === null && callee.type === plainCalleeType && ignoredBareCallees?.has(targetName)) {
         return;
       }
       references.push({

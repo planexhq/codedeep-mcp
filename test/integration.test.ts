@@ -32,7 +32,7 @@ const FIXTURES_ROOT = join(
   'fixtures',
 );
 
-type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust';
+type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift';
 
 const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-ts': [
@@ -46,6 +46,7 @@ const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-java': ['Greeter.java', 'Shape.java', 'App.java'],
   'small-go': ['greeter.go', 'shape.go', 'main.go'],
   'small-rust': ['lib.rs', 'shape.rs', 'main.rs'],
+  'small-swift': ['greeter.swift', 'shape.swift', 'main.swift'],
 };
 
 async function copyFixtureToTmp(
@@ -646,5 +647,92 @@ describe('integration: end-to-end pipeline + tools', () => {
       await runFindReferences({ file: 'lib.rs', symbol: 'greet' }, deps)
     ).content[0].text;
     expect(sectionAfter(memberRefs, '### Callers')).toContain('main.rs:');
+  });
+
+  it('indexes the Swift fixture end-to-end', async () => {
+    const { index } = await setup('small-swift');
+
+    expect(index.getStats().totalFiles).toBe(3);
+
+    for (const name of [
+      'Greeter',
+      'init',
+      'greet',
+      'format',
+      'normalize',
+      'MAX_LEN',
+      'summary',
+      'Shape',
+      'Circle',
+      'area',
+      'Kind',
+      'label',
+      'defaultCircle',
+    ]) {
+      expect(
+        index.findSymbolByName(name).length,
+        `expected to find symbol "${name}"`,
+      ).toBeGreaterThan(0);
+    }
+
+    // implicit-self bare call edge: greet() → format().
+    const greet = index.findSymbolByName('greet')[0]!;
+    const format = index.findSymbolByName('format')[0]!;
+    expect(index.getCallees(greet.id).map((s) => s.id)).toContain(format.id);
+
+    // bare call edge within a file: format() → normalize().
+    const normalize = index.findSymbolByName('normalize')[0]!;
+    expect(index.getCallees(format.id).map((s) => s.id)).toContain(normalize.id);
+
+    // construction edge: defaultCircle() → Circle(radius:).
+    const defaultCircle = index.findSymbolByName('defaultCircle')[0]!;
+    const circle = index.findSymbolByName('Circle').find((s) => s.kind === 'class')!;
+    expect(index.getCallees(defaultCircle.id).map((s) => s.id)).toContain(circle.id);
+
+    // computed-property body self-call: summary → Greeter.describe.
+    const summary = index.findSymbolByName('summary')[0]!;
+    const greeterDescribe = index
+      .findSymbolByName('describe')
+      .find((s) => s.fqn === 'greeter.swift:Greeter.describe')!;
+    expect(index.getCallees(summary.id).map((s) => s.id)).toContain(greeterDescribe.id);
+
+    // extension self-call merged into the type: label → Circle.describe.
+    const label = index.findSymbolByName('label')[0]!;
+    const circleDescribe = index
+      .findSymbolByName('describe')
+      .find((s) => s.fqn === 'shape.swift:Circle.describe')!;
+    expect(index.getCallees(label.id).map((s) => s.id)).toContain(circleDescribe.id);
+
+    // exportedness: public exported, private not, internal (label) exported.
+    expect(greet.exported).toBe(true);
+    expect(format.exported).toBe(false);
+    expect(label.exported).toBe(true);
+    expect(greet.fqn).toBe('greeter.swift:Greeter.greet');
+  });
+
+  it('overview shows Swift language stats', async () => {
+    const deps = await setup('small-swift');
+    const text = (await runOverview({}, deps)).content[0].text;
+    expect(text).toContain('- Swift: 3 files (100%)');
+  });
+
+  it('swift tools: find_symbol, get_context callees, cross-file member callers', async () => {
+    const deps = await setup('small-swift');
+
+    const found = (await runFindSymbol({ name: 'greet' }, deps)).content[0].text;
+    expect(found).toContain('greeter.swift:');
+    expect(found).toContain('| method');
+
+    const ctx = (await runGetContext({ file: 'greeter.swift', symbol: 'greet' }, deps))
+      .content[0].text;
+    expect(ctx).toContain('### Body');
+    expect(sectionAfter(ctx, '### Callees')).toContain('format');
+
+    // Cross-file member ref: main.swift calls g.greet(...) — unknown receiver,
+    // weakly included because the method target is exported.
+    const memberRefs = (
+      await runFindReferences({ file: 'greeter.swift', symbol: 'greet' }, deps)
+    ).content[0].text;
+    expect(sectionAfter(memberRefs, '### Callers')).toContain('main.swift:');
   });
 });

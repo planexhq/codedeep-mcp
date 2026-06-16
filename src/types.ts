@@ -67,7 +67,11 @@ export function classNameFromFqn(fqn: string): string | null {
   if (colon === -1) return null;
   const dot = fqn.indexOf('.', colon + 1);
   if (dot === -1) return null;
-  return fqn.slice(colon + 1, dot);
+  // Empty class segment means the dot belongs to the SYMBOL name, not a member
+  // separator — e.g. a top-level Swift operator function `func .*` has FQN
+  // `file:.*`. Treat it as top-level (null), not a member of class "".
+  const cls = fqn.slice(colon + 1, dot);
+  return cls === '' ? null : cls;
 }
 
 export interface Symbol {

@@ -15,6 +15,7 @@ const wanted = [
   "tree-sitter-java.wasm",
   "tree-sitter-go.wasm",
   "tree-sitter-rust.wasm",
+  "tree-sitter-swift.wasm",
 ];
 
 let present;

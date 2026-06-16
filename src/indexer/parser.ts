@@ -20,10 +20,32 @@ const LANG_TO_WASM: Record<string, string> = {
   java: 'tree-sitter-java.wasm',
   go: 'tree-sitter-go.wasm',
   rust: 'tree-sitter-rust.wasm',
+  swift: 'tree-sitter-swift.wasm',
 };
 
 const parsers = new Map<string, Parser>();
 let initPromise: Promise<void> | null = null;
+
+// Conditional-compilation directive lines (#if / #elseif / #else / #endif).
+// `m` matches ^/$ per line; without `s`, `.*` stays within one line.
+const SWIFT_DIRECTIVE_LINE = /^[ \t]*#(?:if|elseif|else|endif)\b.*$/gm;
+
+// tree-sitter-swift cannot parse a #if/#endif conditional-compilation block
+// INSIDE a type or function body — it emits ERROR nodes that drop the enclosing
+// type AND its first guarded member, hoisting the rest to the top level with
+// the wrong kind/FQN. We blank each directive LINE to equal-length whitespace
+// (newlines untouched) before parsing: byte offsets and line numbers are
+// preserved, so the extractor's signature slices and get_context body slices
+// still match the on-disk file, while every #if branch's declarations now parse
+// as ordinary consecutive members. A member defined in more than one branch is
+// extracted from each — over-extraction (the symbol-id occurrence counter keeps
+// ids unique), never the silent type loss the raw grammar produces. Fast-pathed
+// when the file contains no #if at all. Invoked by parseFile ONLY when the raw
+// parse errors and only adopted when the result parses clean (see call site).
+function neutralizeSwiftDirectives(content: string): string {
+  if (!content.includes('#if')) return content;
+  return content.replace(SWIFT_DIRECTIVE_LINE, (line) => ' '.repeat(line.length));
+}
 
 export function initParser(): Promise<void> {
   if (!initPromise) {
@@ -64,10 +86,31 @@ export function parseFile(content: string, language: string): Tree | null {
     return null;
   }
 
-  const tree = parser.parse(content);
+  let tree = parser.parse(content);
   if (!tree) {
     log.warn(`parseFile: parser returned null for language "${language}"`);
     return null;
+  }
+
+  // Workaround for tree-sitter-swift's in-body #if mis-parse (see above), applied
+  // CONDITIONALLY: only swap in the directive-neutralized parse when the original
+  // ERRORS and neutralization yields a CLEAN parse. So a file that already parses
+  // — including one with a `#if`-looking line inside a multi-line string literal —
+  // is never rewritten, and a neutralization that unbalances braces (a guard
+  // straddling an opening brace) is discarded rather than producing wrong nesting.
+  // The neutralized tree's offsets stay aligned with the ORIGINAL content the
+  // caller passes to extractSymbols (equal-length blanking).
+  if (language === 'swift' && tree.rootNode.hasError && content.includes('#if')) {
+    const neutralized = neutralizeSwiftDirectives(content);
+    if (neutralized !== content) {
+      const alt = parser.parse(neutralized);
+      if (alt && !alt.rootNode.hasError) {
+        tree.delete();
+        tree = alt;
+      } else {
+        alt?.delete();
+      }
+    }
   }
   return tree;
 }
