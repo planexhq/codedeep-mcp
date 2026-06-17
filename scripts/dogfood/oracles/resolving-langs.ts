@@ -25,6 +25,11 @@ export const ALLOWED_TARGET_KINDS: Record<string, ReadonlySet<string>> = {
   // (class/mixin→class). enum/typedef/extension are not call targets in Dart.
   // Same shape as Swift/Kotlin (no constructorKinds node).
   dart: new Set(['function', 'method', 'class']),
+  // bare calls → implicit-this method; this./?./static (obj.M(), C.M()) →
+  // method; construction new Foo() resolves to the class (class/struct/record→
+  // class). No top-level free functions in C#. Same shape as Swift/Kotlin/Dart
+  // (construction via bareCallableKinds, no constructorKinds node).
+  csharp: new Set(['method', 'class']),
 };
 
 // The language list, for skip messages and per-language iteration.

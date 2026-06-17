@@ -28,6 +28,7 @@ const LANG_GLOB: Record<string, string> = {
   swift: '*.swift',
   kotlin: '*.{kt,kts}',
   dart: '*.dart',
+  csharp: '*.cs',
 };
 
 const DECL_RE: Record<string, string> = {
@@ -66,6 +67,11 @@ const DECL_RE: Record<string, string> = {
   // mixin/extension-merged members, so the ratio runs above 1 like the others;
   // suspicious fires only on symbols === 0.
   dart: '^\\s*(abstract\\s+|base\\s+|final\\s+|sealed\\s+|interface\\s+)*(mixin\\s+)?(class|mixin|extension|enum|typedef)\\s',
+  // Top-level type-decl keywords only — probe also extracts methods/properties/
+  // fields/ctors and extension methods keyed apart, so the ratio runs above 1
+  // like Java's/Kotlin's; suspicious fires only on symbols === 0. `record` is
+  // matched bare and as `record struct`/`record class`.
+  csharp: '^\\s*((public|private|protected|internal|partial|abstract|sealed|static|new|readonly|ref|file|unsafe|required)\\s+)*(class|struct|interface|enum|record|delegate)\\s',
 };
 
 // null = rg unusable on this machine; the density check is skipped rather

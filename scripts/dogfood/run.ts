@@ -117,6 +117,7 @@ function detectGaps(
   const hasJava = (langs.java ?? 0) > 0;
   const hasRust = (langs.rust ?? 0) > 0;
   const hasSwift = (langs.swift ?? 0) > 0;
+  const hasCSharp = (langs.csharp ?? 0) > 0;
 
   const threw = calls.filter((c) => c.notes.includes('handler-threw'));
   if (threw.length) {
@@ -254,6 +255,28 @@ function detectGaps(
     const extensions = rgCount(dir, '^\\s*(public\\s+|private\\s+|internal\\s+|fileprivate\\s+)?extension\\s', '*.swift') ?? 0;
     if (extensions > 0) {
       gaps.push(`ℹ️ Swift: ${extensions} extension(s) — methods/properties extracted as members of their extended type (methods-apart)`);
+    }
+  }
+
+  if (hasCSharp) {
+    const kinds = stats.symbolsByKind;
+    const typeSymbols = (kinds.class ?? 0) + (kinds.interface ?? 0) + (kinds.enum ?? 0) + (kinds.type ?? 0);
+    const typeDeclsInSource = rgCount(
+      dir,
+      '^\\s*((public|private|protected|internal|partial|abstract|sealed|static|new|readonly|ref|file|unsafe|required)\\s+)*(class|struct|interface|enum|record|delegate)\\s',
+      '*.cs',
+    );
+    if (typeDeclsInSource === null) {
+      gaps.push('ℹ️ ripgrep unavailable — C# type-extraction probe skipped');
+    } else if (typeDeclsInSource > 0 && typeSymbols === 0) {
+      gaps.push(`🟠 P1: ${typeDeclsInSource} C# type declaration(s) in source but 0 class/interface/enum/type symbols indexed`);
+    }
+    // Info: extension methods are methods-apart (keyed on the `this`-param type,
+    // like Go receivers / Dart extensions); construction `new Foo()` resolves to
+    // the class via bareCallableKinds (no constructorKinds node).
+    const extMethods = rgCount(dir, '\\(\\s*this\\s', '*.cs') ?? 0;
+    if (extMethods > 0) {
+      gaps.push(`ℹ️ C#: ~${extMethods} extension method(s) — extracted as members of the receiver type (methods-apart)`);
     }
   }
 

@@ -230,6 +230,42 @@ export const REPOS: RepoSpec[] = [
     lang: 'dart',
     dimension: 'async HTTP client: Options()/RequestOptions() construction edges, interceptor builder cascades (Dio()..interceptors.add(..)), generic Response<T>, monorepo packages/ layout',
   },
+  {
+    name: 'dapper',
+    url: 'https://github.com/DapperLib/Dapper.git',
+    lang: 'csharp',
+    dimension: 'C# baseline (tiny, hand-verifiable): extension methods on IDbConnection keyed methods-apart, static-heavy, partial classes, generics, internal-default exportedness',
+  },
+  {
+    name: 'newtonsoft-json',
+    url: 'https://github.com/JamesNK/Newtonsoft.Json.git',
+    lang: 'csharp',
+    dimension: 'C# density baseline: classes/structs/properties, nested types, JsonConvert static API, attribute-decorated members, #if conditional compilation',
+  },
+  {
+    name: 'polly',
+    url: 'https://github.com/App-vNext/Polly.git',
+    lang: 'csharp',
+    dimension: 'resilience lib: fluent builder patterns, generics-heavy delegates, lambdas descended, records, construction-as-call (new Policy()) edges',
+  },
+  {
+    name: 'fluentvalidation',
+    url: 'https://github.com/FluentValidation/FluentValidation.git',
+    lang: 'csharp',
+    dimension: 'validation fluent API: chained-call blind spot (RuleFor().NotNull()), nested lambdas, extension methods, generic constraint rules',
+  },
+  {
+    name: 'serilog',
+    url: 'https://github.com/serilog/serilog.git',
+    lang: 'csharp',
+    dimension: 'structured logging: fluent LoggerConfiguration builders, extension methods on ILogger, sealed sinks, interface-heavy, params/optional args',
+  },
+  {
+    name: 'automapper',
+    url: 'https://github.com/AutoMapper/AutoMapper.git',
+    lang: 'csharp',
+    dimension: 'object mapper: reflection/expression-tree heavy, deep generics (IMapper<TSrc,TDest>), nested config classes, conversion operators, partial classes',
+  },
 ];
 
 export function reposByName(names: string[]): RepoSpec[] {
