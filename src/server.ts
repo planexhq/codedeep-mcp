@@ -10,6 +10,7 @@ import type { Indexer } from "./indexer/pipeline.js";
 import { runFindReferences } from "./tools/find-references.js";
 import { runFindSymbol } from "./tools/find-symbol.js";
 import { runGetContext } from "./tools/get-context.js";
+import { runImpact } from "./tools/impact.js";
 import { runOverview } from "./tools/overview.js";
 import { runSearchStructure } from "./tools/search-structure.js";
 import type { ProbeConfig } from "./types.js";
@@ -152,6 +153,45 @@ export function createServer(deps: ServerDeps): McpServer {
       annotations: SHARED_ANNOTATIONS,
     },
     async (args) => runFindReferences(args, deps),
+  );
+
+  server.registerTool(
+    "impact",
+    {
+      description:
+        "Trace the transitive blast radius of changing a symbol: upstream callers grouped by hop (depth 1, 2, …), with co-change partners from git history. Edges are AST name-matches, not compiler-verified; downstream callees and inheritance ship with LSP in Phase 2.",
+      inputSchema: {
+        file: z
+          .string()
+          .describe("File containing the symbol (relative to project root)"),
+        symbol: z.string().describe("Symbol name"),
+        line: z
+          .number()
+          .int()
+          .optional()
+          .describe("Disambiguate when multiple symbols share a name"),
+        depth: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Caller hops to trace upstream (default: 3, max: 5)"),
+        max_tokens: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Soft response budget (default: 3000); deeper hops drop first"),
+        include_weak: z
+          .boolean()
+          .optional()
+          .describe(
+            "Expand weak edges — unresolved member calls (obj.method()) and low-confidence deep chains; noisier. Default: false",
+          ),
+      },
+      annotations: SHARED_ANNOTATIONS,
+    },
+    async (args) => runImpact(args, deps),
   );
 
   server.registerTool(

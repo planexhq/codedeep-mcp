@@ -121,6 +121,105 @@ export interface CallerEdge {
   symbol?: Symbol;
 }
 
+// --- getCallerTree (depth-N blast radius) ---------------------------------
+//
+// The caller tree is the `find_references` caller-recovery path
+// (getReferencesByNameOrAlias + isCallerOf) applied RECURSIVELY: each
+// surviving ref carries a `sourceId` (the enclosing caller symbol) to
+// continue from. The hazard is false-edge amplification — one wrong
+// name-keyed edge would spawn a whole false subtree. Two defenses, both
+// aligned with the precision-over-recall stance: (1) per-path confidence
+// that decays with depth AND edge weakness, gating expansion below a floor;
+// (2) an expansion policy where only the stronger edge classes recurse —
+// weak edges are SHOWN at the depth they're found but never expanded, so a
+// real call is never silently dropped yet a wrong one can't fan out.
+
+// Strength of a single caller edge, derived purely from the Reference shape
+// + the source file's imports. Maps onto the existing render tags:
+// resolved -> [structural]; import-connected/name-match -> [name match];
+// weak-member -> [member call].
+export type EdgeStrength =
+  | 'resolved'          // within-file AST-resolved (targetId !== null)
+  | 'import-connected'  // bare call whose file imports the target / same dir,
+                        //   or member call through a namespace/module import
+  | 'name-match'        // bare call, no import link — weak cross-file evidence
+  | 'weak-member';      // unresolved `obj.method()` — receiver binds anywhere
+
+export interface CallSite {
+  file: string;
+  line: number;
+}
+
+export interface CallerTreeNode {
+  symbolId: string | null; // null means a module-level call site (terminal leaf)
+  name: string;            // caller name, or the MODULE_LEVEL sentinel
+  file: string;            // caller decl file (symbol) | call-site file (module)
+  line: number;            // caller decl line (symbol) | earliest call-site line
+  kind: SymbolKind | null;
+  depth: number;           // root = 0; direct callers = 1
+  strength: EdgeStrength;  // the edge from this caller INTO its parent/target
+  sites: CallSite[];       // every call site from this caller into the target
+  confidence: number;      // path confidence (0,1] — RANKING/GATING only
+  via?: string;            // parent caller's name (depth >= 2); undefined at depth 1
+  children: CallerTreeNode[];
+  isCycle: boolean;        // sourceId already on this root->node path (shown once)
+  isModuleLevel: boolean;
+  leafByPolicy: boolean;   // shown but deliberately not expanded (weak edge)
+  depthCapped: boolean;    // hit maxDepth wall — more callers may exist
+  truncatedChildren: number; // children dropped by maxBreadth / maxNodes
+}
+
+export interface CallerTreeResult {
+  root: CallerTreeNode;    // the target; root.children are depth-1 callers
+  totalNodes: number;      // distinct caller nodes emitted (excludes root)
+  truncated: boolean;      // a breadth/node cap fired somewhere
+  limitations: readonly string[];
+}
+
+export interface CallerTreeOptions {
+  maxDepth?: number;       // default 3 (root = depth 0)
+  maxBreadth?: number;     // default 25 — per-node child cap (after sort)
+  maxNodes?: number;       // default 200 — total expanded-node budget
+  includeWeak?: boolean;   // default false — let name-match/weak-member recurse
+}
+
+// Ordinal edge weights feeding the path-confidence product, plus a rank for
+// "strongest edge wins" when one caller reaches the target several ways.
+const EDGE_WEIGHT: Readonly<Record<EdgeStrength, number>> = Object.freeze({
+  resolved: 1.0,
+  'import-connected': 0.8,
+  'name-match': 0.5,
+  'weak-member': 0.3,
+});
+const STRENGTH_RANK: Readonly<Record<EdgeStrength, number>> = Object.freeze({
+  'weak-member': 0,
+  'name-match': 1,
+  'import-connected': 2,
+  resolved: 3,
+});
+// Per-hop decay so even a chain of strong-but-unverified edges loses
+// confidence with distance from the changed symbol.
+const DEPTH_DECAY = 0.85;
+// Path-confidence floor below which an edge is shown but not expanded.
+const MIN_EXPAND_CONFIDENCE = 0.35;
+const DEFAULT_CALLER_TREE_DEPTH = 3;
+const DEFAULT_CALLER_TREE_BREADTH = 25;
+const DEFAULT_CALLER_TREE_NODES = 200;
+// Edge classes allowed to recurse by default; weak classes are leaf-only.
+const EXPANDABLE_BY_DEFAULT: ReadonlySet<EdgeStrength> = new Set<EdgeStrength>([
+  'resolved',
+  'import-connected',
+]);
+
+// Static disclosure rendered as a footnote — the caller tree is upstream-only
+// and inheritance-blind by construction, so an empty/shallow tree is a blind
+// spot, not an "all clear".
+const CALLER_TREE_LIMITATIONS: readonly string[] = Object.freeze([
+  'Upstream callers only — cross-file callees (downstream) are not traversed (LSP, Phase 2).',
+  'Inheritance/override edges are not modeled, so virtual-dispatch callers may be missing (LSP, Phase 2).',
+  'Edges are heuristic AST name-matches, not compiler-verified; confidence is ordinal, not probabilistic.',
+]);
+
 export const zeroSymbolsByKind = (): Record<SymbolKind, number> => ({
   function: 0,
   class: 0,
@@ -576,6 +675,219 @@ export class CodeIndex {
       }
     }
     return out;
+  }
+
+  // Depth-N upstream blast radius. Walks the SAME cross-file caller-recovery
+  // path as find_references (getReferencesByNameOrAlias + isCallerOf),
+  // recursively. BFS so the node/breadth budget is spent on shallow,
+  // highest-relevance callers first. Depth-1 children are exactly the
+  // find_references caller set (grouped one node per caller symbol). The
+  // amplification defenses are described above the CallerTreeNode type.
+  getCallerTree(symbolId: string, opts: CallerTreeOptions = {}): CallerTreeResult {
+    const maxDepth = opts.maxDepth ?? DEFAULT_CALLER_TREE_DEPTH;
+    const maxBreadth = opts.maxBreadth ?? DEFAULT_CALLER_TREE_BREADTH;
+    const maxNodes = opts.maxNodes ?? DEFAULT_CALLER_TREE_NODES;
+    const includeWeak = opts.includeWeak ?? false;
+
+    const target = this.symbolById.get(symbolId);
+    if (!target) {
+      const missing: CallerTreeNode = {
+        symbolId, name: symbolId, file: '', line: 0, kind: null, depth: 0,
+        strength: 'resolved', sites: [], confidence: 1, children: [],
+        isCycle: false, isModuleLevel: false, leafByPolicy: false,
+        depthCapped: false, truncatedChildren: 0,
+      };
+      return {
+        root: missing, totalNodes: 0, truncated: false,
+        limitations: CALLER_TREE_LIMITATIONS,
+      };
+    }
+
+    const root: CallerTreeNode = {
+      symbolId: target.id, name: target.name, file: target.file,
+      line: target.startLine, kind: target.kind, depth: 0,
+      strength: 'resolved', sites: [], confidence: 1, children: [],
+      isCycle: false, isModuleLevel: false, leafByPolicy: false,
+      depthCapped: false, truncatedChildren: 0,
+    };
+
+    const cache = new Map<string, Reference[]>();
+    let totalNodes = 0;
+    let truncated = false;
+
+    interface Frame {
+      node: CallerTreeNode;
+      symbol: Symbol;
+      ancestors: Set<string>;
+    }
+    const queue: Frame[] = [
+      { node: root, symbol: target, ancestors: new Set([target.id]) },
+    ];
+
+    while (queue.length > 0) {
+      const frame = queue.shift();
+      if (!frame) break;
+      const { node, symbol, ancestors } = frame;
+      if (node.depth >= maxDepth) continue;
+
+      const refs = this.resolveDirectCallers(symbol, cache);
+      const groups = this.groupCallerRefs(refs, symbol);
+
+      // Build candidate child nodes, then sort strongest-first before caps.
+      const candidates = groups.map((g) => {
+        const childSym =
+          g.sourceId !== null ? this.symbolById.get(g.sourceId) ?? null : null;
+        const earliest = g.sites.reduce((a, b) => (b.line < a.line ? b : a));
+        const confidence =
+          node.confidence * EDGE_WEIGHT[g.strength] * DEPTH_DECAY;
+        const via = node.depth === 0 ? undefined : node.name;
+        const child: CallerTreeNode = childSym
+          ? {
+              symbolId: childSym.id, name: childSym.name, file: childSym.file,
+              line: childSym.startLine, kind: childSym.kind,
+              depth: node.depth + 1, strength: g.strength, sites: g.sites,
+              confidence, via, children: [], isCycle: false,
+              isModuleLevel: false, leafByPolicy: false, depthCapped: false,
+              truncatedChildren: 0,
+            }
+          : {
+              // Module-level (or dangling sourceId): terminal leaf anchored at
+              // the earliest call site. The renderer supplies the display
+              // label from isModuleLevel — the index stays free of UI strings.
+              symbolId: null, name: '', file: earliest.file, line: earliest.line,
+              kind: null, depth: node.depth + 1, strength: g.strength,
+              sites: g.sites, confidence, via, children: [], isCycle: false,
+              isModuleLevel: true, leafByPolicy: false, depthCapped: false,
+              truncatedChildren: 0,
+            };
+        return { child, symbol: childSym };
+      });
+
+      candidates.sort(
+        (a, b) =>
+          b.child.confidence - a.child.confidence ||
+          STRENGTH_RANK[b.child.strength] - STRENGTH_RANK[a.child.strength] ||
+          (a.child.file < b.child.file ? -1 : a.child.file > b.child.file ? 1 : 0) ||
+          a.child.line - b.child.line,
+      );
+
+      let kept = candidates;
+      if (candidates.length > maxBreadth) {
+        node.truncatedChildren += candidates.length - maxBreadth;
+        truncated = true;
+        kept = candidates.slice(0, maxBreadth);
+      }
+
+      for (const { child, symbol: childSym } of kept) {
+        if (totalNodes >= maxNodes) {
+          node.truncatedChildren += 1;
+          truncated = true;
+          continue;
+        }
+        const cyclic = child.symbolId !== null && ancestors.has(child.symbolId);
+        const atDepthWall = child.depth >= maxDepth;
+        // include_weak is the explicit "accept the noise" override: it expands
+        // every edge class AND bypasses the confidence floor (subject only to
+        // depth/cycle/node caps). The default path expands only the stronger
+        // classes above the floor, so one wrong weak edge can never fan out
+        // into a false subtree.
+        const policyOk = includeWeak || EXPANDABLE_BY_DEFAULT.has(child.strength);
+        const confOk = includeWeak || child.confidence >= MIN_EXPAND_CONFIDENCE;
+        const expandable =
+          child.symbolId !== null && !cyclic && policyOk && confOk;
+
+        // Coherent partition for a non-cyclic real-symbol child:
+        //   not-expandable        -> leafByPolicy (weak edge class OR path
+        //                            confidence below the floor) at ANY depth,
+        //                            so include_weak is the actionable hint;
+        //   expandable at the wall -> depthCapped (only the depth limit stops
+        //                            it; "raise depth" is the hint);
+        //   expandable, room left  -> recursed (no flag).
+        // Module-level children (symbolId null) are terminal leaves handled by
+        // isModuleLevel and need no flag.
+        if (cyclic) {
+          child.isCycle = true;
+        } else if (!expandable && child.symbolId !== null) {
+          child.leafByPolicy = true;
+        } else if (expandable && atDepthWall) {
+          child.depthCapped = true;
+        }
+
+        node.children.push(child);
+        totalNodes++;
+
+        if (expandable && !atDepthWall && childSym && child.symbolId) {
+          queue.push({
+            node: child,
+            symbol: childSym,
+            ancestors: new Set(ancestors).add(child.symbolId),
+          });
+        }
+      }
+    }
+
+    return { root, totalNodes, truncated, limitations: CALLER_TREE_LIMITATIONS };
+  }
+
+  // Filtered + memoized direct callers of `target` — the exact set
+  // find_references renders, so depth-1 of the tree matches it.
+  private resolveDirectCallers(
+    target: Symbol,
+    cache: Map<string, Reference[]>,
+  ): Reference[] {
+    const hit = cache.get(target.id);
+    if (hit) return hit;
+    const refs = this.getReferencesByNameOrAlias(
+      target.name,
+      target.file,
+      isClassMember(target),
+    ).filter((r) => isCallerOf(r, target));
+    cache.set(target.id, refs);
+    return refs;
+  }
+
+  // Collapse caller refs into one group per caller symbol (or per file for
+  // module-level call sites): all call sites in `sites`, strongest edge wins.
+  private groupCallerRefs(
+    refs: Reference[],
+    target: Symbol,
+  ): Array<{ sourceId: string | null; sites: CallSite[]; strength: EdgeStrength }> {
+    const groups = new Map<
+      string,
+      { sourceId: string | null; sites: CallSite[]; strength: EdgeStrength }
+    >();
+    for (const ref of refs) {
+      const strength = this.edgeStrength(ref, target);
+      const key = ref.sourceId ?? ` module:${ref.file}`;
+      let g = groups.get(key);
+      if (!g) {
+        g = { sourceId: ref.sourceId, sites: [], strength };
+        groups.set(key, g);
+      }
+      g.sites.push({ file: ref.file, line: ref.line });
+      if (STRENGTH_RANK[strength] > STRENGTH_RANK[g.strength]) {
+        g.strength = strength;
+      }
+    }
+    return [...groups.values()];
+  }
+
+  // Classify one caller edge by how strongly its source binds to `target`.
+  private edgeStrength(ref: Reference, target: Symbol): EdgeStrength {
+    if (ref.targetId !== null) return 'resolved';
+    const imports = this.importsByFile.get(ref.file) ?? [];
+    if (ref.receiver === undefined) {
+      if (
+        fileImportsName(imports, target.name) ||
+        posix.dirname(ref.file) === posix.dirname(target.file)
+      ) {
+        return 'import-connected';
+      }
+      return 'name-match';
+    }
+    return fileImportsReceiver(imports, ref.receiver)
+      ? 'import-connected'
+      : 'weak-member';
   }
 
   // Approximate caller count surfaced by find_symbol's `References: ~N`.
@@ -1309,6 +1621,37 @@ export function isCallerOf(ref: Reference, target: Symbol): boolean {
 
 export function isClassMember(s: Symbol): boolean {
   return classNameFromFqn(s.fqn) !== null;
+}
+
+// True when `imports` brings `name` into scope as a value binding the bare
+// call site could resolve to (named import, alias, or wildcard). Shared by
+// getCallerTree's edge classification and find_references' rankRefs so the
+// two stay in lockstep — a one-sided edit would desync impact's edge labels
+// from find_references' caller tiers.
+export function fileImportsName(imports: ImportInfo[], name: string): boolean {
+  for (const imp of imports) {
+    for (const named of imp.importedNames) {
+      if (named.name === name || named.alias === name) return true;
+      if (isWildcardImport(named)) return true;
+    }
+  }
+  return false;
+}
+
+// True when `receiver` names a namespace/module import in `imports` — the only
+// receiver bindings whose target module is statically resolvable. Shared with
+// find_references' rankRefs (see fileImportsName).
+export function fileImportsReceiver(
+  imports: ImportInfo[],
+  receiver: string,
+): boolean {
+  for (const imp of imports) {
+    for (const named of imp.importedNames) {
+      if (named.kind !== 'namespace' && named.kind !== 'module') continue;
+      if ((named.alias ?? named.name) === receiver) return true;
+    }
+  }
+  return false;
 }
 
 export function matchesKindScope(

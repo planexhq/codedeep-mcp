@@ -1,9 +1,10 @@
 import { dirname } from 'node:path';
 
 import {
+  fileImportsName,
+  fileImportsReceiver,
   isCallerOf,
   isClassMember,
-  isWildcardImport,
   type CodeIndex,
 } from '../indexer/code-index.js';
 import type { Indexer } from '../indexer/pipeline.js';
@@ -240,10 +241,10 @@ function rankRefs(
       // import-connected receiver (`import * as u; u.fn()`) is as strong
       // as an import-connected bare name; anything else is the noisiest
       // tier — the property match alone is weak evidence.
-      tier = importsReceiver(importsFor(ref.file), ref.receiver) ? 2 : 5;
+      tier = fileImportsReceiver(importsFor(ref.file), ref.receiver) ? 2 : 5;
     } else if (refDir === targetDir) {
       tier = 1;
-    } else if (importsTargetName(importsFor(ref.file), target.name)) {
+    } else if (fileImportsName(importsFor(ref.file), target.name)) {
       tier = 2;
     } else if (refDir === targetParent || dirname(refDir) === targetParent) {
       tier = 3;
@@ -256,34 +257,13 @@ function rankRefs(
   return out;
 }
 
-// Only module-object bindings (`import * as u`, Python `import x` /
-// `from . import x`) make a receiver "import-connected" for ranking:
-// those are the bindings memberRefMatchesTarget can resolve precisely.
-// A value import merely NAMED like the receiver says nothing about where
-// the object's class lives, so it must not buy tier-2 placement.
-function importsReceiver(imports: ImportInfo[], receiver: string): boolean {
-  for (const imp of imports) {
-    for (const named of imp.importedNames) {
-      if (named.kind !== 'namespace' && named.kind !== 'module') continue;
-      if ((named.alias ?? named.name) === receiver) return true;
-    }
-  }
-  return false;
-}
-
-function importsTargetName(imports: ImportInfo[], name: string): boolean {
-  for (const imp of imports) {
-    for (const named of imp.importedNames) {
-      if (named.name === name || named.alias === name) return true;
-      // Python `from .x import *` binds every export of source module to
-      // local scope. Refs reach the ranker only after
-      // primaryRefMatchesTarget admitted them via importResolvesTo, so a
-      // wildcard's presence is a strong import-connected signal.
-      if (isWildcardImport(named)) return true;
-    }
-  }
-  return false;
-}
+// rankRefs uses the shared fileImportsReceiver / fileImportsName (code-index.ts)
+// so impact's edge-strength classification and find_references' caller tiers
+// stay in lockstep. (Only namespace/module-object receivers are
+// "import-connected"; a value import merely NAMED like the receiver says
+// nothing about where the object's class lives. A wildcard import is a strong
+// signal — refs reach the ranker only after primaryRefMatchesTarget admitted
+// them.)
 
 function renderNoSymbol(
   name: string,
