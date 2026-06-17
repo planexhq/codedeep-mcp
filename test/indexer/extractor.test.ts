@@ -15,6 +15,7 @@ describe('extractSymbols dispatcher', () => {
     ['tsx', 'const X = 1;'],
     ['javascript', 'var x = 1;'],
     ['python', 'x = 1'],
+    ['csharp', 'class X { }'],
   ])('routes %s to its extractor without warning', (language, src) => {
     const tree = parseFile(src, language)!;
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);

@@ -32,6 +32,7 @@ const wanted = [
   { srcDir: repomixDir, file: "tree-sitter-swift.wasm" },
   { srcDir: kotlinDir, file: "tree-sitter-kotlin.wasm" },
   { srcDir: vendorDir, file: "tree-sitter-dart.wasm" },
+  { srcDir: repomixDir, file: "tree-sitter-c_sharp.wasm" },
 ];
 
 // Cache directory listings so each source dir is read at most once.

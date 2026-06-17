@@ -32,7 +32,7 @@ const FIXTURES_ROOT = join(
   'fixtures',
 );
 
-type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin' | 'small-dart';
+type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin' | 'small-dart' | 'small-cs';
 
 const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-ts': [
@@ -49,6 +49,7 @@ const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-swift': ['greeter.swift', 'shape.swift', 'main.swift'],
   'small-kotlin': ['greeter.kt', 'shape.kt', 'main.kt'],
   'small-dart': ['greeter.dart', 'shape.dart', 'main.dart'],
+  'small-cs': ['Greeter.cs', 'Shape.cs', 'Program.cs'],
 };
 
 async function copyFixtureToTmp(
@@ -912,5 +913,89 @@ describe('integration: end-to-end pipeline + tools', () => {
       await runFindReferences({ file: 'greeter.dart', symbol: 'greet' }, deps)
     ).content[0].text;
     expect(sectionAfter(memberRefs, '### Callers')).toContain('main.dart:');
+  });
+
+  it('indexes the C# fixture end-to-end', async () => {
+    const { index } = await setup('small-cs');
+
+    expect(index.getStats().totalFiles).toBe(3);
+
+    for (const name of [
+      'Greeter',
+      'Greet',
+      'Format',
+      'Normalize',
+      'Summary',
+      'Describe',
+      'constructor',
+      'IShape',
+      'Circle',
+      'Area',
+      'Shapes',
+      'DefaultCircle',
+      'Label',
+      'Program',
+      'Main',
+    ]) {
+      expect(
+        index.findSymbolByName(name).length,
+        `expected to find symbol "${name}"`,
+      ).toBeGreaterThan(0);
+    }
+
+    // implicit-this bare call edge: Greet() → Format().
+    const greet = index.findSymbolByName('Greet')[0]!;
+    const format = index.findSymbolByName('Format')[0]!;
+    expect(index.getCallees(greet.id).map((s) => s.id)).toContain(format.id);
+
+    // bare call edge: Format() → Normalize().
+    const normalize = index.findSymbolByName('Normalize')[0]!;
+    expect(index.getCallees(format.id).map((s) => s.id)).toContain(normalize.id);
+
+    // construction edge: DefaultCircle() → new Circle(...).
+    const defaultCircle = index.findSymbolByName('DefaultCircle')[0]!;
+    const circle = index.findSymbolByName('Circle').find((s) => s.kind === 'class')!;
+    expect(index.getCallees(defaultCircle.id).map((s) => s.id)).toContain(circle.id);
+
+    // property getter self-call: Summary → Greeter.Describe.
+    const summary = index.findSymbolByName('Summary')[0]!;
+    const greeterDescribe = index
+      .findSymbolByName('Describe')
+      .find((s) => s.fqn === 'Greeter.cs:Greeter.Describe')!;
+    expect(index.getCallees(summary.id).map((s) => s.id)).toContain(greeterDescribe.id);
+
+    // exportedness: member default private, explicit public exports.
+    expect(greet.exported).toBe(true);
+    expect(format.exported).toBe(false);
+    expect(greet.fqn).toBe('Greeter.cs:Greeter.Greet');
+
+    // extension method keyed on the receiver type (methods-apart).
+    expect(index.findSymbolByName('Label')[0]!.fqn).toBe('Shape.cs:Circle.Label');
+  });
+
+  it('overview shows C# language stats', async () => {
+    const deps = await setup('small-cs');
+    const text = (await runOverview({}, deps)).content[0].text;
+    expect(text).toContain('- C#: 3 files (100%)');
+  });
+
+  it('csharp tools: find_symbol, get_context callees, cross-file member callers', async () => {
+    const deps = await setup('small-cs');
+
+    const found = (await runFindSymbol({ name: 'Greet' }, deps)).content[0].text;
+    expect(found).toContain('Greeter.cs:');
+    expect(found).toContain('| method');
+
+    const ctx = (await runGetContext({ file: 'Greeter.cs', symbol: 'Greet' }, deps))
+      .content[0].text;
+    expect(ctx).toContain('### Body');
+    expect(sectionAfter(ctx, '### Callees')).toContain('Format');
+
+    // Cross-file member ref: Program.cs calls g.Greet() — unknown receiver,
+    // weakly included because the method target is exported.
+    const memberRefs = (
+      await runFindReferences({ file: 'Greeter.cs', symbol: 'Greet' }, deps)
+    ).content[0].text;
+    expect(sectionAfter(memberRefs, '### Callers')).toContain('Program.cs:');
   });
 });

@@ -4,6 +4,7 @@ import type { Node, Tree } from 'web-tree-sitter';
 import { log } from '../logger.js';
 import { NON_CALLABLE_KINDS, classNameFromFqn } from '../types.js';
 import type { FileInfo, ImportInfo, Reference, Symbol } from '../types.js';
+import { extractCSharp } from './languages/csharp.js';
 import { extractDart } from './languages/dart.js';
 import { extractGo } from './languages/go.js';
 import { extractJava } from './languages/java.js';
@@ -106,6 +107,15 @@ export interface ResolveCallsOptions {
   // construction node), so without this they'd misroute to the constructor-form
   // branch and never resolve to functions or implicit-self methods.
   plainCalleeType?: string;
+  // Call-NODE types (not callee types) that are ALWAYS constructor-form,
+  // routed through constructorKinds/typeNameToId regardless of callee node
+  // type. C# passes {'object_creation_expression'}: `new Foo()`'s callee is a
+  // plain `identifier` (indistinguishable from a bare call by callee type), so
+  // without this it would flow through the enclosing-class/nameToId path and a
+  // `new Foo()` could mis-bind to an enclosing METHOD named Foo. Languages that
+  // leave this unset keep the callee-type heuristic (`callee.type !==
+  // plainCalleeType`) unchanged.
+  constructorSelectorTypes?: ReadonlySet<string>;
 }
 
 const DEFAULT_BARE_CALLEE_TYPES: ReadonlySet<string> = new Set(['identifier']);
@@ -145,6 +155,8 @@ export function extractSymbols(
       return extractKotlin(tree, content, fileInfo);
     case 'dart':
       return extractDart(tree, content, fileInfo);
+    case 'csharp':
+      return extractCSharp(tree, content, fileInfo);
     default:
       log.warn(`extractSymbols: unsupported language "${fileInfo.language}"`);
       return { symbols: [], references: [], imports: [] };
@@ -264,6 +276,7 @@ export function resolveCalls(
   const ambiguousClassNames = opts?.ambiguousClassNames;
   const ignoredBareCallees = opts?.ignoredBareCallees;
   const plainCalleeType = opts?.plainCalleeType ?? 'identifier';
+  const constructorSelectorTypes = opts?.constructorSelectorTypes;
   const nameToId = new Map<string, string>();
   for (const sym of symbols) {
     if (bareCallableKinds ? !bareCallableKinds.has(sym.kind) : NON_CALLABLE_KINDS.has(sym.kind)) {
@@ -313,23 +326,28 @@ export function resolveCalls(
     if (bareCalleeTypes.has(callee.type)) {
       seenCallNodeIds.add(node.id);
       const targetName = callee.text;
-      // Constructor-form callees (anything but a plain identifier, e.g.
-      // Java's type_identifier from `new X()`) resolve against type
-      // symbols only. Identifier callees resolve via the enclosing class
-      // when configured, then the callable-name map. Either way the ref
-      // stays a plain bare ref — the call site has no receiver token.
-      const targetId =
-        callee.type !== plainCalleeType
-          ? typeNameToId.get(targetName) ?? null
-          : ((bindToEnclosingClass && className !== undefined
-              ? methodsByClass.get(className)?.get(targetName)
-              : undefined) ??
-            nameToId.get(targetName) ??
-            null);
+      // Constructor-form callees resolve against type symbols only. This is
+      // either a callee node type that isn't the plain bare type (Java's
+      // type_identifier from `new X()`) OR a call NODE in
+      // constructorSelectorTypes (C#'s object_creation_expression, whose callee
+      // IS a plain identifier — so it must be recognized by node, not callee,
+      // type; otherwise `new Foo()` would mis-bind to an enclosing METHOD Foo).
+      // Identifier callees that are NOT constructor-form resolve via the
+      // enclosing class when configured, then the callable-name map. Either way
+      // the ref stays a plain bare ref — the call site has no receiver token.
+      const isConstructorForm =
+        (constructorSelectorTypes?.has(node.type) ?? false) || callee.type !== plainCalleeType;
+      const targetId = isConstructorForm
+        ? typeNameToId.get(targetName) ?? null
+        : ((bindToEnclosingClass && className !== undefined
+            ? methodsByClass.get(className)?.get(targetName)
+            : undefined) ??
+          nameToId.get(targetName) ??
+          null);
       // Ignored names (Go builtins) are dropped only when unresolved — the
       // node is already in seenCallNodeIds, so the moduleRoot re-walk stays
       // cheap and never re-emits it.
-      if (targetId === null && callee.type === plainCalleeType && ignoredBareCallees?.has(targetName)) {
+      if (targetId === null && !isConstructorForm && ignoredBareCallees?.has(targetName)) {
         return;
       }
       references.push({

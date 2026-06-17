@@ -23,6 +23,8 @@ const LANG_TO_WASM: Record<string, string> = {
   swift: 'tree-sitter-swift.wasm',
   kotlin: 'tree-sitter-kotlin.wasm',
   dart: 'tree-sitter-dart.wasm',
+  // @repomix ships this as tree-sitter-c_sharp.wasm (underscore), not -csharp.
+  csharp: 'tree-sitter-c_sharp.wasm',
 };
 
 const parsers = new Map<string, Parser>();
