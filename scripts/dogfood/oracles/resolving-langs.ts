@@ -30,6 +30,12 @@ export const ALLOWED_TARGET_KINDS: Record<string, ReadonlySet<string>> = {
   // class). No top-level free functions in C#. Same shape as Swift/Kotlin/Dart
   // (construction via bareCallableKinds, no constructorKinds node).
   csharp: new Set(['method', 'class']),
+  // bare calls → free function; $this->/self::/static:: and Class::m() calls →
+  // method; construction new Foo() resolves to the class (class/trait→class).
+  // Free functions exist (unlike C#/Kotlin), so bareCallableKinds={'function'};
+  // construction routed by node type (constructorSelectorTypes), so both
+  // wrong-edge directions are structurally impossible.
+  php: new Set(['function', 'method', 'class']),
 };
 
 // The language list, for skip messages and per-language iteration.

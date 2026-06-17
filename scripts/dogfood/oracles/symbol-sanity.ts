@@ -29,6 +29,7 @@ const LANG_GLOB: Record<string, string> = {
   kotlin: '*.{kt,kts}',
   dart: '*.dart',
   csharp: '*.cs',
+  php: '*.php',
 };
 
 const DECL_RE: Record<string, string> = {
@@ -72,6 +73,7 @@ const DECL_RE: Record<string, string> = {
   // like Java's/Kotlin's; suspicious fires only on symbols === 0. `record` is
   // matched bare and as `record struct`/`record class`.
   csharp: '^\\s*((public|private|protected|internal|partial|abstract|sealed|static|new|readonly|ref|file|unsafe|required)\\s+)*(class|struct|interface|enum|record|delegate)\\s',
+  php: '^\\s*((abstract|final|readonly)\\s+)*(class|interface|trait|enum|function)\\s',
 };
 
 // null = rg unusable on this machine; the density check is skipped rather

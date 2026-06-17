@@ -266,6 +266,60 @@ export const REPOS: RepoSpec[] = [
     lang: 'csharp',
     dimension: 'object mapper: reflection/expression-tree heavy, deep generics (IMapper<TSrc,TDest>), nested config classes, conversion operators, partial classes',
   },
+  {
+    name: 'monolog',
+    url: 'https://github.com/Seldaek/monolog.git',
+    lang: 'php',
+    dimension: 'PHP baseline (small, hand-verifiable): handlers/interfaces, abstract base classes, PSR-3 LoggerInterface, namespaced, public-default exportedness',
+  },
+  {
+    name: 'guzzle',
+    url: 'https://github.com/guzzle/guzzle.git',
+    lang: 'php',
+    dimension: 'HTTP client: traits (use-mixing recall gap), PSR-7/PSR-18 interfaces, static factory methods, promises, $this-> self-calls',
+  },
+  {
+    name: 'slim',
+    url: 'https://github.com/slimphp/Slim.git',
+    lang: 'php',
+    dimension: 'micro-framework: DI container, middleware, interface-heavy, closures descended, constructor property promotion',
+  },
+  {
+    name: 'carbon',
+    url: 'https://github.com/briannesbitt/Carbon.git',
+    lang: 'php',
+    dimension: 'date library: fluent method chaining (->addDay()->startOfMonth()) — chained-call blind spot, traits, magic methods, static constructors',
+  },
+  {
+    name: 'ramsey-uuid',
+    url: 'https://github.com/ramsey/uuid.git',
+    lang: 'php',
+    dimension: 'value objects: enums (8.1), readonly properties, interfaces, immutable factories, static ::fromString construction',
+  },
+  {
+    name: 'symfony-console',
+    url: 'https://github.com/symfony/console.git',
+    lang: 'php',
+    dimension: 'PHP scale: heavy OOP/contracts, abstract Command classes, attributes (#[AsCommand]), namespaced, free-function helpers, large method bodies',
+  },
+  {
+    name: 'laravel-framework',
+    url: 'https://github.com/laravel/framework.git',
+    lang: 'php',
+    dimension: 'full framework: facades (__callStatic static proxies), service container, Eloquent magic methods (__get/__set/__call), traits everywhere, deep inheritance — the magic-method/facade pattern the other PHP repos lack',
+  },
+  {
+    name: 'php-parser',
+    url: 'https://github.com/nikic/PHP-Parser.git',
+    lang: 'php',
+    dimension: 'modern typed OOP: deep Node class hierarchy, enums, visitor pattern, PHP-8 constructor promotion, self-referential PHP AST (a clean strongly-typed-PHP stress)',
+  },
+  {
+    name: 'phpunit',
+    url: 'https://github.com/sebastianbergmann/phpunit.git',
+    lang: 'php',
+    dimension: 'testing framework: attribute-heavy (#[Test]/#[DataProvider]/#[CoversClass]), heavy OOP, trait mixins, abstract TestCase hierarchy, static assertion API',
+  },
 ];
 
 export function reposByName(names: string[]): RepoSpec[] {

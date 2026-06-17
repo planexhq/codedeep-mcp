@@ -32,7 +32,7 @@ const FIXTURES_ROOT = join(
   'fixtures',
 );
 
-type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin' | 'small-dart' | 'small-cs';
+type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin' | 'small-dart' | 'small-cs' | 'small-php';
 
 const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-ts': [
@@ -50,6 +50,7 @@ const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-kotlin': ['greeter.kt', 'shape.kt', 'main.kt'],
   'small-dart': ['greeter.dart', 'shape.dart', 'main.dart'],
   'small-cs': ['Greeter.cs', 'Shape.cs', 'Program.cs'],
+  'small-php': ['Greeter.php', 'Shape.php', 'index.php'],
 };
 
 async function copyFixtureToTmp(
@@ -997,5 +998,87 @@ describe('integration: end-to-end pipeline + tools', () => {
       await runFindReferences({ file: 'Greeter.cs', symbol: 'Greet' }, deps)
     ).content[0].text;
     expect(sectionAfter(memberRefs, '### Callers')).toContain('Program.cs:');
+  });
+
+  it('indexes the PHP fixture end-to-end', async () => {
+    const { index } = await setup('small-php');
+
+    expect(index.getStats().totalFiles).toBe(3);
+
+    for (const name of [
+      'Greeter',
+      'greet',
+      'format',
+      'summary',
+      'describe',
+      '__construct',
+      'normalize',
+      'Shape',
+      'Tagged',
+      'Circle',
+      'area',
+      'label',
+      'radius',
+      'defaultCircle',
+      'main',
+    ]) {
+      expect(
+        index.findSymbolByName(name).length,
+        `expected to find symbol "${name}"`,
+      ).toBeGreaterThan(0);
+    }
+
+    // self-call edge: greet() → $this->format().
+    const greet = index.findSymbolByName('greet')[0]!;
+    const format = index.findSymbolByName('format')[0]!;
+    expect(index.getCallees(greet.id).map((s) => s.id)).toContain(format.id);
+
+    // bare FREE-FUNCTION call edge (PHP-distinctive): format() → normalize().
+    const normalize = index.findSymbolByName('normalize').find((s) => s.kind === 'function')!;
+    expect(index.getCallees(format.id).map((s) => s.id)).toContain(normalize.id);
+
+    // construction edge: defaultCircle() → new Circle(...).
+    const defaultCircle = index.findSymbolByName('defaultCircle')[0]!;
+    const circle = index.findSymbolByName('Circle').find((s) => s.kind === 'class')!;
+    expect(index.getCallees(defaultCircle.id).map((s) => s.id)).toContain(circle.id);
+
+    // self-call: summary() → $this->describe().
+    const summary = index.findSymbolByName('summary')[0]!;
+    const describe = index.findSymbolByName('describe')[0]!;
+    expect(index.getCallees(summary.id).map((s) => s.id)).toContain(describe.id);
+
+    // exportedness: public method exported, private not. trait → class kind.
+    expect(greet.exported).toBe(true);
+    expect(format.exported).toBe(false);
+    expect(greet.fqn).toBe('Greeter.php:Greeter.greet');
+    expect(index.findSymbolByName('Tagged')[0]!.kind).toBe('class');
+    // constructor-promotion property keyed on the class.
+    expect(index.findSymbolByName('radius')[0]!.fqn).toBe('Shape.php:Circle.radius');
+  });
+
+  it('overview shows PHP language stats', async () => {
+    const deps = await setup('small-php');
+    const text = (await runOverview({}, deps)).content[0].text;
+    expect(text).toContain('- PHP: 3 files (100%)');
+  });
+
+  it('php tools: find_symbol, get_context callees, cross-file member callers', async () => {
+    const deps = await setup('small-php');
+
+    const found = (await runFindSymbol({ name: 'greet' }, deps)).content[0].text;
+    expect(found).toContain('Greeter.php:');
+    expect(found).toContain('| method');
+
+    const ctx = (await runGetContext({ file: 'Greeter.php', symbol: 'greet' }, deps))
+      .content[0].text;
+    expect(ctx).toContain('### Body');
+    expect(sectionAfter(ctx, '### Callees')).toContain('format');
+
+    // Cross-file member ref: index.php calls $g->greet() — unknown receiver,
+    // weakly included because the method target is exported.
+    const memberRefs = (
+      await runFindReferences({ file: 'Greeter.php', symbol: 'greet' }, deps)
+    ).content[0].text;
+    expect(sectionAfter(memberRefs, '### Callers')).toContain('index.php:');
   });
 });
