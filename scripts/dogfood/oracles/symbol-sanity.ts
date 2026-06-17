@@ -27,6 +27,7 @@ const LANG_GLOB: Record<string, string> = {
   rust: '*.rs',
   swift: '*.swift',
   kotlin: '*.{kt,kts}',
+  dart: '*.dart',
 };
 
 const DECL_RE: Record<string, string> = {
@@ -57,6 +58,14 @@ const DECL_RE: Record<string, string> = {
   // apart), so the ratio runs above 1 like Java's/Go's/Swift's; suspicious
   // fires only on symbols === 0.
   kotlin: '^\\s*((public|private|internal|protected|open|final|abstract|sealed|data|enum|annotation|value|inner|companion|override|inline|infix|operator|suspend|external|tailrec|expect|actual)\\s+)*(class|interface|object|fun|typealias)\\s',
+  // Top-level type-decl keywords only — bare `var`/`final`/`const`/`late` are
+  // excluded (overwhelmingly LOCAL variables/fields, which would invert the
+  // ratio), and `import`/`part` directives are excluded. Top-level FUNCTIONS
+  // have no leading keyword (they start with a return type) so they're
+  // intentionally unmatched. probe also extracts methods/fields/named-ctors and
+  // mixin/extension-merged members, so the ratio runs above 1 like the others;
+  // suspicious fires only on symbols === 0.
+  dart: '^\\s*(abstract\\s+|base\\s+|final\\s+|sealed\\s+|interface\\s+)*(mixin\\s+)?(class|mixin|extension|enum|typedef)\\s',
 };
 
 // null = rg unusable on this machine; the density check is skipped rather

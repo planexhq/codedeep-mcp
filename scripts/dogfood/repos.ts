@@ -197,6 +197,39 @@ export const REPOS: RepoSpec[] = [
     lang: 'java',
     dimension: 'annotation-refs (@JsonProperty/@JsonCreator), reflection-heavy, generic TypeReference',
   },
+  {
+    name: 'equatable',
+    url: 'https://github.com/felangel/equatable.git',
+    ref: 'v2.0.8',
+    lang: 'dart',
+    dimension: 'Dart baseline (tiny idiomatic lib): EquatableMixin mixin-merged members, operator== overloads, abstract base classes, leading-underscore privacy, hand-verifiable density',
+  },
+  {
+    name: 'built_value',
+    url: 'https://github.com/google/built_value.dart.git',
+    ref: 'v8.12.6',
+    lang: 'dart',
+    dimension: 'named/factory constructors (Foo._() / factory Foo), enhanced enum classes (EnumClass), immutable value types + Builder classes, codegen-heavy',
+  },
+  {
+    name: 'http',
+    url: 'https://github.com/dart-lang/http.git',
+    lang: 'dart',
+    dimension: 'async/generics-heavy: Future/Stream, abstract interface class, generic BaseClient/Request hierarchy, construction-as-call (Request(), Response()) edges',
+  },
+  {
+    name: 'getx',
+    url: 'https://github.com/jonataslaw/getx.git',
+    ref: '4.6.1',
+    lang: 'dart',
+    dimension: 'Flutter widget-heavy: Widget(...) construction -> class resolution, GetBuilder/Obx builder patterns, cascade (..) chains, extension methods on context, arrow-closure callbacks',
+  },
+  {
+    name: 'dio',
+    url: 'https://github.com/cfug/dio.git',
+    lang: 'dart',
+    dimension: 'async HTTP client: Options()/RequestOptions() construction edges, interceptor builder cascades (Dio()..interceptors.add(..)), generic Response<T>, monorepo packages/ layout',
+  },
 ];
 
 export function reposByName(names: string[]): RepoSpec[] {

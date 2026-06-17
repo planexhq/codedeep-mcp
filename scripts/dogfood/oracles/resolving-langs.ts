@@ -20,6 +20,11 @@ export const ALLOWED_TARGET_KINDS: Record<string, ReadonlySet<string>> = {
   // calls → method; construction Foo() resolves to the class (class/object/
   // companion→class). Same shape as Swift (no constructorKinds node).
   kotlin: new Set(['function', 'method', 'class']),
+  // bare calls → function; member/static/named-constructor (obj.m(),
+  // Type.named()) calls → method; construction Type(...) resolves to the class
+  // (class/mixin→class). enum/typedef/extension are not call targets in Dart.
+  // Same shape as Swift/Kotlin (no constructorKinds node).
+  dart: new Set(['function', 'method', 'class']),
 };
 
 // The language list, for skip messages and per-language iteration.
