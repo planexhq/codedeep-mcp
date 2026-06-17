@@ -16,6 +16,10 @@ export const ALLOWED_TARGET_KINDS: Record<string, ReadonlySet<string>> = {
   // bare calls → function; member/self/Self/static calls → method;
   // construction Type(...) resolves to the class (struct/actor/class→class).
   swift: new Set(['function', 'method', 'class']),
+  // bare calls → function; implicit-this/this/static (Object.m, companion)
+  // calls → method; construction Foo() resolves to the class (class/object/
+  // companion→class). Same shape as Swift (no constructorKinds node).
+  kotlin: new Set(['function', 'method', 'class']),
 };
 
 // The language list, for skip messages and per-language iteration.

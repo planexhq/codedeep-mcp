@@ -120,6 +120,30 @@ export const REPOS: RepoSpec[] = [
     dimension: 'Swift server framework: protocol/extension-heavy, result builders, async/throws, property wrappers',
   },
   {
+    name: 'okio',
+    url: 'https://github.com/square/okio.git',
+    lang: 'kotlin',
+    dimension: 'Kotlin baseline (idiomatic lib): extension functions methods-apart, companion objects, sealed classes, internal-default exportedness, multiplatform expect/actual',
+  },
+  {
+    name: 'moshi',
+    url: 'https://github.com/square/moshi.git',
+    lang: 'kotlin',
+    dimension: 'Kotlin + codegen: data classes, companion-object factories, sealed adapters, mixed .kt/.java coexistence, primary-ctor val properties',
+  },
+  {
+    name: 'kotlinx-serialization',
+    url: 'https://github.com/Kotlin/kotlinx.serialization.git',
+    lang: 'kotlin',
+    dimension: 'sealed-class hierarchies, @Serializable annotation density, companion-object factories, construction-heavy (1684 class-target bare resolutions), object serializers',
+  },
+  {
+    name: 'koin',
+    url: 'https://github.com/InsertKoinIO/koin.git',
+    lang: 'kotlin',
+    dimension: 'DI DSL: module {} lambda-with-receiver builders, reified inline funcs, scope functions, mixed .kt/.java',
+  },
+  {
     name: 'sinatra',
     url: 'https://github.com/sinatra/sinatra.git',
     lang: 'ruby',

@@ -26,6 +26,7 @@ const LANG_GLOB: Record<string, string> = {
   go: '*.go',
   rust: '*.rs',
   swift: '*.swift',
+  kotlin: '*.{kt,kts}',
 };
 
 const DECL_RE: Record<string, string> = {
@@ -49,6 +50,13 @@ const DECL_RE: Record<string, string> = {
   // properties, extension methods keyed apart), so the ratio runs above 1
   // like Java's/Go's/Rust's; suspicious fires only on symbols === 0.
   swift: '^\\s*((public|private|internal|fileprivate|open|final|indirect)\\s+)*(class|struct|actor|enum|protocol|extension|func|typealias)\\s',
+  // Top-level type/function decl keywords only — `val`/`var` are excluded
+  // because they overwhelmingly match LOCAL variables (which probe never
+  // extracts), which would invert the ratio. probe also extracts members
+  // (methods, properties, primary-ctor val/var, extension methods keyed
+  // apart), so the ratio runs above 1 like Java's/Go's/Swift's; suspicious
+  // fires only on symbols === 0.
+  kotlin: '^\\s*((public|private|internal|protected|open|final|abstract|sealed|data|enum|annotation|value|inner|companion|override|inline|infix|operator|suspend|external|tailrec|expect|actual)\\s+)*(class|interface|object|fun|typealias)\\s',
 };
 
 // null = rg unusable on this machine; the density check is skipped rather

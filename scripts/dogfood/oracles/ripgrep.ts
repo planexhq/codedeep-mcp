@@ -11,7 +11,7 @@ import { SHORT_NAME_THRESHOLD } from '../../../src/indexer/code-index.js';
 import { RG_PROBE_EXCLUDES, tryExec } from './exec.js';
 import type { OracleResult } from '../types.js';
 
-const CODE_GLOB = '*.{ts,tsx,js,jsx,mjs,cjs,py,java,go,rs,swift}';
+const CODE_GLOB = '*.{ts,tsx,js,jsx,mjs,cjs,py,java,go,rs,swift,kt,kts}';
 
 // rg's file set must be a SUPERSET of probe's or containment is unsound:
 // --hidden (probe indexes hidden dirs like trpc's examples/.test) and
