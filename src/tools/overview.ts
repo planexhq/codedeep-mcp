@@ -62,6 +62,7 @@ const LANGUAGE_DISPLAY: Readonly<Partial<Record<string, string>>> = {
   kotlin: 'Kotlin',
   dart: 'Dart',
   csharp: 'C#',
+  php: 'PHP',
 };
 
 const KIND_PLURAL: Record<SymbolKind, string> = {

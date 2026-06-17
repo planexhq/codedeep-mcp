@@ -23,6 +23,7 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   '.kts': 'kotlin',
   '.dart': 'dart',
   '.cs': 'csharp',
+  '.php': 'php',
 };
 
 const BINARY_EXT = new Set([

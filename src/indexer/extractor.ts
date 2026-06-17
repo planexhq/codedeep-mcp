@@ -9,6 +9,7 @@ import { extractDart } from './languages/dart.js';
 import { extractGo } from './languages/go.js';
 import { extractJava } from './languages/java.js';
 import { extractKotlin } from './languages/kotlin.js';
+import { extractPHP } from './languages/php.js';
 import { extractRust } from './languages/rust.js';
 import { extractSwift } from './languages/swift.js';
 import { extractPython } from './languages/python.js';
@@ -116,6 +117,13 @@ export interface ResolveCallsOptions {
   // leave this unset keep the callee-type heuristic (`callee.type !==
   // plainCalleeType`) unchanged.
   constructorSelectorTypes?: ReadonlySet<string>;
+  // Bare-callable names that are AMBIGUOUS — the same simple name appears on more
+  // than one bare-callable symbol (e.g. two same-named top-level functions in
+  // different namespaces in ONE file, which share the simple-name FQN). Excluded
+  // from nameToId so a bare call to that name stays UNRESOLVED rather than
+  // first-wins binding to the wrong one — the bare-path analogue of
+  // ambiguousClassNames (which only guards the constructor-form and method paths).
+  ambiguousBareCallees?: ReadonlySet<string>;
 }
 
 const DEFAULT_BARE_CALLEE_TYPES: ReadonlySet<string> = new Set(['identifier']);
@@ -157,6 +165,8 @@ export function extractSymbols(
       return extractDart(tree, content, fileInfo);
     case 'csharp':
       return extractCSharp(tree, content, fileInfo);
+    case 'php':
+      return extractPHP(tree, content, fileInfo);
     default:
       log.warn(`extractSymbols: unsupported language "${fileInfo.language}"`);
       return { symbols: [], references: [], imports: [] };
@@ -277,11 +287,16 @@ export function resolveCalls(
   const ignoredBareCallees = opts?.ignoredBareCallees;
   const plainCalleeType = opts?.plainCalleeType ?? 'identifier';
   const constructorSelectorTypes = opts?.constructorSelectorTypes;
+  const ambiguousBareCallees = opts?.ambiguousBareCallees;
   const nameToId = new Map<string, string>();
   for (const sym of symbols) {
     if (bareCallableKinds ? !bareCallableKinds.has(sym.kind) : NON_CALLABLE_KINDS.has(sym.kind)) {
       continue;
     }
+    // An ambiguous bare-callable name (same name on >1 symbol — e.g. cross-namespace
+    // same-name functions in one file) stays out: first-wins would bind a bare call
+    // to the wrong one, so leave it unresolved instead.
+    if (ambiguousBareCallees?.has(sym.name)) continue;
     if (!nameToId.has(sym.name)) nameToId.set(sym.name, sym.id);
   }
   // Constructor-form name map (`new X()` callees), built only when the
