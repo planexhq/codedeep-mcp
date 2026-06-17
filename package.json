@@ -2,6 +2,7 @@
   "name": "probe-mcp",
   "version": "0.1.0",
   "description": "MCP server for structural codebase exploration",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
