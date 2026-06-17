@@ -2977,3 +2977,172 @@ describe('isCallerOf — Go same-package exceptions', () => {
     expect(isCallerOf(mkMemberRef(nearCaller, 'Pairs', 'lib'), target)).toBe(false);
   });
 });
+
+describe('CodeIndex.getCallerTree', () => {
+  // alpha (src/a.ts) -> beta (src/b.ts) -> gamma (src/c.ts), each a cross-file
+  // import-connected call. Returns the three symbols.
+  function buildChain(idx: CodeIndex) {
+    const gamma = mkSym({ name: 'gamma', file: 'src/c.ts', exported: true, startLine: 1 });
+    const beta = mkSym({ name: 'beta', file: 'src/b.ts', startLine: 2 });
+    const alpha = mkSym({ name: 'alpha', file: 'src/a.ts', startLine: 3 });
+    idx.addFile(makeFileInfo('typescript', 'src/c.ts'), [gamma], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/b.ts'),
+      [beta],
+      [mkUnresolvedRef(beta, 'gamma', 'src/b.ts', 10)],
+      [mkImport('src/b.ts', './c', ['gamma'])],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [alpha],
+      [mkUnresolvedRef(alpha, 'beta', 'src/a.ts', 20)],
+      [mkImport('src/a.ts', './b', ['beta'])],
+    );
+    return { gamma, beta, alpha };
+  }
+
+  it('traces a multi-hop cross-file caller chain with depth and provenance', () => {
+    const idx = new CodeIndex();
+    const { gamma } = buildChain(idx);
+    const { root, totalNodes } = idx.getCallerTree(gamma.id);
+
+    expect(root.name).toBe('gamma');
+    expect(root.depth).toBe(0);
+    expect(root.children).toHaveLength(1);
+
+    const b = root.children[0];
+    expect(b.name).toBe('beta');
+    expect(b.depth).toBe(1);
+    expect(b.strength).toBe('import-connected');
+    expect(b.via).toBeUndefined();
+    expect(b.children).toHaveLength(1);
+
+    const a = b.children[0];
+    expect(a.name).toBe('alpha');
+    expect(a.depth).toBe(2);
+    expect(a.via).toBe('beta');
+    expect(a.children).toHaveLength(0);
+
+    expect(totalNodes).toBe(2);
+  });
+
+  it('depth-1 children equal the find_references caller set (same data path)', () => {
+    const idx = new CodeIndex();
+    const { gamma } = buildChain(idx);
+    const direct = new Set(
+      idx
+        .getReferencesByNameOrAlias('gamma', 'src/c.ts', false)
+        .filter((r) => isCallerOf(r, gamma))
+        .map((r) => r.sourceId),
+    );
+    const tree = new Set(
+      idx.getCallerTree(gamma.id).root.children.map((c) => c.symbolId),
+    );
+    expect(tree).toEqual(direct);
+  });
+
+  it('marks depthCapped at the maxDepth wall instead of expanding', () => {
+    const idx = new CodeIndex();
+    const { gamma } = buildChain(idx);
+    const { root } = idx.getCallerTree(gamma.id, { maxDepth: 1 });
+    expect(root.children).toHaveLength(1);
+    const b = root.children[0];
+    expect(b.depth).toBe(1);
+    expect(b.children).toHaveLength(0);
+    expect(b.depthCapped).toBe(true);
+  });
+
+  it('terminates on a cycle and marks the back-edge', () => {
+    const idx = new CodeIndex();
+    const foo = mkSym({ name: 'foo', file: 'src/x.ts', startLine: 1 });
+    const bar = mkSym({ name: 'bar', file: 'src/x.ts', startLine: 2 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/x.ts'),
+      [foo, bar],
+      [mkRef(foo, bar), mkRef(bar, foo)],
+      [],
+    );
+    const { root, totalNodes } = idx.getCallerTree(foo.id);
+
+    expect(root.children).toHaveLength(1);
+    const b = root.children[0];
+    expect(b.name).toBe('bar');
+    expect(b.strength).toBe('resolved');
+    expect(b.children).toHaveLength(1);
+
+    const f = b.children[0];
+    expect(f.name).toBe('foo');
+    expect(f.isCycle).toBe(true);
+    expect(f.children).toHaveLength(0);
+    expect(totalNodes).toBe(2);
+  });
+
+  it('caps breadth and records the truncated count', () => {
+    const idx = new CodeIndex();
+    const tgt = mkSym({ name: 'target', file: 'src/t.ts', startLine: 1 });
+    const callers = Array.from({ length: 4 }, (_, i) =>
+      mkSym({ name: `caller${i}`, file: 'src/t.ts', startLine: 10 + i }),
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/t.ts'),
+      [tgt, ...callers],
+      callers.map((c) => mkRef(c, tgt)),
+      [],
+    );
+    const { root, truncated } = idx.getCallerTree(tgt.id, { maxBreadth: 2 });
+    expect(root.children).toHaveLength(2);
+    expect(root.truncatedChildren).toBe(2);
+    expect(truncated).toBe(true);
+  });
+
+  it('shows weak member edges as leaves by default, expands them under includeWeak', () => {
+    const idx = new CodeIndex();
+    const proc = mkSym({
+      name: 'process',
+      file: 'src/c.ts',
+      kind: 'method',
+      parent: 'Cls',
+      exported: true,
+      startLine: 5,
+    });
+    const runner = mkSym({ name: 'runner', file: 'src/b.ts', startLine: 2 });
+    const driver = mkSym({ name: 'driver', file: 'src/b.ts', startLine: 10 });
+    idx.addFile(makeFileInfo('typescript', 'src/c.ts'), [proc], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/b.ts'),
+      [runner, driver],
+      [
+        mkMemberRef(runner, 'process', 'obj', { file: 'src/b.ts', line: 3 }),
+        mkRef(driver, runner),
+      ],
+      [],
+    );
+
+    const def = idx.getCallerTree(proc.id);
+    expect(def.totalNodes).toBe(1);
+    const r = def.root.children[0];
+    expect(r.name).toBe('runner');
+    expect(r.strength).toBe('weak-member');
+    expect(r.leafByPolicy).toBe(true);
+    expect(r.children).toHaveLength(0);
+
+    const weak = idx.getCallerTree(proc.id, { includeWeak: true });
+    expect(weak.totalNodes).toBe(2);
+    const r2 = weak.root.children[0];
+    expect(r2.children).toHaveLength(1);
+    expect(r2.children[0].name).toBe('driver');
+  });
+
+  it('returns an empty tree for an uncalled symbol and a missing id', () => {
+    const idx = new CodeIndex();
+    const lone = mkSym({ name: 'lonely', file: 'src/x.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/x.ts'), [lone], [], []);
+
+    const res = idx.getCallerTree(lone.id);
+    expect(res.totalNodes).toBe(0);
+    expect(res.root.children).toHaveLength(0);
+    expect(res.limitations.length).toBeGreaterThan(0);
+
+    expect(idx.getCallerTree('deadbeefdeadbeef').totalNodes).toBe(0);
+  });
+});

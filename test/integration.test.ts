@@ -16,6 +16,7 @@ import { Indexer } from '../src/indexer/pipeline.js';
 import { runFindReferences } from '../src/tools/find-references.js';
 import { runFindSymbol } from '../src/tools/find-symbol.js';
 import { runGetContext } from '../src/tools/get-context.js';
+import { runImpact } from '../src/tools/impact.js';
 import { runOverview } from '../src/tools/overview.js';
 import { runSearchStructure } from '../src/tools/search-structure.js';
 import type { ProbeConfig } from '../src/types.js';
@@ -136,6 +137,21 @@ describe('integration: end-to-end pipeline + tools', () => {
     expect(extract).toBeDefined();
     const callees = index.getCallees(auth.id).map((s) => s.id);
     expect(callees).toContain(extract.id);
+  });
+
+  it('impact traces a multi-hop cross-file blast radius', async () => {
+    const deps = await setup('small-ts');
+    // formatDate <- stamp (utils.formatDate, cross-file via namespace import)
+    //            <- login (this.stamp(), second hop) <- module-level svc.login()
+    const text = (
+      await runImpact({ file: 'src/utils.ts', symbol: 'formatDate' }, deps)
+    ).content[0].text;
+
+    expect(text).toContain('## Impact of `formatDate`');
+    expect(text).toContain('### Depth 1 — direct callers');
+    expect(text).toContain('stamp()');
+    // Second hop upstream: stamp is called by login.
+    expect(text).toContain('login()');
   });
 
   it('overview reports language stats, structure, and entry points', async () => {
