@@ -60,6 +60,7 @@ const LANGUAGE_DISPLAY: Readonly<Partial<Record<string, string>>> = {
   rust: 'Rust',
   swift: 'Swift',
   kotlin: 'Kotlin',
+  dart: 'Dart',
 };
 
 const KIND_PLURAL: Record<SymbolKind, string> = {

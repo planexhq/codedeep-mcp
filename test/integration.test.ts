@@ -32,7 +32,7 @@ const FIXTURES_ROOT = join(
   'fixtures',
 );
 
-type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin';
+type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin' | 'small-dart';
 
 const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-ts': [
@@ -48,6 +48,7 @@ const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-rust': ['lib.rs', 'shape.rs', 'main.rs'],
   'small-swift': ['greeter.swift', 'shape.swift', 'main.swift'],
   'small-kotlin': ['greeter.kt', 'shape.kt', 'main.kt'],
+  'small-dart': ['greeter.dart', 'shape.dart', 'main.dart'],
 };
 
 async function copyFixtureToTmp(
@@ -823,5 +824,93 @@ describe('integration: end-to-end pipeline + tools', () => {
       await runFindReferences({ file: 'greeter.kt', symbol: 'greet' }, deps)
     ).content[0].text;
     expect(sectionAfter(memberRefs, '### Callers')).toContain('main.kt:');
+  });
+
+  it('indexes the Dart fixture end-to-end', async () => {
+    const { index } = await setup('small-dart');
+
+    expect(index.getStats().totalFiles).toBe(3);
+
+    for (const name of [
+      'Greeter',
+      'greet',
+      '_format',
+      'normalize',
+      'maxLen',
+      'summary',
+      'Shape',
+      'Circle',
+      'area',
+      'Kind',
+      'label',
+      'defaultCircle',
+      'describe',
+      'constructor',
+    ]) {
+      expect(
+        index.findSymbolByName(name).length,
+        `expected to find symbol "${name}"`,
+      ).toBeGreaterThan(0);
+    }
+
+    // implicit-this bare call edge: greet() → _format().
+    const greet = index.findSymbolByName('greet')[0]!;
+    const format = index.findSymbolByName('_format')[0]!;
+    expect(index.getCallees(greet.id).map((s) => s.id)).toContain(format.id);
+
+    // bare call edge to a top-level function: _format() → normalize().
+    const normalize = index.findSymbolByName('normalize')[0]!;
+    expect(index.getCallees(format.id).map((s) => s.id)).toContain(normalize.id);
+
+    // construction edge: defaultCircle() → Circle(...).
+    const defaultCircle = index.findSymbolByName('defaultCircle')[0]!;
+    const circle = index.findSymbolByName('Circle').find((s) => s.kind === 'class')!;
+    expect(index.getCallees(defaultCircle.id).map((s) => s.id)).toContain(circle.id);
+
+    // getter self-call: summary → Greeter.describe.
+    const summary = index.findSymbolByName('summary')[0]!;
+    const greeterDescribe = index
+      .findSymbolByName('describe')
+      .find((s) => s.fqn === 'greeter.dart:Greeter.describe')!;
+    expect(index.getCallees(summary.id).map((s) => s.id)).toContain(greeterDescribe.id);
+
+    // extension self-call merged into the type: label → Circle.describe.
+    const label = index.findSymbolByName('label')[0]!;
+    const circleDescribe = index
+      .findSymbolByName('describe')
+      .find((s) => s.fqn === 'shape.dart:Circle.describe')!;
+    expect(index.getCallees(label.id).map((s) => s.id)).toContain(circleDescribe.id);
+
+    // exportedness: leading-underscore privacy.
+    expect(greet.exported).toBe(true);
+    expect(format.exported).toBe(false);
+    expect(label.exported).toBe(true);
+    expect(greet.fqn).toBe('greeter.dart:Greeter.greet');
+  });
+
+  it('overview shows Dart language stats', async () => {
+    const deps = await setup('small-dart');
+    const text = (await runOverview({}, deps)).content[0].text;
+    expect(text).toContain('- Dart: 3 files (100%)');
+  });
+
+  it('dart tools: find_symbol, get_context callees, cross-file member callers', async () => {
+    const deps = await setup('small-dart');
+
+    const found = (await runFindSymbol({ name: 'greet' }, deps)).content[0].text;
+    expect(found).toContain('greeter.dart:');
+    expect(found).toContain('| method');
+
+    const ctx = (await runGetContext({ file: 'greeter.dart', symbol: 'greet' }, deps))
+      .content[0].text;
+    expect(ctx).toContain('### Body');
+    expect(sectionAfter(ctx, '### Callees')).toContain('_format');
+
+    // Cross-file member ref: main.dart calls g.greet(...) — unknown receiver,
+    // weakly included because the method target is exported.
+    const memberRefs = (
+      await runFindReferences({ file: 'greeter.dart', symbol: 'greet' }, deps)
+    ).content[0].text;
+    expect(sectionAfter(memberRefs, '### Callers')).toContain('main.dart:');
   });
 });

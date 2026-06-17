@@ -99,8 +99,10 @@ const LANGUAGE_ALIASES: Record<string, readonly string[]> = {
   swift: ['swift'],
   kotlin: ['kotlin'],
   kt: ['kotlin'],
+  dart: ['dart'],
+  flutter: ['dart'],
 };
-const SUPPORTED_LANGUAGES = 'typescript, tsx, javascript, python, java, go, rust, swift, kotlin';
+const SUPPORTED_LANGUAGES = 'typescript, tsx, javascript, python, java, go, rust, swift, kotlin, dart';
 
 type AstGrep = typeof import('@ast-grep/napi');
 // Type-only — erased at compile time, so it cannot trigger the native

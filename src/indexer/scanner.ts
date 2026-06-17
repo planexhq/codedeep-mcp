@@ -21,6 +21,7 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   '.swift': 'swift',
   '.kt': 'kotlin',
   '.kts': 'kotlin',
+  '.dart': 'dart',
 };
 
 const BINARY_EXT = new Set([

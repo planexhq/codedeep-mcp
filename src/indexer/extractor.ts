@@ -4,6 +4,7 @@ import type { Node, Tree } from 'web-tree-sitter';
 import { log } from '../logger.js';
 import { NON_CALLABLE_KINDS, classNameFromFqn } from '../types.js';
 import type { FileInfo, ImportInfo, Reference, Symbol } from '../types.js';
+import { extractDart } from './languages/dart.js';
 import { extractGo } from './languages/go.js';
 import { extractJava } from './languages/java.js';
 import { extractKotlin } from './languages/kotlin.js';
@@ -142,6 +143,8 @@ export function extractSymbols(
       return extractSwift(tree, content, fileInfo);
     case 'kotlin':
       return extractKotlin(tree, content, fileInfo);
+    case 'dart':
+      return extractDart(tree, content, fileInfo);
     default:
       log.warn(`extractSymbols: unsupported language "${fileInfo.language}"`);
       return { symbols: [], references: [], imports: [] };

@@ -8,10 +8,19 @@ const targetDir = path.join(projectRoot, "grammars");
 
 const repomixDir = path.join(projectRoot, "node_modules", "@repomix", "tree-sitter-wasms", "out");
 const kotlinDir = path.join(projectRoot, "node_modules", "@tree-sitter-grammars", "tree-sitter-kotlin");
+// Dart is sourced from a VENDORED, committed wasm, not node_modules: it must be
+// the nielsenko/tree-sitter-dart grammar (clean call_expression/member_expression
+// AST), which is GitHub-only and not on npm in a loadable form. The @repomix
+// bundle DOES ship a tree-sitter-dart.wasm, but it is the Benjamin-Sobel grammar
+// (flat selector chains, no call_expression node) — a poor engine fit — so we
+// must NOT source dart from repomixDir. Rebuild the vendored wasm from
+// nielsenko/tree-sitter-dart @ b57d734c84f510bbd524097902cab671e4dbfca9 with
+// `npx tree-sitter-cli@0.26.8 build --wasm` (ABI 15; loads in web-tree-sitter 0.26.8).
+const vendorDir = path.join(projectRoot, "vendor", "grammars");
 
 // Most grammars ship in the @repomix bundle; Kotlin is sourced from its own
-// @tree-sitter-grammars package (the bundle has no Kotlin), which places the
-// prebuilt wasm at its package root. Each entry: { srcDir, file }.
+// @tree-sitter-grammars package (the bundle has no Kotlin); Dart from the
+// committed vendor/ wasm (see above). Each entry: { srcDir, file }.
 const wanted = [
   { srcDir: repomixDir, file: "tree-sitter-typescript.wasm" },
   { srcDir: repomixDir, file: "tree-sitter-tsx.wasm" },
@@ -22,6 +31,7 @@ const wanted = [
   { srcDir: repomixDir, file: "tree-sitter-rust.wasm" },
   { srcDir: repomixDir, file: "tree-sitter-swift.wasm" },
   { srcDir: kotlinDir, file: "tree-sitter-kotlin.wasm" },
+  { srcDir: vendorDir, file: "tree-sitter-dart.wasm" },
 ];
 
 // Cache directory listings so each source dir is read at most once.

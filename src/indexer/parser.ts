@@ -22,6 +22,7 @@ const LANG_TO_WASM: Record<string, string> = {
   rust: 'tree-sitter-rust.wasm',
   swift: 'tree-sitter-swift.wasm',
   kotlin: 'tree-sitter-kotlin.wasm',
+  dart: 'tree-sitter-dart.wasm',
 };
 
 const parsers = new Map<string, Parser>();
