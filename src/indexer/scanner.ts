@@ -19,6 +19,8 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   '.go': 'go',
   '.rs': 'rust',
   '.swift': 'swift',
+  '.kt': 'kotlin',
+  '.kts': 'kotlin',
 };
 
 const BINARY_EXT = new Set([

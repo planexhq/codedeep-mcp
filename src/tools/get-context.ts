@@ -380,10 +380,12 @@ async function renderFileMode(
   // Methods/getters/setters inherit `exported` from their enclosing class;
   // the file-mode outline hides members to avoid duplicating each class's
   // surface area in the export list — but only when that class is declared
-  // in THIS file. Go methods routinely live apart from their receiver type
-  // (handlers.go beside server.go); a methods-only file would otherwise
-  // render as "Exports (none)". TS/Py/Java members are always co-located
-  // with their class, so their outlines are unchanged.
+  // in THIS file. Go/Rust/Swift/Kotlin members routinely live apart from
+  // their type (Go methods in handlers.go beside server.go; Rust impl blocks;
+  // Swift/Kotlin extensions; Kotlin companion objects) — a methods-apart file
+  // would otherwise render as "Exports (none)". The check is purely
+  // name-presence (no per-language allow-list), so TS/Py/Java members (always
+  // co-located with their class) keep their unchanged outlines automatically.
   const typeNamesInFile = new Set(
     symbols.filter((s) => !isClassMember(s)).map((s) => s.name),
   );

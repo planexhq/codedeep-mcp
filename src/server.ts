@@ -175,7 +175,7 @@ export function createServer(deps: ServerDeps): McpServer {
         language: z
           .string()
           .optional()
-          .describe("Filter to one language: typescript, tsx, javascript, python, java, go, rust, swift"),
+          .describe("Filter to one language: typescript, tsx, javascript, python, java, go, rust, swift, kotlin"),
         limit: z
           .number()
           .int()

@@ -6,6 +6,7 @@ import { NON_CALLABLE_KINDS, classNameFromFqn } from '../types.js';
 import type { FileInfo, ImportInfo, Reference, Symbol } from '../types.js';
 import { extractGo } from './languages/go.js';
 import { extractJava } from './languages/java.js';
+import { extractKotlin } from './languages/kotlin.js';
 import { extractRust } from './languages/rust.js';
 import { extractSwift } from './languages/swift.js';
 import { extractPython } from './languages/python.js';
@@ -139,6 +140,8 @@ export function extractSymbols(
       return extractRust(tree, content, fileInfo);
     case 'swift':
       return extractSwift(tree, content, fileInfo);
+    case 'kotlin':
+      return extractKotlin(tree, content, fileInfo);
     default:
       log.warn(`extractSymbols: unsupported language "${fileInfo.language}"`);
       return { symbols: [], references: [], imports: [] };

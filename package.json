@@ -35,6 +35,7 @@
   },
   "devDependencies": {
     "@repomix/tree-sitter-wasms": "^0.1.17",
+    "@tree-sitter-grammars/tree-sitter-kotlin": "^1.1.0",
     "@types/node": "^25.6.0",
     "@types/picomatch": "^4.0.3",
     "tsx": "^4.22.4",

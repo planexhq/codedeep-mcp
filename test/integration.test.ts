@@ -32,7 +32,7 @@ const FIXTURES_ROOT = join(
   'fixtures',
 );
 
-type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift';
+type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin';
 
 const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-ts': [
@@ -47,6 +47,7 @@ const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-go': ['greeter.go', 'shape.go', 'main.go'],
   'small-rust': ['lib.rs', 'shape.rs', 'main.rs'],
   'small-swift': ['greeter.swift', 'shape.swift', 'main.swift'],
+  'small-kotlin': ['greeter.kt', 'shape.kt', 'main.kt'],
 };
 
 async function copyFixtureToTmp(
@@ -734,5 +735,93 @@ describe('integration: end-to-end pipeline + tools', () => {
       await runFindReferences({ file: 'greeter.swift', symbol: 'greet' }, deps)
     ).content[0].text;
     expect(sectionAfter(memberRefs, '### Callers')).toContain('main.swift:');
+  });
+
+  it('indexes the Kotlin fixture end-to-end', async () => {
+    const { index } = await setup('small-kotlin');
+
+    expect(index.getStats().totalFiles).toBe(3);
+
+    for (const name of [
+      'Greeter',
+      'greet',
+      'format',
+      'normalize',
+      'MAX_LEN',
+      'summary',
+      'Shape',
+      'Circle',
+      'area',
+      'Kind',
+      'label',
+      'defaultCircle',
+      'setup',
+      'constructor',
+    ]) {
+      expect(
+        index.findSymbolByName(name).length,
+        `expected to find symbol "${name}"`,
+      ).toBeGreaterThan(0);
+    }
+
+    // implicit-this bare call edge: greet() → format().
+    const greet = index.findSymbolByName('greet')[0]!;
+    const format = index.findSymbolByName('format')[0]!;
+    expect(index.getCallees(greet.id).map((s) => s.id)).toContain(format.id);
+
+    // bare call edge to a top-level function: format() → normalize().
+    const normalize = index.findSymbolByName('normalize')[0]!;
+    expect(index.getCallees(format.id).map((s) => s.id)).toContain(normalize.id);
+
+    // construction edge: defaultCircle() → Circle(...).
+    const defaultCircle = index.findSymbolByName('defaultCircle')[0]!;
+    const circle = index.findSymbolByName('Circle').find((s) => s.kind === 'class')!;
+    expect(index.getCallees(defaultCircle.id).map((s) => s.id)).toContain(circle.id);
+
+    // computed-property getter self-call: summary → Greeter.describe.
+    const summary = index.findSymbolByName('summary')[0]!;
+    const greeterDescribe = index
+      .findSymbolByName('describe')
+      .find((s) => s.fqn === 'greeter.kt:Greeter.describe')!;
+    expect(index.getCallees(summary.id).map((s) => s.id)).toContain(greeterDescribe.id);
+
+    // extension self-call merged into the type: label → Circle.describe.
+    const label = index.findSymbolByName('label')[0]!;
+    const circleDescribe = index
+      .findSymbolByName('describe')
+      .find((s) => s.fqn === 'shape.kt:Circle.describe')!;
+    expect(index.getCallees(label.id).map((s) => s.id)).toContain(circleDescribe.id);
+
+    // exportedness: public exported, private not, public extension exported.
+    expect(greet.exported).toBe(true);
+    expect(format.exported).toBe(false);
+    expect(label.exported).toBe(true);
+    expect(greet.fqn).toBe('greeter.kt:Greeter.greet');
+  });
+
+  it('overview shows Kotlin language stats', async () => {
+    const deps = await setup('small-kotlin');
+    const text = (await runOverview({}, deps)).content[0].text;
+    expect(text).toContain('- Kotlin: 3 files (100%)');
+  });
+
+  it('kotlin tools: find_symbol, get_context callees, cross-file member callers', async () => {
+    const deps = await setup('small-kotlin');
+
+    const found = (await runFindSymbol({ name: 'greet' }, deps)).content[0].text;
+    expect(found).toContain('greeter.kt:');
+    expect(found).toContain('| method');
+
+    const ctx = (await runGetContext({ file: 'greeter.kt', symbol: 'greet' }, deps))
+      .content[0].text;
+    expect(ctx).toContain('### Body');
+    expect(sectionAfter(ctx, '### Callees')).toContain('format');
+
+    // Cross-file member ref: main.kt calls g.greet(...) — unknown receiver,
+    // weakly included because the method target is exported.
+    const memberRefs = (
+      await runFindReferences({ file: 'greeter.kt', symbol: 'greet' }, deps)
+    ).content[0].text;
+    expect(sectionAfter(memberRefs, '### Callers')).toContain('main.kt:');
   });
 });

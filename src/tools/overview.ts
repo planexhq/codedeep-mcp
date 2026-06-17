@@ -59,6 +59,7 @@ const LANGUAGE_DISPLAY: Readonly<Partial<Record<string, string>>> = {
   go: 'Go',
   rust: 'Rust',
   swift: 'Swift',
+  kotlin: 'Kotlin',
 };
 
 const KIND_PLURAL: Record<SymbolKind, string> = {

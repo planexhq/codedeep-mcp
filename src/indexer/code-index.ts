@@ -110,7 +110,7 @@ const TS_FROM_JS_CANDIDATES: readonly string[] = [
 ];
 
 export const ENTRY_POINT_FILENAME_RE =
-  /^(index|main|app|server|cli|__main__|__init__)\.(ts|tsx|js|mjs|cjs|jsx|py|java|go|rs|swift)$/i;
+  /^(index|main|app|server|cli|__main__|__init__)\.(ts|tsx|js|mjs|cjs|jsx|py|java|go|rs|swift|kt|kts)$/i;
 
 // `symbol` is set when the caller is a declared source symbol; absent for
 // module-level call sites. Invariant: when `symbol` is set, `file` and
