@@ -866,7 +866,7 @@ export class CodeIndex {
     >();
     for (const ref of refs) {
       const strength = this.edgeStrength(ref, target);
-      const key = ref.sourceId ?? ` module:${ref.file}`;
+      const key = ref.sourceId ?? `\0module:${ref.file}`;
       let g = groups.get(key);
       if (!g) {
         g = { sourceId: ref.sourceId, sites: [], strength };
