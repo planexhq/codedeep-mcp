@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { extractSymbols } from '../../../src/indexer/extractor.js';
 import { initParser, parseFile } from '../../../src/indexer/parser.js';
+import { RECEIVER_OPAQUE } from '../../../src/types.js';
 import { makeFileInfo } from '../../helpers.js';
 
 function extract(src: string, language = 'java', path = 'src/Test.java') {
@@ -591,7 +592,7 @@ describe('java extractor — references', () => {
     expect(ref.targetId).toBeNull();
   });
 
-  it('never extracts chained, super, delegation, or method-reference call shapes', () => {
+  it('captures chained calls opaquely; still drops super/method-ref/stdlib shapes', () => {
     const src = [
       'public class C extends Base {',
       '  C() { this(1); }',
@@ -608,14 +609,59 @@ describe('java extractor — references', () => {
     ].join('\n');
     const result = extract(src);
     const targets = result.references.map((r) => r.targetName);
-    expect(targets).not.toContain('deep');
-    expect(targets).not.toContain('chain');
+    // Chained calls are now CAPTURED under an opaque receiver (findable by name,
+    // never resolved) — the recall win.
+    const deep = result.references.find((r) => r.targetName === 'deep')!;
+    expect(deep.receiver).toBe(RECEIVER_OPAQUE);
+    expect(deep.targetId).toBeNull();
+    const chain = result.references.find((r) => r.targetName === 'chain')!;
+    expect(chain.receiver).toBe(RECEIVER_OPAQUE);
+    expect(chain.targetId).toBeNull();
+    // Still dropped: super.tearDown() (parent-class), C::helper (method ref),
+    // and System.out.println() (`println` ∈ JAVA_IGNORED_MEMBER_CALLEES).
     expect(targets).not.toContain('tearDown');
     expect(targets).not.toContain('println');
-    expect(targets).not.toContain('helper'); // method reference, not a call
+    expect(targets).not.toContain('helper');
     // The inner call of `maker().chain()` still emits and resolves.
     const makerRef = result.references.find((r) => r.targetName === 'maker')!;
     expect(makerRef.targetId).toBe(result.symbols.find((s) => s.name === 'maker')!.id);
+  });
+
+  it('suppresses unresolved chained calls to common stdlib/stream names', () => {
+    const src = [
+      'public class C {',
+      '  void go(java.util.List<String> xs) {',
+      '    xs.stream().filter(x -> true).collect(null);',
+      '  }',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const targets = result.references.map((r) => r.targetName);
+    // stream/filter/collect ∈ JAVA_IGNORED_MEMBER_CALLEES and all unresolved.
+    expect(targets).not.toContain('stream');
+    expect(targets).not.toContain('filter');
+    expect(targets).not.toContain('collect');
+  });
+
+  it('unwraps cast ((T)a).m(), parenthesized (a).m(), and comment-in-paren receivers', () => {
+    const src = [
+      'class C {',
+      '  void z(Object a) {',
+      '    ((T) a).foo();',
+      '    (a).bar();',
+      '    ( /*c*/ a).baz();',
+      '  }',
+      '}',
+    ].join('\n');
+    const result = extract(src);
+    const byName = new Map(result.references.map((r) => [r.targetName, r]));
+    // ((T)a) (parenthesized cast_expression, value field = `a`) and (a) unwrap to
+    // the single-identifier receiver `a` — Java's cast is its force-unwrap analog.
+    expect(byName.get('foo')!.receiver).toBe('a');
+    expect(byName.get('bar')!.receiver).toBe('a');
+    // A leading comment inside the parens is skipped via isComment (the grammar
+    // names it `block_comment`, not `comment`) — receiver still unwraps to `a`.
+    expect(byName.get('baz')!.receiver).toBe('a');
   });
 
   it('attributes lambda-body calls to the enclosing method', () => {

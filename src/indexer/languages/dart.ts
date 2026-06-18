@@ -1,6 +1,6 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
-import { IMPORT_NAMESPACE } from '../../types.js';
+import { IMPORT_NAMESPACE, RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportInfo, ImportedName, Symbol, SymbolKind } from '../../types.js';
 import {
   SIGNATURE_DISPLAY_CAP,
@@ -126,21 +126,49 @@ const DART_SELECTORS: ReadonlyArray<CallSelector> = [
   { nodeType: 'cascade_call_expression', getCallee: (n) => n },
 ];
 
-// Reduces a member-expression OR cascade-call callee to {receiver, property}.
-// Single-level receivers only: a chained `a.b().c()` has a `call_expression`
-// object and returns null (same contract as the other languages). `this` is a
-// fixed token (a `this` node), decided here like Swift/Kotlin/Python — Dart
-// needs no PendingBody.selfReceiverName.
+// Peels transparent receiver wrappers — null-assertion `a!` (null_assertion_
+// expression) and parens `(a)` (parenthesized_expression) — so `a!.x()` / `(a).x()`
+// resolve like `a.x()`. The operand is the lone non-punctuation child, found by
+// scanning ALL children (NOT firstNamedChild): `this`/`super` are ANONYMOUS tokens,
+// so firstNamedChild misses them — skipping the wrapper's own `(`/`)`/`!` punctuation
+// and comments instead recovers them, so `(this).x()` self-resolves and `(super).x()`
+// hits the super-drop (rather than leaking an opaque ref past it). A genuine chain
+// (`a.b().c()`) is not a wrapper → stays intact → opaque.
+function unwrapDartReceiver(node: Node | null): Node | null {
+  let n = node;
+  while (n && (n.type === 'null_assertion_expression' || n.type === 'parenthesized_expression')) {
+    let inner: Node | null = null;
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (!c || c.type === '(' || c.type === ')' || c.type === '!' || c.type === 'comment') continue;
+      inner = c;
+      break;
+    }
+    if (!inner) break;
+    n = inner;
+  }
+  return n;
+}
+
+// Reduces a member-expression (`a.m()`), null-aware member call (`a?.m()` —
+// `null_aware_member_expression`, the dominant Dart null-safety call shape, which
+// shares object/property fields), OR cascade-call callee to {receiver, property}.
+// `this` is a fixed token (a `this` node), decided here like Swift/Kotlin/Python.
+// A non-null `a!.m()` or parenthesized `(a).m()` receiver is unwrapped to its token
+// too. A chained/computed receiver (`a.b().c()`, `list[0].run()`) carries
+// RECEIVER_OPAQUE: findable by name but never resolved. `super.m()` / `super..m()`
+// and computed/non-identifier property names emit nothing.
 function dartMemberCallInfo(callee: Node): MemberCallInfo | null {
-  if (callee.type === 'member_expression') {
-    // unwrapClosureTail recovers the `() => obj.m()` arrow-closure misparse, where
-    // the receiver `obj` is the function_expression object's arrow-body tail.
-    const object = unwrapClosureTail(callee.childForFieldName('object'));
+  if (callee.type === 'member_expression' || callee.type === 'null_aware_member_expression') {
+    // unwrapClosureTail recovers the `() => obj.m()` arrow-closure misparse; then
+    // peel `!`/parens wrappers to recover a resolvable single-identifier receiver.
+    const object = unwrapDartReceiver(unwrapClosureTail(callee.childForFieldName('object')));
     const property = callee.childForFieldName('property');
     if (property?.type !== 'identifier') return null;
     if (object?.type === 'this') return { receiver: 'this', property: property.text, isSelf: true };
     if (object?.type === 'identifier') return { receiver: object.text, property: property.text, isSelf: false };
-    return null; // chained call / computed / super receiver
+    if (object?.type === 'super') return null; // parent-class call, skipped (the TS/Java rule)
+    return { receiver: RECEIVER_OPAQUE, property: property.text, isSelf: false };
   }
   if (callee.type === 'cascade_call_expression') {
     const property = callee.childForFieldName('property');
@@ -152,15 +180,41 @@ function dartMemberCallInfo(callee: Node): MemberCallInfo | null {
     // (not namedChildren) because the `this` target is an ANONYMOUS token.
     const section = callee.parent;
     if (section?.type !== 'cascade_section') return null;
+    // Skip comments while navigating siblings — `obj /*c*/ ..m()` and
+    // `obj..m() /*c*/ ..n()` would otherwise land the target/walk on a comment node.
+    const prevNonComment = (x: Node): Node | null => {
+      let p = x.previousSibling;
+      while (p && p.type === 'comment') p = p.previousSibling;
+      return p;
+    };
     let first = section;
-    while (first.previousSibling?.type === 'cascade_section') first = first.previousSibling;
-    const target = first.previousSibling;
+    while (prevNonComment(first)?.type === 'cascade_section') first = prevNonComment(first)!;
+    const target = unwrapDartReceiver(prevNonComment(first));
     if (target?.type === 'this') return { receiver: 'this', property: property.text, isSelf: true };
     if (target?.type === 'identifier') return { receiver: target.text, property: property.text, isSelf: false };
-    return null; // construction/chained/computed cascade target — can't resolve
+    if (target?.type === 'super') return null; // `super..m()` parent-class call (the member-form rule)
+    // construction/chained/computed cascade target → opaque (findable, unresolved).
+    return { receiver: RECEIVER_OPAQUE, property: property.text, isSelf: false };
   }
   return null;
 }
+
+// Dominant Dart Iterable/collection/string/Future method names (>=4 chars)
+// suppressed when a member call to them is unresolved — capturing chained
+// `.where().map().toList()` calls otherwise floods the name-keyed store. Domain
+// method names are deliberately absent. <=3-char names (`.map`) are gated
+// downstream by SHORT_NAME_THRESHOLD.
+const DART_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
+  'where', 'expand', 'reduce', 'fold', 'forEach', 'firstWhere', 'lastWhere',
+  'singleWhere', 'every', 'contains', 'containsKey', 'containsValue', 'elementAt',
+  'toList', 'toSet', 'toString', 'join', 'skip', 'take', 'takeWhile',
+  'skipWhile', 'followedBy', 'whereType', 'cast', 'asMap', 'indexOf',
+  'sublist', 'insert', 'remove', 'removeAt', 'removeWhere', 'removeLast',
+  'clear', 'sort', 'shuffle', 'addAll', 'getRange',
+  'substring', 'replaceAll', 'replaceFirst', 'split', 'trim', 'startsWith',
+  'endsWith', 'padLeft', 'padRight', 'toLowerCase', 'toUpperCase', 'then',
+  'catchError', 'whenComplete', 'listen', 'cancel', 'noSuchMethod',
+]);
 
 // Per-file duplicate-id disambiguation. A named ctor duplicating a method name,
 // or an extension method duplicating a type method, can be byte-identical in
@@ -216,6 +270,7 @@ export function extractDart(
       // bare call to a 'class'-kind symbol via bareCallableKinds.
       ambiguousClassNames: ambiguousTypeNames,
       ignoredBareCallees: DART_IGNORED_BARE_CALLEES,
+      ignoredMemberCallees: DART_IGNORED_MEMBER_CALLEES,
     },
   );
   return { symbols: ctx.symbols, references, imports: ctx.imports };

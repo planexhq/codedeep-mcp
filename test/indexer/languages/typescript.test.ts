@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { extractSymbols } from '../../../src/indexer/extractor.js';
 import { initParser, parseFile } from '../../../src/indexer/parser.js';
+import { RECEIVER_OPAQUE } from '../../../src/types.js';
 import { makeFileInfo } from '../../helpers.js';
 
 function extract(src: string, language = 'typescript', path = 'src/test.ts') {
@@ -565,13 +566,62 @@ describe('typescript extractor — within-file call references', () => {
     expect(result.references[0]!.receiver).toBe('obj');
   });
 
-  it('skips chained member calls (a.b.c() and foo().bar())', () => {
+  it('captures chained member calls under an opaque receiver (a.b.c(), foo().bar())', () => {
     const src = 'function caller() { a.b.c(); foo().bar(); }';
     const result = extract(src);
-    // foo() itself is a bare call and still emits; the .bar() and a.b.c()
-    // member chains do not.
-    expect(result.references).toHaveLength(1);
-    expect(result.references[0]!.targetName).toBe('foo');
+    // foo() is a bare call; a.b.c() and foo().bar() are now captured as
+    // name-keyed member refs with an opaque (non-resolvable) receiver, so the
+    // called method stays findable by name. None resolve (targetId null).
+    const byName = new Map(result.references.map((r) => [r.targetName, r]));
+    // foo() IS captured (the inner bare call of foo().bar()) and as a bare ref —
+    // assert presence so the receiver check can't pass vacuously on a missing foo.
+    expect(byName.has('foo')).toBe(true);
+    expect(byName.get('foo')!.receiver).toBeUndefined(); // bare call
+    expect(byName.get('c')?.receiver).toBe(RECEIVER_OPAQUE);
+    expect(byName.get('c')?.targetId).toBeNull();
+    expect(byName.get('bar')?.receiver).toBe(RECEIVER_OPAQUE);
+    expect(byName.get('bar')?.selfReceiver).toBeUndefined();
+  });
+
+  it('unwraps non-null and parenthesized receivers so a!.x() / (a).x() resolve like a.x()', () => {
+    const src = 'function caller(a: any) { a!.foo(); (a).bar(); a!.b().baz(); }';
+    const result = extract(src);
+    const byName = new Map(result.references.map((r) => [r.targetName, r]));
+    // a!.foo() and (a).bar() recover the single-identifier receiver `a` (not opaque),
+    // so the call ranks/resolves like a.foo() instead of being needlessly weak.
+    expect(byName.get('foo')!.receiver).toBe('a');
+    expect(byName.get('bar')!.receiver).toBe('a');
+    // inner a!.b() also recovers `a`; the genuinely chained outer .baz() (receiver
+    // is a call_expression, not a wrapper) stays opaque.
+    expect(byName.get('b')!.receiver).toBe('a');
+    expect(byName.get('baz')!.receiver).toBe(RECEIVER_OPAQUE);
+  });
+
+  it('unwraps this!.x() to a self-receiver that resolves to a sibling method', () => {
+    const src = 'class C { go() { this!.helper(); } helper() {} }';
+    const result = extract(src);
+    const ref = result.references.find((r) => r.targetName === 'helper')!;
+    expect(ref.receiver).toBe('this');
+    expect(ref.selfReceiver).toBe(true);
+  });
+
+  it('skips a leading inline comment when unwrapping a parenthesized receiver', () => {
+    const result = extract('function caller(a: any) { (/*c*/ a).foo(); }');
+    const ref = result.references.find((r) => r.targetName === 'foo')!;
+    // `(/*c*/ a)` — the comment is a NAMED firstNamedChild; skip it to recover `a`
+    // (otherwise the receiver would needlessly degrade to RECEIVER_OPAQUE).
+    expect(ref.receiver).toBe('a');
+  });
+
+  it('suppresses unresolved chained calls to common fluent/stdlib names', () => {
+    // `.filter`/`.then` are in TS_IGNORED_MEMBER_CALLEES and unresolved here,
+    // so they emit nothing; `.validate` (a domain name) is captured opaque.
+    const src = 'function caller() { items.filter(); p.then(); x.y().validate(); }';
+    const result = extract(src);
+    const names = result.references.map((r) => r.targetName);
+    expect(names).not.toContain('filter');
+    expect(names).not.toContain('then');
+    expect(names).toContain('validate');
   });
 
   it('skips super.method() calls', () => {

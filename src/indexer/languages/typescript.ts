@@ -1,6 +1,6 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
-import { IMPORT_DEFAULT, IMPORT_NAMESPACE } from '../../types.js';
+import { IMPORT_DEFAULT, IMPORT_NAMESPACE, RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import {
   SIGNATURE_DISPLAY_CAP,
@@ -56,9 +56,48 @@ function jsxComponentName(node: Node): Node | null {
   return name;
 }
 
-// Single-level member callees only: `this.x()` and `obj.x()` qualify;
-// chained (`a.b.c()`), computed (`foo().bar()`), `super.x()`, and
-// non-null-asserted receivers return null and emit nothing.
+// Dominant JS/TS fluent/stdlib method names (>=4 chars) suppressed when a
+// member call to them is unresolved — without this, capturing chained calls
+// floods the name-keyed store with `.then()`/`.filter()`/`.map()`-style noise.
+// Domain method names (zod's `.optional`/`.nullable`/`.refine`, etc.) are
+// deliberately absent — those are the recall win. <=3-char names (`.map`,
+// `.get`, `.set`) are gated downstream by SHORT_NAME_THRESHOLD, so they're
+// omitted here.
+const TS_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
+  'then', 'catch', 'finally', 'filter', 'forEach', 'reduce', 'flatMap',
+  'concat', 'slice', 'splice', 'indexOf', 'lastIndexOf', 'includes', 'join',
+  'find', 'findIndex', 'some', 'every', 'sort', 'reverse', 'push',
+  'replace', 'replaceAll', 'trim', 'split', 'startsWith', 'endsWith',
+  'substring', 'toLowerCase', 'toUpperCase', 'toString', 'valueOf',
+  'keys', 'values', 'entries', 'hasOwnProperty', 'charAt', 'padStart',
+  'padEnd', 'repeat', 'delete',
+]);
+
+// Peels receiver wrappers that are transparent to receiver IDENTITY:
+// `non_null_expression` (`a!`) and `parenthesized_expression` (`(a)`). The
+// wrapped expression is the first NON-COMMENT named child (the `!` and parens are
+// anonymous tokens; a leading inline comment — `(/*c*/ a)` — is a NAMED node, so
+// skip it, the same comment-skip the Go receiver unwrap does), so `a!.x()` /
+// `(a).x()` recover the inner `a`/`this` and resolve like `a.x()`. A genuinely
+// chained receiver (`a.b().c()` → call_expression) is NOT a wrapper and is left
+// intact → stays opaque.
+function unwrapReceiver(node: Node): Node {
+  let n = node;
+  while (n.type === 'non_null_expression' || n.type === 'parenthesized_expression') {
+    let inner = n.firstNamedChild;
+    while (inner && inner.type === 'comment') inner = inner.nextNamedSibling;
+    if (!inner) break;
+    n = inner;
+  }
+  return n;
+}
+
+// `this.x()` / `obj.x()` carry their literal receiver token; a non-null `a!.x()`
+// or parenthesized `(a).x()` receiver is unwrapped to that token too (so it
+// resolves like `a.x()`). Genuinely chained or indexed receivers (`a.b().c()`,
+// `arr[0].run()`) carry RECEIVER_OPAQUE so the called method stays findable by
+// name (recall) but never resolves. `super.x()` (parent-class call) and
+// computed-property calls (no clean property name, e.g. `foo()[k]()`) emit nothing.
 function tsMemberCallInfo(callee: Node): MemberCallInfo | null {
   if (callee.type !== 'member_expression') return null;
   const obj = callee.childForFieldName('object');
@@ -67,11 +106,13 @@ function tsMemberCallInfo(callee: Node): MemberCallInfo | null {
   if (prop.type !== 'property_identifier' && prop.type !== 'private_property_identifier') {
     return null;
   }
-  if (obj.type === 'this') return { receiver: 'this', property: prop.text, isSelf: true };
-  if (obj.type === 'identifier') {
-    return { receiver: obj.text, property: prop.text, isSelf: false };
+  const recv = unwrapReceiver(obj);
+  if (recv.type === 'this') return { receiver: 'this', property: prop.text, isSelf: true };
+  if (recv.type === 'identifier') {
+    return { receiver: recv.text, property: prop.text, isSelf: false };
   }
-  return null;
+  if (recv.type === 'super') return null;
+  return { receiver: RECEIVER_OPAQUE, property: prop.text, isSelf: false };
 }
 
 export function extractTypeScript(
@@ -108,6 +149,7 @@ export function extractTypeScript(
     TS_SKIP_TYPES,
     TS_FUNCTION_BODY_SKIP_TYPES,
     tsMemberCallInfo,
+    { ignoredMemberCallees: TS_IGNORED_MEMBER_CALLEES },
   );
   return { symbols, references, imports };
 }

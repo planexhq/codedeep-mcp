@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { extractSymbols } from '../../../src/indexer/extractor.js';
 import { initParser, parseFile } from '../../../src/indexer/parser.js';
+import { RECEIVER_OPAQUE } from '../../../src/types.js';
 import { makeFileInfo } from '../../helpers.js';
 
 function extract(src: string, language = 'go', path = 'src/test.go') {
@@ -568,12 +569,19 @@ describe('go extractor — references: members and self-receiver', () => {
     expect(ref.selfReceiver).toBeUndefined();
   });
 
-  it('chained and computed receivers emit nothing', () => {
+  it('captures chained and computed receivers under an opaque receiver', () => {
     const result = extract(
       `${PKG}func F(s *Wrapper) {\n\ts.conn.Close()\n\tget().Run()\n}\n`,
     );
-    expect(result.references.find((r) => r.targetName === 'Close')).toBeUndefined();
-    expect(result.references.find((r) => r.targetName === 'Run')).toBeUndefined();
+    // Chained `s.conn.Close()` (operand is a selector_expression) and computed
+    // `get().Run()` (operand is a call) are now captured under RECEIVER_OPAQUE:
+    // findable by method name (recall) but never resolved.
+    const close = result.references.find((r) => r.targetName === 'Close')!;
+    expect(close.receiver).toBe(RECEIVER_OPAQUE);
+    expect(close.targetId).toBeNull();
+    const run = result.references.find((r) => r.targetName === 'Run')!;
+    expect(run.receiver).toBe(RECEIVER_OPAQUE);
+    expect(run.targetId).toBeNull();
   });
 
   it('package-qualified calls are unresolved member refs', () => {

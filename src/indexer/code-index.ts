@@ -8,6 +8,7 @@ import {
   IMPORT_DEFAULT,
   IMPORT_NAMESPACE,
   NON_CALLABLE_KINDS,
+  RECEIVER_OPAQUE,
   classNameFromFqn,
 } from '../types.js';
 import type {
@@ -22,15 +23,18 @@ import type {
   SymbolKind,
 } from '../types.js';
 
-// v7: symbol ids hash the FULL untruncated signature (the stored signature
-// stays capped at 120 chars for display). Under v6, overloads differing
-// only past the cap shared an id, silently merging their reference graphs
-// — the bump forces the rebuild that re-keys every long-signature symbol.
-// (v6 added enum + namespace-declaration extraction; v5 added persisted
-// git enrichment: FileInfo.commitFrequency, co-change lists, hotspots,
-// gitMeta; v4 added member-expression call refs; v3 added
-// ImportedName.kind.)
-const SCHEMA_VERSION = 7;
+// v8: chained/computed member calls (`a.b().c()`, `foo().bar()`) are now
+// captured as name-keyed member refs with an opaque receiver (RECEIVER_OPAQUE).
+// A pure extraction-logic change that `isUnchanged` (mtime/size/language) can't
+// detect, so the bump force-invalidates warm caches to re-extract. v7: symbol
+// ids hash the FULL untruncated signature (the stored signature stays capped at
+// 120 chars for display). Under v6, overloads differing only past the cap shared
+// an id, silently merging their reference graphs — the bump forces the rebuild
+// that re-keys every long-signature symbol. (v6 added enum + namespace-declaration
+// extraction; v5 added persisted git enrichment: FileInfo.commitFrequency,
+// co-change lists, hotspots, gitMeta; v4 added member-expression call refs; v3
+// added ImportedName.kind.)
+const SCHEMA_VERSION = 8;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both
@@ -829,8 +833,12 @@ export class CodeIndex {
     return { root, totalNodes, truncated, limitations: CALLER_TREE_LIMITATIONS };
   }
 
-  // Filtered + memoized direct callers of `target` — the exact set
-  // find_references renders, so depth-1 of the tree matches it.
+  // Filtered + memoized direct callers of `target` — the same candidate set
+  // find_references draws from (getReferencesByNameOrAlias + isCallerOf). The
+  // underlying caller set is identical, but the RENDERED cardinality can differ:
+  // the tree groups per caller symbol and caps breadth at
+  // DEFAULT_CALLER_TREE_BREADTH, while find_references lists per ref-site and
+  // caps weak member rows at WEAK_MEMBER_ROW_CAP.
   private resolveDirectCallers(
     target: Symbol,
     cache: Map<string, Reference[]>,
@@ -885,7 +893,11 @@ export class CodeIndex {
       }
       return 'name-match';
     }
-    return fileImportsReceiver(imports, ref.receiver)
+    // An opaque (chained/computed) receiver can never name an import, so skip
+    // the guaranteed-false scan and weak-classify directly — the same
+    // short-circuit rankRefs applies, keeping the two classifiers in lockstep on
+    // the hot impact caller-tree path (chained capture makes opaque dominant).
+    return ref.receiver !== RECEIVER_OPAQUE && fileImportsReceiver(imports, ref.receiver)
       ? 'import-connected'
       : 'weak-member';
   }
@@ -1390,6 +1402,13 @@ export class CodeIndex {
     targetFile: string,
     targetIsMember: boolean,
   ): boolean {
+    // An opaque (chained/computed) receiver can never name an import binding,
+    // so the scan below would always fall through to the weak include — skip
+    // it, matching rankRefs and edgeStrength (the sibling classifiers named in
+    // types.ts), which both short-circuit the same guaranteed-false scan for
+    // RECEIVER_OPAQUE. Keeps the three in lockstep on the hot per-call path
+    // (chained capture makes opaque the dominant member-ref shape).
+    if (receiver === RECEIVER_OPAQUE) return true;
     const importingFile = this.fileByPath.get(ref.file);
     if (!importingFile) return true;
     for (const imp of this.importsByFile.get(ref.file) ?? []) {

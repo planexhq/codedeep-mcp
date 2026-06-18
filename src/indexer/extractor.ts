@@ -38,18 +38,33 @@ export interface PendingBody {
   selfReceiverName?: string;
 }
 
-// A member-expression call site reduced to its two identifiers. Returned
-// by per-language readers for single-level receivers only; chained or
-// computed receivers (`a.b.c()`, `foo().bar()`) return null and emit
-// nothing — their receiver can't be matched against imports or class
-// names, so a ref would be pure name-noise.
+// A member-expression call site reduced to a receiver token + the called
+// property. Single-level receivers carry their literal token ('this',
+// 'utils', 'Class', ...) so they can resolve against imports/class names.
+// Chained / indexed receivers (`a.b().c()`, `arr[0].run()`) carry
+// `RECEIVER_OPAQUE` instead: they can't be matched to a class, so they stay
+// unresolved name-keyed member refs — findable by the called method name
+// (recall) but never a resolved edge. Readers still return null when there
+// is no clean property name (a computed-property call like `foo()[k]()`) or
+// for deliberate drops (`super`/`base`/`parent::`, Rust external
+// `scoped_identifier` paths).
 export interface MemberCallInfo {
-  // Literal receiver token: 'this', 'self', 'cls', 'utils', 'Class', ...
+  // Literal receiver token ('this', 'self', 'cls', 'utils', 'Class', ...) or
+  // RECEIVER_OPAQUE for a non-resolvable chained/computed receiver.
   receiver: string;
   // The called property/attribute name.
   property: string;
-  // True for this/self/cls — resolve against the enclosing class.
+  // True for this/self/cls — resolve against the enclosing class. Always
+  // false for an opaque receiver (a chain is never the enclosing instance).
   isSelf: boolean;
+  // True when this ref came from a qualified PATH call (Rust `A::B::name()`,
+  // `crate::m::f()`) rather than a dot-dispatched method call. Path calls are a
+  // small, reliably intra-crate population (NOT the dot-method stdlib flood the
+  // ignore set targets), so emit() exempts them from `ignoredMemberCallees` —
+  // a `crate::cfg::parse()` to an in-repo `fn parse` stays findable even though
+  // `.parse()` method calls are suppressed. Default undefined (dot-call); only
+  // Rust's scoped_identifier branches set it.
+  pathQualified?: boolean;
 }
 
 // Maps a call-like AST node to the identifier being "called" — function call,
@@ -124,6 +139,22 @@ export interface ResolveCallsOptions {
   // first-wins binding to the wrong one — the bare-path analogue of
   // ambiguousClassNames (which only guards the constructor-form and method paths).
   ambiguousBareCallees?: ReadonlySet<string>;
+  // Member-call property names that emit NO reference when UNRESOLVED
+  // (targetId === null) — the member analog of ignoredBareCallees. Capturing
+  // chained/member calls (`x.y().filter()`) floods the name-keyed store with
+  // dominant fluent/stdlib method names; this suppresses that noise. Applies to
+  // BOTH chained (opaque-receiver) and single-level member calls, but ONLY when
+  // unresolved, so a same-file `this.filter()` that resolves to a sibling method
+  // keeps its ref. Keep these to >=4-char names — SHORT_NAME_THRESHOLD already
+  // gates the rest downstream.
+  // ACCEPTED RECALL TRADEOFF (deliberate, the plan's "gate single-level too"
+  // decision): a NAMESPACE-import call to an in-repo function whose name is in the
+  // set — `import * as u; u.filter()` where `./u` exports `filter` — is dropped at
+  // EXTRACT time even though it would resolve to an import-connected (tier-2)
+  // caller at QUERY time (memberRefMatchesTarget). Suppressing the `arr.filter()`
+  // variable-receiver flood is worth this narrow loss; Go sidesteps it entirely
+  // with an EMPTY set (same-package resolution makes the flood resolvable instead).
+  ignoredMemberCallees?: ReadonlySet<string>;
 }
 
 const DEFAULT_BARE_CALLEE_TYPES: ReadonlySet<string> = new Set(['identifier']);
@@ -288,6 +319,7 @@ export function resolveCalls(
   const plainCalleeType = opts?.plainCalleeType ?? 'identifier';
   const constructorSelectorTypes = opts?.constructorSelectorTypes;
   const ambiguousBareCallees = opts?.ambiguousBareCallees;
+  const ignoredMemberCallees = opts?.ignoredMemberCallees;
   const nameToId = new Map<string, string>();
   for (const sym of symbols) {
     if (bareCallableKinds ? !bareCallableKinds.has(sym.kind) : NON_CALLABLE_KINDS.has(sym.kind)) {
@@ -377,8 +409,10 @@ export function resolveCalls(
     }
 
     // Member-expression callee (`obj.method()`, `this.x()`, `new ns.X()`).
-    // Single-level receivers only; the reader returns null for chains,
-    // `super`, and computed receivers, which are skipped entirely.
+    // Single-level receivers carry their token; chained/computed receivers
+    // carry RECEIVER_OPAQUE and flow through here as unresolved name-keyed
+    // member refs (recall — never resolved). The reader returns null only for
+    // `super`/`base`/`parent::` and computed-property calls with no clean name.
     // (JSX member components and bare member decorators never reach here —
     // their selectors return null for non-identifier names.)
     const member = memberCallInfo(callee);
@@ -394,6 +428,16 @@ export function resolveCalls(
     const targetId =
       (lookupClass ? methodsByClass.get(lookupClass)?.get(member.property) : undefined) ??
       null;
+    // Dominant fluent/stdlib method names (`.filter()`, `.then()`, ...) flood
+    // the name-keyed store once chained/member calls are captured. Drop them
+    // only when UNRESOLVED — a same-file `this.filter()` that bound to a real
+    // sibling method keeps its ref. Node is already in seenCallNodeIds, so the
+    // moduleRoot re-walk stays cheap and never re-emits it. Qualified PATH calls
+    // (`crate::cfg::parse()`) are EXEMPT: they're a small intra-crate population,
+    // not the dot-method flood, so suppressing them would defeat path-call recall.
+    if (targetId === null && !member.pathQualified && ignoredMemberCallees?.has(member.property)) {
+      return;
+    }
     const ref: Reference = {
       sourceId,
       targetId,

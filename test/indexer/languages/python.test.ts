@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { extractSymbols } from '../../../src/indexer/extractor.js';
 import { initParser, parseFile } from '../../../src/indexer/parser.js';
+import { RECEIVER_OPAQUE } from '../../../src/types.js';
 import { makeFileInfo } from '../../helpers.js';
 
 function extract(src: string, path = 'src/test.py') {
@@ -382,19 +383,76 @@ describe('python extractor — within-file calls', () => {
     expect(result.references[0]!.selfReceiver).toBeUndefined();
   });
 
-  it('skips super().method() and chained attribute calls', () => {
+  it('drops super().method() but captures other chained attribute calls opaquely', () => {
     const src = [
       'class Child(Base):',
       '    def render(self):',
-      '        super().render()',
-      '        a.b.c()',
+      '        super().compute()',
+      '        a.b.handle()',
       '',
     ].join('\n');
     const result = extract(src);
-    // super() itself is a bare call and still emits; the .render() and
-    // a.b.c() attribute chains do not.
-    expect(result.references).toHaveLength(1);
-    expect(result.references[0]!.targetName).toBe('super');
+    // Positive anchor: the method parsed (so the absences below are real drops,
+    // not a vacuous pass on a partial-extraction regression).
+    expect(result.symbols.some((s) => s.name === 'render')).toBe(true);
+    // super() itself is a bare call and still emits (receiver undefined).
+    expect(result.references.find((r) => r.targetName === 'super')!.receiver).toBeUndefined();
+    // super().compute() is parent-class dispatch — dropped (the TS/Java/Dart rule),
+    // even though super() is syntactically a `call` node like a genuine chain.
+    expect(result.references.find((r) => r.targetName === 'compute')).toBeUndefined();
+    // a.b.handle() (receiver `a.b`, a non-super chain) is captured under
+    // RECEIVER_OPAQUE — findable by method name (recall) but never resolved.
+    const handle = result.references.find((r) => r.targetName === 'handle')!;
+    expect(handle.receiver).toBe(RECEIVER_OPAQUE);
+    expect(handle.targetId).toBeNull();
+  });
+
+  it('suppresses unresolved chained calls to common stdlib names', () => {
+    const src = [
+      'def run(items):',
+      '    items.filter().append(1)',
+      '',
+    ].join('\n');
+    const result = extract(src);
+    // Positive anchors: the function parsed AND a non-suppressed chained name
+    // (`filter`, not in PY_IGNORED_MEMBER_CALLEES) IS captured — so the absence of
+    // `append` below is real suppression, not a vacuous parse/extraction failure.
+    expect(result.symbols.some((s) => s.name === 'run')).toBe(true);
+    expect(result.references.find((r) => r.targetName === 'filter')).toBeDefined();
+    // `.append` is in PY_IGNORED_MEMBER_CALLEES and unresolved → dropped.
+    expect(result.references.find((r) => r.targetName === 'append')).toBeUndefined();
+  });
+
+  it('captures the trimmed domain name close but keeps canonical Mapping names', () => {
+    const result = extract('def f(resp, d):\n    resp.close()\n    d.items()\n    d.update(x)\n');
+    const names = result.references.map((r) => r.targetName);
+    // close was REMOVED from PY_IGNORED_MEMBER_CALLEES after the requests dogfood
+    // (distinctive Response/Session/Adapter teardown method) → now captured.
+    expect(names).toContain('close');
+    // items/update stay suppressed (canonical MutableMapping; ~0–12% in-repo target).
+    expect(names).not.toContain('items');
+    expect(names).not.toContain('update');
+  });
+
+  it('unwraps parenthesized receivers: (a).m() like a.m(), (super()).m() drops, (self).m() is self', () => {
+    const src = [
+      'class C(Base):',
+      '    def go(self, a):',
+      '        (a).foo()',
+      '        (self).helper()',
+      '        (super()).compute()',
+      '    def helper(self):',
+      '        pass',
+      '',
+    ].join('\n');
+    const result = extract(src);
+    // (a).foo() recovers the single-identifier receiver `a` (not RECEIVER_OPAQUE).
+    expect(result.references.find((r) => r.targetName === 'foo')!.receiver).toBe('a');
+    // (self).helper() recovers self → resolves to the sibling method (self-call).
+    expect(result.references.find((r) => r.targetName === 'helper')!.selfReceiver).toBe(true);
+    // (super()).compute() is parent-class dispatch — dropped like bare super().compute()
+    // (the parenthesized form unwraps to the super() call before the drop fires).
+    expect(result.references.find((r) => r.targetName === 'compute')).toBeUndefined();
   });
 
   it('attributes self-calls inside a decorated method to the method', () => {

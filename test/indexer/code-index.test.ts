@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CodeIndex, isCallerOf } from '../../src/indexer/code-index.js';
+import { RECEIVER_OPAQUE } from '../../src/types.js';
 import type { CoChange, Reference, SymbolKind } from '../../src/types.js';
 import {
   makeFileInfo,
@@ -844,7 +845,7 @@ describe('CodeIndex edge cases', () => {
     await idx.save(cachePath);
 
     const data = JSON.parse(readFileSync(cachePath, 'utf8'));
-    expect(data.version).toBe(7);
+    expect(data.version).toBe(8);
     expect(data.projectRoot).toBe(tmpRoot);
     expect(Array.isArray(data.symbols)).toBe(true);
     expect(Array.isArray(data.files)).toBe(true);
@@ -2192,11 +2193,34 @@ describe('CodeIndex persistence — references round-trip', () => {
     expect(existsSync(cachePath)).toBe(false);
   });
 
-  it('rejects a cache whose reference carries a non-string receiver', async () => {
+  it('invalidates v7 caches, which lack chained/opaque-receiver member refs', async () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
         version: 7,
+        createdAt: 0,
+        projectRoot: tmpRoot,
+        symbols: [],
+        files: [],
+        imports: [],
+        callees: [],
+        callers: [],
+        references: [],
+        cochanges: [],
+        hotspots: [],
+        gitMeta: null,
+      }),
+    );
+    const idx = new CodeIndex(tmpRoot);
+    expect(await idx.load(cachePath)).toBe(false);
+    expect(existsSync(cachePath)).toBe(false);
+  });
+
+  it('rejects a cache whose reference carries a non-string receiver', async () => {
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        version: 8,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],
@@ -2741,7 +2765,7 @@ describe('CodeIndex git enrichment (schema v5)', () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
-        version: 7,
+        version: 8,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],
@@ -2764,7 +2788,7 @@ describe('CodeIndex git enrichment (schema v5)', () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
-        version: 7,
+        version: 8,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],
@@ -2930,6 +2954,40 @@ describe('isCallerOf — Go same-package exceptions', () => {
     });
     const caller = mkSym({ name: 'Do', file: 'cmd/main.go', language: 'go' });
     expect(isCallerOf(mkMemberRef(caller, 'logRequest', 'srv'), target)).toBe(false);
+  });
+
+  it('admits an OPAQUE chained member ref to an unexported same-package Go method (recall)', () => {
+    // `s.conn.logRequest()` — a chained receiver → RECEIVER_OPAQUE, targetId
+    // null. It still weak-includes against a same-package unexported method by
+    // name via the carve-out (an opaque receiver is treated like any unknown
+    // receiver) — the recall win, never a resolved edge.
+    const target = mkSym({
+      name: 'logRequest',
+      kind: 'method',
+      parent: 'Server',
+      file: 'pkg/log.go',
+      language: 'go',
+      exported: false,
+    });
+    const caller = mkSym({ name: 'Do', kind: 'method', parent: 'Client', file: 'pkg/client.go', language: 'go' });
+    const ref = mkMemberRef(caller, 'logRequest', RECEIVER_OPAQUE);
+    expect(ref.targetId).toBeNull(); // opaque never resolves at extract time
+    expect(isCallerOf(ref, target)).toBe(true);
+  });
+
+  it('still rejects an OPAQUE chained member ref to an unexported method across packages', () => {
+    // The same-package carve-out is the only thing admitting the opaque ref;
+    // across directories it must be rejected (precision boundary).
+    const target = mkSym({
+      name: 'logRequest',
+      kind: 'method',
+      parent: 'Server',
+      file: 'pkg/log.go',
+      language: 'go',
+      exported: false,
+    });
+    const caller = mkSym({ name: 'Do', file: 'cmd/main.go', language: 'go' });
+    expect(isCallerOf(mkMemberRef(caller, 'logRequest', RECEIVER_OPAQUE), target)).toBe(false);
   });
 
   it('still rejects unexported member refs from non-Go files in the directory', () => {

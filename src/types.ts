@@ -44,6 +44,15 @@ export type RefKind = 'calls' | 'imports' | 'implements' | 'type_ref';
 export const IMPORT_DEFAULT = 'default' as const;
 export const IMPORT_NAMESPACE = '*' as const;
 
+// Receiver sentinel for member calls whose receiver is NOT a single resolvable
+// token — chained `a.b().c()`, indexed `arr[0].run()`, non-null `a!.b()`. A
+// non-identifier marker, so it can never collide with a real receiver name or an
+// import local: the consumers (memberRefMatchesTarget / rankRefs / edgeStrength)
+// already treat an unknown receiver as a weak, tier-5, never-resolved member
+// include. These refs are therefore FINDABLE by method name (recall) but can
+// never form a resolved cross-file edge.
+export const RECEIVER_OPAQUE = '()' as const;
+
 // Discriminator for binding semantics, separate from the syntactic
 // `name` slot. Bare `localName()` calls are evidence of a value-callable
 // binding only when kind is 'value' (or absent — legacy persisted data
@@ -100,11 +109,11 @@ export interface Reference {
   kind: RefKind;
   file: string;
   line: number;
-  // Present iff the call site was a member expression whose receiver is a
-  // single identifier or this/self/cls — the literal source token ('this',
-  // 'self', 'utils', 'Class', ...). Deeper chains (`a.b.c()`) are never
-  // emitted, so `receiver !== undefined` ⟺ member-call ref. Drives
-  // enclosing-class resolution, namespace-import resolution, and noise
+  // Present iff the call site was a member expression. A single-identifier /
+  // this/self/cls receiver carries its literal source token ('this', 'self',
+  // 'utils', 'Class', ...); a chained/computed receiver (`a.b().c()`) carries
+  // RECEIVER_OPAQUE. Either way `receiver !== undefined` ⟺ member-call ref.
+  // Drives enclosing-class resolution, namespace-import resolution, and noise
   // gating in `isCallerOf`. The key is omitted (never set to undefined)
   // for bare calls so persisted JSON stays clean.
   receiver?: string;

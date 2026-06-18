@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { extractSymbols } from '../../../src/indexer/extractor.js';
 import { initParser, parseFile } from '../../../src/indexer/parser.js';
+import { RECEIVER_OPAQUE } from '../../../src/types.js';
 import { makeFileInfo } from '../../helpers.js';
 
 function extract(src: string, path = 'src/test.php') {
@@ -318,6 +319,71 @@ describe('php extractor — call resolution', () => {
   it('nullsafe member call is handled like a normal member call', () => {
     const result = extract(`<?php\nclass C {\n  public function run($obj): void { $obj?->maybe(); }\n}\n`);
     expect(hasRef(result, 'maybe')).toBe(true);
+  });
+
+  it('captures a chained instance call under an opaque receiver', () => {
+    const result = extract(`<?php\nclass C {\n  public function run($x): void { $x->b()->deep(); }\n}\n`);
+    // `$x->b()` keeps its `$x` receiver; the chained `->deep()` (object is a
+    // member_call_expression, not a variable_name) is captured under
+    // RECEIVER_OPAQUE — findable by method name (recall) but never resolved.
+    const b = result.references.find((r) => r.targetName === 'b')!;
+    expect(b.receiver).toBe('$x');
+    const deep = result.references.find((r) => r.targetName === 'deep')!;
+    expect(deep.receiver).toBe(RECEIVER_OPAQUE);
+    expect(deep.targetId).toBeNull();
+  });
+
+  it('captures a chained static call under an opaque receiver', () => {
+    const result = extract(`<?php\nclass C {\n  public function run(): void { Foo::bar()::baz(); }\n}\n`);
+    // `Foo::bar()::baz()` — the outer `::baz()` scope is itself a
+    // scoped_call_expression (a chained static call), captured under
+    // RECEIVER_OPAQUE like the chained-instance form; never resolved.
+    const baz = result.references.find((r) => r.targetName === 'baz')!;
+    expect(baz.receiver).toBe(RECEIVER_OPAQUE);
+    expect(baz.targetId).toBeNull();
+  });
+
+  it('captures dynamic + computed static calls under an opaque receiver', () => {
+    // The static path mirrors the instance catch-all: every runtime-computed
+    // scope (variable `$cls::`, parenthesized `(new X())::`, indexed `$a[0]::`)
+    // is opaque — findable by method name, never resolved. The Laravel/Eloquent
+    // `$model::query()` idiom lives here; before the fix these dropped entirely.
+    const result = extract(
+      `<?php\nclass C {\n  public function run($cls, $a): void { $cls::create(); (new Foo())::make(); $a[0]::dispatch(); }\n}\n`,
+    );
+    for (const name of ['create', 'make', 'dispatch']) {
+      const ref = result.references.find((r) => r.targetName === name)!;
+      expect(ref, name).toBeDefined();
+      expect(ref.receiver, name).toBe(RECEIVER_OPAQUE);
+      expect(ref.targetId, name).toBeNull();
+    }
+  });
+
+  it('qualified + namespace-relative static scopes stay dropped (cross-namespace identity)', () => {
+    // `\App\Ns::run()` (qualified_name) and `namespace\Other::handle()`
+    // (relative_name) are identity-bearing — their final segment routinely
+    // collides with a same-named in-repo class, so they must NOT become opaque
+    // refs (the deliberate drops the catch-all preserves via explicit guards).
+    const result = extract(
+      `<?php\nnamespace App;\nclass C {\n  public function go(): void { \\App\\Ns::run(); namespace\\Other::handle(); }\n}\n`,
+    );
+    expect(hasRef(result, 'run')).toBe(false);
+    expect(hasRef(result, 'handle')).toBe(false);
+  });
+
+  it('suppresses unresolved stdlib member names but keeps the domain `format`', () => {
+    // getCode ∈ PHP_IGNORED_MEMBER_CALLEES + unresolved → dropped (both the
+    // single-level `$e->getCode()` and the chained `->getMessage()`). `format`
+    // was REMOVED from the set (measured 1166 `->format()` sites / 8 domain defs
+    // on Carbon — a distinctive fluent method, not stdlib noise), so it survives.
+    const result = extract(
+      `<?php\nclass C {\n  public function run($e): void { $e->getCode()->getMessage(); $e->fmt()->format(); }\n}\n`,
+    );
+    expect(hasRef(result, 'getCode')).toBe(false);
+    expect(hasRef(result, 'getMessage')).toBe(false);
+    const f = result.references.find((r) => r.targetName === 'format')!;
+    expect(f.receiver).toBe(RECEIVER_OPAQUE);
+    expect(f.targetId).toBeNull();
   });
 
   it('namespaced bare call and qualified construction are dropped', () => {

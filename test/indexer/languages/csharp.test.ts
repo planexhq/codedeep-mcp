@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { extractSymbols } from '../../../src/indexer/extractor.js';
 import { initParser, parseFile } from '../../../src/indexer/parser.js';
+import { RECEIVER_OPAQUE } from '../../../src/types.js';
 import { makeFileInfo } from '../../helpers.js';
 
 function extract(src: string, language = 'csharp', path = 'src/test.cs') {
@@ -262,9 +263,33 @@ describe('csharp extractor — calls and resolution', () => {
     expect(ref.receiver).toBe('obj');
   });
 
-  it('chained calls a.b.c() are not recorded (single-level only)', () => {
+  it('chained calls a.b.c() are captured under an opaque receiver', () => {
     const result = extract(`class C {\n  void A() { x.y.z(); }\n}\n`);
-    expect(hasRef(result, 'z')).toBe(false);
+    // The chained `.z()` (expression is a member_access) is now captured under
+    // RECEIVER_OPAQUE — findable by method name (recall) but never resolved.
+    const z = result.references.find((r) => r.targetName === 'z')!;
+    expect(z.receiver).toBe(RECEIVER_OPAQUE);
+    expect(z.targetId).toBeNull();
+  });
+
+  it('suppresses unresolved chained calls to common LINQ/stdlib names', () => {
+    const result = extract(`class C {\n  void A() { items.Where(x => true).Select(x => x); }\n}\n`);
+    expect(hasRef(result, 'Where')).toBe(false);
+    expect(hasRef(result, 'Select')).toBe(false);
+  });
+
+  it('conditional-access chains key on the CALLED method, not the intermediate binding', () => {
+    const result = extract(`class C {\n  void A(D a) { a?.b?.Build(); a?.c.Run(); }\n}\n`);
+    // Each `?.` nests its left into the condition, so the outer conditional-access
+    // (or member_access) callee yields the CALLED method — Build/Run — chained →
+    // opaque, never resolved. The intermediate `b`/`c` are bindings, not calls.
+    const build = result.references.find((r) => r.targetName === 'Build')!;
+    expect(build.receiver).toBe(RECEIVER_OPAQUE);
+    expect(build.targetId).toBeNull();
+    const run = result.references.find((r) => r.targetName === 'Run')!;
+    expect(run.receiver).toBe(RECEIVER_OPAQUE);
+    // the intermediate `b` must NOT be mis-captured as a called method.
+    expect(result.references.some((r) => r.targetName === 'b')).toBe(false);
   });
 
   it('field initializers attribute their calls to the field', () => {

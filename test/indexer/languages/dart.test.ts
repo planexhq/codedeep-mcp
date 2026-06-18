@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { extractSymbols } from '../../../src/indexer/extractor.js';
 import { initParser, parseFile } from '../../../src/indexer/parser.js';
+import { RECEIVER_OPAQUE } from '../../../src/types.js';
 import { makeFileInfo } from '../../helpers.js';
 
 function extract(src: string, language = 'dart', path = 'src/test.dart') {
@@ -383,9 +384,66 @@ describe('dart extractor — references', () => {
     expect(result.references.some((r) => r.targetName === 'build')).toBe(false);
   });
 
-  it('does not emit a ref for a chained receiver call', () => {
+  it('captures a chained receiver call under an opaque receiver', () => {
     const result = extract(`void a() {\n  x().y();\n}\n`);
-    expect(result.references.some((r) => r.targetName === 'y')).toBe(false);
+    // The chained `.y()` (object is a call_expression) is now captured under
+    // RECEIVER_OPAQUE — findable by method name (recall) but never resolved.
+    const y = result.references.find((r) => r.targetName === 'y')!;
+    expect(y.receiver).toBe(RECEIVER_OPAQUE);
+    expect(y.targetId).toBeNull();
+  });
+
+  it('suppresses unresolved chained calls to common stdlib names', () => {
+    const result = extract(`void a(List xs) {\n  xs.where((e) => true).toList();\n}\n`);
+    const names = result.references.map((r) => r.targetName);
+    // where/toList ∈ DART_IGNORED_MEMBER_CALLEES and unresolved → dropped.
+    expect(names).not.toContain('where');
+    expect(names).not.toContain('toList');
+  });
+
+  it('does not emit a ref for a super-receiver call', () => {
+    const result = extract(`class C extends B {\n  void a() {\n    super.tearDown();\n  }\n}\n`);
+    // Positive anchor: the body parsed and produced the method, so the absence
+    // below is real super-dropping, not a vacuous zero-ref parse failure.
+    expect(result.symbols.some((s) => s.name === 'a')).toBe(true);
+    // `super.m()` (object is a `super` node) stays dropped (parent-class call).
+    expect(result.references.some((r) => r.targetName === 'tearDown')).toBe(false);
+  });
+
+  it('does not emit a ref for a super-cascade call', () => {
+    const result = extract(`class C extends B {\n  void a() {\n    super..setUp()..run();\n  }\n}\n`);
+    expect(result.symbols.some((s) => s.name === 'a')).toBe(true); // anchor: body parsed
+    // `super..m()` (cascade target is a `super` node) is parent-class dispatch —
+    // dropped like the member form, not captured opaque.
+    expect(result.references.some((r) => r.targetName === 'setUp')).toBe(false);
+    expect(result.references.some((r) => r.targetName === 'run')).toBe(false);
+  });
+
+  it('captures null-aware a?.m() and unwraps a!.m() / (a).m() receivers', () => {
+    const result = extract(`void z(a) {\n  a?.foo();\n  a!.bar();\n  (a).baz();\n  a?.qux()?.chain();\n}\n`);
+    const byName = new Map(result.references.map((r) => [r.targetName, r]));
+    // a?.foo() (null_aware_member_expression) was previously UNROUTED → emitted
+    // nothing; now captured with receiver `a`. a! / (a) unwrap to `a` too.
+    expect(byName.get('foo')!.receiver).toBe('a');
+    expect(byName.get('bar')!.receiver).toBe('a');
+    expect(byName.get('baz')!.receiver).toBe('a');
+    // the chained outer ?.chain() (receiver is a call_expression) stays opaque.
+    expect(byName.get('chain')!.receiver).toBe(RECEIVER_OPAQUE);
+  });
+
+  it('unwraps a parenthesized `(this)` to a self-call and skips comments in cascade targets', () => {
+    const result = extract(
+      `class C {\n  void a(obj) {\n    (this).sib();\n    obj /*c*/ ..casc();\n  }\n  void sib() {}\n}\n`,
+    );
+    // `this` is an ANONYMOUS token inside the parens; the all-children scan (not
+    // firstNamedChild) recovers it → self-call resolving to the sibling C.sib.
+    const sib = result.references.find((r) => r.targetName === 'sib')!;
+    expect(sib.receiver).toBe('this');
+    expect(sib.targetId).toBe(result.symbols.find((s) => s.name === 'sib')!.id);
+    // a comment between the cascade receiver and `..` no longer degrades the target
+    // to RECEIVER_OPAQUE — the previousSibling walk skips comment nodes.
+    const casc = result.references.find((r) => r.targetName === 'casc')!;
+    expect(casc.receiver).toBe('obj');
   });
 
   it('resolves a self-call inside an extension method body', () => {

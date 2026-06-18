@@ -1,6 +1,6 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
-import { IMPORT_NAMESPACE } from '../../types.js';
+import { IMPORT_NAMESPACE, RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import {
   SIGNATURE_DISPLAY_CAP,
@@ -90,20 +90,59 @@ const KOTLIN_SELECTORS: ReadonlyArray<CallSelector> = [
   { nodeType: 'call_expression', getCallee: kotlinCallCallee },
 ];
 
+// Peels transparent receiver wrappers off a navigation receiver so a wrapped
+// receiver resolves like the bare form — non-null assertion `a!!`, parens `(a)`,
+// and an `as`/`as?` cast — so `a!!.x()` / `(a).x()` resolve like `a.x()`. `a!!`,
+// `a++`/`a--`, and a parenthesized prefix `-a`/`!a` are all `unary_expression`, so
+// peel ONLY when the trailing child is the anon `!!` token (prefix forms have the
+// named operand last → skipped). firstNamedChild is the operand. A peeled
+// `(super)`/`(this)` lands on the super_expression/this_expression and re-hits
+// kotlinMemberCallInfo's super-drop / self handling below. NOTE: an `as`-cast is
+// peeled to its VALUE (the type is discarded) — `(this as Foo).m()` becomes a
+// self-call on the enclosing class (correct for virtual members via dynamic
+// dispatch; a rare wrong-target only for shadowing extension funcs — see
+// MCR-java-cast-receiver, accepted).
+function unwrapKotlinReceiver(node: Node): Node {
+  let n = node;
+  for (;;) {
+    if (n.type === 'parenthesized_expression') {
+      let inner = n.firstNamedChild;
+      // tree-sitter-kotlin names comments `line_comment`/`block_comment`, never `comment`.
+      while (inner && (inner.type === 'line_comment' || inner.type === 'block_comment'))
+        inner = inner.nextNamedSibling;
+      if (!inner) break;
+      n = inner;
+    } else if (n.type === 'unary_expression') {
+      const last = n.child(n.childCount - 1);
+      if (!last || last.isNamed || last.text !== '!!') break; // non-null assertion only
+      const inner = n.firstNamedChild;
+      if (!inner) break;
+      n = inner;
+    } else if (n.type === 'as_expression') {
+      const inner = n.firstNamedChild;
+      if (!inner) break;
+      n = inner;
+    } else break;
+  }
+  return n;
+}
+
 // Reduces a `navigation_expression` callee (`obj.m()`, `this.m()`, `C.make()`)
-// to {receiver, property}. Single-level receivers only: a chained `a.b.c()` has
-// a navigation_expression receiver and returns null (same contract as the other
-// languages). `this` is a fixed token (a `this_expression` node), decided here
-// like Swift/Python — Kotlin needs no PendingBody.selfReceiverName. `::`
-// callable references (`Foo::bar`) and computed receivers return null.
+// to {receiver, property}, after unwrapKotlinReceiver peels any wrapper off the
+// receiver. A chained `a.b.c()` receiver → RECEIVER_OPAQUE (findable by name,
+// never resolved); `this`/labeled `this@Label` → self / label class (decided
+// here like Swift/Python — no PendingBody.selfReceiverName); `super` → null
+// (parent dispatch, not tracked); `::` callable refs (`Foo::bar`) and computed
+// receivers (no `identifier` property) emit nothing.
 function kotlinMemberCallInfo(callee: Node): MemberCallInfo | null {
   if (callee.type !== 'navigation_expression') return null;
   // children: <receiver expr> <op '.'|'?.'|'::'> <identifier property>
-  const receiver = callee.namedChild(0);
+  const rawReceiver = callee.namedChild(0);
   const property = callee.namedChild(1);
-  if (!receiver || property?.type !== 'identifier') return null;
+  if (!rawReceiver || property?.type !== 'identifier') return null;
   // `::` is a member/callable reference, not a member call — skip it.
   if (nodeHasAnonChild(callee, '::')) return null;
+  const receiver = unwrapKotlinReceiver(rawReceiver);
   if (receiver.type === 'this_expression') {
     // `this@Label.m()` (a labeled this) names an OUTER receiver — resolve
     // against the labeled class, not the enclosing one (binding it as self
@@ -116,8 +155,33 @@ function kotlinMemberCallInfo(callee: Node): MemberCallInfo | null {
   if (receiver.type === 'identifier') {
     return { receiver: receiver.text, property: property.text, isSelf: false };
   }
-  return null; // chained / computed receiver (navigation_expression, call_expression, ...)
+  // `super.m()` is a parent-class dispatch we deliberately don't track (the
+  // TS/Java/Swift/C#/Dart rule) — `super` is its own `super_expression` node.
+  if (receiver.type === 'super_expression') return null;
+  return { receiver: RECEIVER_OPAQUE, property: property.text, isSelf: false }; // chained receiver
 }
+
+// Dominant Kotlin stdlib/collection/string/scope method names (>=4 chars)
+// suppressed when a member call to them is unresolved — capturing chained
+// `.map { }.filter { }` calls otherwise floods the name-keyed store. Domain
+// method names are deliberately absent. <=3-char names (`.map`) are gated
+// downstream by SHORT_NAME_THRESHOLD.
+const KOTLIN_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
+  'filter', 'filterNot', 'forEach', 'flatMap', 'reduce', 'fold', 'sortedBy',
+  'sortedByDescending', 'groupBy', 'associateBy', 'distinct', 'first',
+  'firstOrNull', 'last', 'lastOrNull', 'single', 'count', 'sumOf', 'maxOf',
+  'minOf', 'maxByOrNull', 'minByOrNull', 'contains', 'containsKey', 'isEmpty',
+  'isNotEmpty', 'toList', 'toSet', 'toMap', 'toMutableList', 'joinToString',
+  'take', 'drop', 'plus', 'minus', 'indexOf', 'remove', 'clear',
+  'startsWith', 'endsWith', 'substring', 'replace', 'split', 'trim',
+  'lowercase', 'uppercase', 'getOrNull', 'getOrDefault', 'getOrElse',
+  // Scope functions in MEMBER position (`x.apply{}`, `foo().also{}`) are THE
+  // dominant chained Kotlin member call and pure-stdlib — measured on okio/moshi:
+  // apply 73 call-sites/~1.4% in-repo, also 49/0% → flood, ~0 recall stake (the
+  // bare `with(x){}` form is covered by KOTLIN_IGNORED_BARE_CALLEES, but the
+  // member forms route through here). let/run/use (<=3 chars) are SHORT_NAME_THRESHOLD-gated.
+  'apply', 'also', 'takeIf', 'takeUnless',
+]);
 
 // Per-file duplicate-id disambiguation. An extension method duplicating a type
 // method, or two same-signature constructors, can be byte-identical in
@@ -174,6 +238,7 @@ export function extractKotlin(
       // a bare call to a 'class'-kind symbol via bareCallableKinds.
       ambiguousClassNames: ambiguousTypeNames,
       ignoredBareCallees: KOTLIN_IGNORED_BARE_CALLEES,
+      ignoredMemberCallees: KOTLIN_IGNORED_MEMBER_CALLEES,
     },
   );
   return { symbols: ctx.symbols, references, imports: ctx.imports };

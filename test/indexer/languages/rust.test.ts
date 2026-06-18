@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { extractSymbols } from '../../../src/indexer/extractor.js';
 import { initParser, parseFile } from '../../../src/indexer/parser.js';
+import { RECEIVER_OPAQUE } from '../../../src/types.js';
 import { makeFileInfo } from '../../helpers.js';
 
 function extract(src: string, language = 'rust', path = 'src/test.rs') {
@@ -563,11 +564,58 @@ describe('rust extractor — references: self, Self, and member calls', () => {
     expect(ref.selfReceiver).toBeUndefined();
   });
 
-  it('chained calls emit only the innermost single-level member ref', () => {
+  it('chained `.` calls capture the outer method under an opaque receiver', () => {
     const result = extract(`fn f(obj: T) {\n    obj.a().b();\n}\n`);
+    // `obj.a()` keeps its single-identifier receiver; the chained `.b()` (value
+    // is a call_expression) is now captured under RECEIVER_OPAQUE — findable by
+    // method name (recall) but never resolved.
+    const a = result.references.find((r) => r.targetName === 'a')!;
+    expect(a.receiver).toBe('obj');
+    const b = result.references.find((r) => r.targetName === 'b')!;
+    expect(b.receiver).toBe(RECEIVER_OPAQUE);
+    expect(b.targetId).toBeNull();
+  });
+
+  it('suppresses unresolved chained calls to common stdlib names', () => {
+    const result = extract(`fn f(obj: T) {\n    obj.iter().collect();\n}\n`);
     const names = result.references.map((r) => r.targetName);
-    expect(names).toContain('a');
-    expect(names).not.toContain('b');
+    // iter/collect ∈ RUST_IGNORED_MEMBER_CALLEES and unresolved → dropped.
+    expect(names).not.toContain('iter');
+    expect(names).not.toContain('collect');
+  });
+
+  it('captures trimmed domain names (bytes, remove) but keeps canonical ones (parse, is_empty)', () => {
+    const result = extract(
+      `fn f(obj: T) {\n    obj.a().bytes();\n    obj.b().remove(0);\n    obj.c().parse();\n    obj.d().is_empty();\n}\n`,
+    );
+    const names = result.references.map((r) => r.targetName);
+    // bytes/remove were REMOVED from RUST_IGNORED_MEMBER_CALLEES after the ripgrep
+    // dogfood (distinctive domain methods with in-repo recall stake) → now captured.
+    expect(names).toContain('bytes');
+    expect(names).toContain('remove');
+    // parse/is_empty stay suppressed (canonical stdlib; ~0–2% in-repo target on
+    // ripgrep → capturing would inject mostly-false weak callers).
+    expect(names).not.toContain('parse');
+    expect(names).not.toContain('is_empty');
+  });
+
+  it('exempts qualified `::`-path calls from the ignore set, but still suppresses `.method()` calls', () => {
+    const result = extract(
+      `fn f(obj: T) {\n    crate::config::parse();\n    config::read();\n    obj.c().parse();\n    obj.d().read();\n}\n`,
+    );
+    // `::`-path calls are pathQualified → EXEMPT from RUST_IGNORED_MEMBER_CALLEES
+    // (a small intra-crate population, not the dot-method flood the set targets),
+    // so they survive despite parse/read ∈ the set — `crate::config::parse()` to
+    // an in-repo `fn parse` stays findable. The chained `.parse()`/`.read()`
+    // (field_expression dot-method) remain suppressed, so only the path form
+    // survives for each name.
+    const parse = result.references.filter((r) => r.targetName === 'parse');
+    expect(parse).toHaveLength(1);
+    expect(parse[0]!.receiver).toBe('config');
+    expect(parse[0]!.targetId).toBeNull();
+    const read = result.references.filter((r) => r.targetName === 'read');
+    expect(read).toHaveLength(1);
+    expect(read[0]!.receiver).toBe('config');
   });
 });
 

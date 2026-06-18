@@ -1,6 +1,6 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
-import { IMPORT_NAMESPACE } from '../../types.js';
+import { IMPORT_NAMESPACE, RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import {
   SIGNATURE_DISPLAY_CAP,
@@ -99,20 +99,69 @@ function isComment(node: Node): boolean {
   return node.type === 'line_comment' || node.type === 'block_comment';
 }
 
-// Single-level member callees only, mirroring TS/Python: `this.x()` and
-// `obj.x()` qualify; chained (`a.b.c()`, `System.out.println()`), computed
-// (`foo().bar()`), and `super.x()` (object is a `super` node — the grammar
-// has no super_method_invocation) return null and emit nothing.
+// Dominant Java stdlib/collection/stream/string method names (>=4 chars)
+// suppressed when a member call to them is unresolved — capturing chained
+// calls otherwise floods the name-keyed store with `.stream().filter()`-style
+// noise. Domain method names are deliberately absent. <=3-char names (`.add`,
+// `.get`, `.put`) are gated downstream by SHORT_NAME_THRESHOLD.
+const JAVA_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
+  'stream', 'filter', 'collect', 'forEach', 'flatMap', 'reduce', 'sorted',
+  'distinct', 'limit', 'count', 'anyMatch', 'allMatch', 'noneMatch',
+  'findFirst', 'findAny', 'toList', 'toArray', 'contains', 'containsKey',
+  'containsValue', 'isEmpty', 'remove', 'clear', 'size', 'keySet', 'values',
+  'entrySet', 'iterator', 'hasNext', 'append', 'toString', 'equals',
+  'hashCode', 'length', 'substring', 'indexOf', 'replace', 'trim', 'split',
+  'startsWith', 'endsWith', 'charAt', 'matches', 'format', 'valueOf',
+  'getOrDefault', 'putIfAbsent', 'orElse', 'orElseGet', 'orElseThrow',
+  'isPresent', 'ifPresent', 'getClass', 'println', 'print', 'printf',
+]);
+
+// Peels transparent receiver wrappers off a member-call receiver so a wrapped
+// receiver resolves like the bare form: parenthesized `(a).m()` and the classic
+// downcast `((T)a).m()` (a `cast_expression` whose operand is its `value` field
+// — Java has no force-unwrap operator, so the cast is its analog). Leading
+// comment nodes inside the parens are skipped via isComment (tree-sitter-java
+// names them `line_comment`/`block_comment`, never `comment`). Each step
+// strictly descends a finite tree, so the loop always terminates.
+function unwrapJavaReceiver(node: Node): Node {
+  let n = node;
+  for (;;) {
+    if (n.type === 'parenthesized_expression') {
+      let inner = n.firstNamedChild;
+      while (inner && isComment(inner)) inner = inner.nextNamedSibling;
+      if (!inner) break;
+      n = inner;
+    } else if (n.type === 'cast_expression') {
+      const inner = n.childForFieldName('value');
+      if (!inner) break;
+      n = inner;
+    } else break;
+  }
+  return n;
+}
+
+// `this.x()` and `obj.x()` carry their literal receiver token; chained and
+// computed receivers (`a.b.c()`, `System.out.println()`, `foo().bar()`) carry
+// RECEIVER_OPAQUE so the called method stays findable by name (recall) but
+// never resolves. `super.x()` (object is a `super` node — the grammar has no
+// super_method_invocation) and computed (non-`identifier` name) emit nothing.
 function javaMemberCallInfo(callee: Node): MemberCallInfo | null {
   if (callee.type === 'method_invocation') {
-    const obj = callee.childForFieldName('object');
+    const rawObj = callee.childForFieldName('object');
     const prop = callee.childForFieldName('name');
-    if (!obj || !prop || prop.type !== 'identifier') return null;
+    if (!rawObj || !prop || prop.type !== 'identifier') return null;
+    // Unwrap parens/cast first so `(a).m()` and `((T)a).m()` resolve like
+    // `a.m()`. The super-drop is checked AFTER the unwrap so a super receiver
+    // is dropped regardless of wrapping — a bare `super` is the only real case
+    // (`(super)` / `((T)super)` are illegal Java and error-parse to a method
+    // call whose object is already a bare `super`).
+    const obj = unwrapJavaReceiver(rawObj);
     if (obj.type === 'this') return { receiver: 'this', property: prop.text, isSelf: true };
     if (obj.type === 'identifier') {
       return { receiver: obj.text, property: prop.text, isSelf: false };
     }
-    return null;
+    if (obj.type === 'super') return null;
+    return { receiver: RECEIVER_OPAQUE, property: prop.text, isSelf: false };
   }
   if (callee.type === 'scoped_type_identifier') {
     // Positional children, no fields — and comments are NAMED extras that
@@ -170,6 +219,7 @@ export function extractJava(
       bareCallableKinds: JAVA_BARE_CALLABLE_KINDS,
       constructorKinds: JAVA_CONSTRUCTOR_KINDS,
       ambiguousClassNames: ambiguousTypeNames,
+      ignoredMemberCallees: JAVA_IGNORED_MEMBER_CALLEES,
     },
   );
   return { symbols, references, imports };

@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { extractSymbols } from '../../../src/indexer/extractor.js';
 import { initParser, parseFile } from '../../../src/indexer/parser.js';
-import { classNameFromFqn } from '../../../src/types.js';
+import { RECEIVER_OPAQUE, classNameFromFqn } from '../../../src/types.js';
 import { makeFileInfo } from '../../helpers.js';
 
 function extract(src: string, language = 'swift', path = 'src/test.swift') {
@@ -214,6 +214,56 @@ describe('swift extractor — references', () => {
       `struct S {\n    static func make() {}\n    func u() { Self.make() }\n}\n`,
     );
     expect(resolvedTo(result, 'u', 'make')).toBe(true);
+  });
+
+  it('captures a chained call under an opaque receiver', () => {
+    const result = extract(`func f(obj: T) {\n    obj.a().run()\n}\n`);
+    // `obj.a()` keeps its single-identifier receiver; the chained `.run()`
+    // (target is a navigation_expression) is captured under RECEIVER_OPAQUE —
+    // findable by method name (recall) but never resolved.
+    const a = result.references.find((r) => r.targetName === 'a')!;
+    expect(a.receiver).toBe('obj');
+    const run = result.references.find((r) => r.targetName === 'run')!;
+    expect(run.receiver).toBe(RECEIVER_OPAQUE);
+    expect(run.targetId).toBeNull();
+  });
+
+  it('suppresses unresolved chained calls to common stdlib names', () => {
+    const result = extract(`func f(xs: [Int]) {\n    xs.filter { $0 > 0 }.sorted()\n}\n`);
+    const names = result.references.map((r) => r.targetName);
+    // filter/sorted ∈ SWIFT_IGNORED_MEMBER_CALLEES and unresolved → dropped.
+    expect(names).not.toContain('filter');
+    expect(names).not.toContain('sorted');
+  });
+
+  it('does not capture super.method() (parent-class dispatch)', () => {
+    const result = extract(`class C: B {\n  override func go() {\n    super.tearDown()\n  }\n}\n`);
+    // Positive anchor: the body parsed and produced the method (so the absence
+    // below is real super-dropping, not a vacuous zero-ref parse failure).
+    expect(result.symbols.some((s) => s.name === 'go')).toBe(true);
+    // `super` is a super_expression node, not a chained receiver — emit nothing.
+    expect(result.references.find((r) => r.targetName === 'tearDown')).toBeUndefined();
+  });
+
+  it('unwraps force-unwrap / paren / comment / cast / optional-chain receivers to `a`', () => {
+    const result = extract(
+      `func z(a: T) {\n    a!.foo()\n    (a).bar()\n    (/*c*/ a).baz()\n    (\n    //c\n    a).qux()\n    a?.opt()\n    (a as Foo).cast()\n}\n`,
+    );
+    const byName = new Map(result.references.map((r) => [r.targetName, r]));
+    // a! (postfix_expression with a bang child) and (a) (single-element
+    // tuple_expression) unwrap to the single-identifier receiver `a`.
+    expect(byName.get('foo')!.receiver).toBe('a');
+    expect(byName.get('bar')!.receiver).toBe('a');
+    // A comment inside the parens makes the tuple a 2-named-child node and Swift
+    // names `/* */` a `multiline_comment` — the branch counts non-comment elements
+    // so the receiver still unwraps to `a` (block AND line comment forms).
+    expect(byName.get('baz')!.receiver).toBe('a');
+    expect(byName.get('qux')!.receiver).toBe('a');
+    // Optional chaining `a?.m()`: the `?` lives in the navigation suffix, so the
+    // target is the bare `simple_identifier a` — resolves like `a.m()`, no unwrap.
+    expect(byName.get('opt')!.receiver).toBe('a');
+    // `(a as Foo).m()`: tuple_expression → as_expression → its value `a`.
+    expect(byName.get('cast')!.receiver).toBe('a');
   });
 
   it('resolves construction Type(...) to the class', () => {

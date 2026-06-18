@@ -1,6 +1,6 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
-import { IMPORT_NAMESPACE } from '../../types.js';
+import { IMPORT_NAMESPACE, RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportInfo, ImportedName, Symbol, SymbolKind } from '../../types.js';
 import {
   SIGNATURE_DISPLAY_CAP,
@@ -111,10 +111,10 @@ function propertyName(nameNode: Node | null): string | null {
 
 // Reduces a `member_access_expression` (`obj.M()`, `this.M()`, `C.Static()`) or
 // a `conditional_access_expression` (`a?.M()`) callee to {receiver, property}.
-// Single-level receivers only: a chained `a.b.c()` has a member_access receiver
-// and returns null (same contract as the other languages). `this`/`base` are
-// ANONYMOUS tokens (not *_expression nodes): `this` → self-call; `base` → null
-// (super-like, skipped, the Java rule).
+// `this`/`base` are ANONYMOUS tokens (not *_expression nodes): `this` →
+// self-call; `base` → null (super-like, skipped, the Java rule). A chained
+// `a.b.c()` has a member_access receiver → RECEIVER_OPAQUE (findable by name,
+// never resolved). A computed/non-name property emits nothing.
 function csharpMemberCallInfo(callee: Node): MemberCallInfo | null {
   if (callee.type === 'member_access_expression') {
     const expr = callee.childForFieldName('expression');
@@ -123,7 +123,7 @@ function csharpMemberCallInfo(callee: Node): MemberCallInfo | null {
     if (expr.type === 'this') return { receiver: 'this', property: prop, isSelf: true };
     if (expr.type === 'base') return null;
     if (expr.type === 'identifier') return { receiver: expr.text, property: prop, isSelf: false };
-    return null;
+    return { receiver: RECEIVER_OPAQUE, property: prop, isSelf: false };
   }
   if (callee.type === 'conditional_access_expression') {
     const cond = callee.childForFieldName('condition');
@@ -133,10 +133,27 @@ function csharpMemberCallInfo(callee: Node): MemberCallInfo | null {
     if (cond.type === 'this') return { receiver: 'this', property: prop, isSelf: true };
     if (cond.type === 'base') return null;
     if (cond.type === 'identifier') return { receiver: cond.text, property: prop, isSelf: false };
-    return null;
+    return { receiver: RECEIVER_OPAQUE, property: prop, isSelf: false };
   }
   return null;
 }
+
+// Dominant C# LINQ/collection/string method names (>=4 chars) suppressed when a
+// member call to them is unresolved — capturing chained `.Where().Select()`
+// calls otherwise floods the name-keyed store. Domain method names are
+// deliberately absent. <=3-char names are gated downstream by
+// SHORT_NAME_THRESHOLD.
+const CSHARP_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
+  'Where', 'Select', 'SelectMany', 'OrderBy', 'OrderByDescending', 'ThenBy',
+  'GroupBy', 'Aggregate', 'First', 'FirstOrDefault', 'Last', 'LastOrDefault',
+  'Single', 'SingleOrDefault', 'Count', 'Average', 'Distinct',
+  'Take', 'Skip', 'Contains', 'ContainsKey', 'ContainsValue',
+  'ToList', 'ToArray', 'ToDictionary', 'ToHashSet', 'AsEnumerable',
+  'ForEach', 'Reverse', 'Concat', 'Union', 'Intersect', 'Except',
+  'ToString', 'Equals', 'GetHashCode', 'GetType', 'Substring', 'IndexOf',
+  'Replace', 'Trim', 'Split', 'StartsWith', 'EndsWith', 'ToLower', 'ToUpper',
+  'Append', 'Remove', 'Clear', 'TryGetValue', 'ConfigureAwait', 'GetEnumerator',
+]);
 
 // Per-file duplicate-id disambiguation (the Kotlin/Dart OccurrenceCounter): two
 // same-(name,kind,signature,qualifier) symbols — e.g. same-file partial-class
@@ -211,6 +228,7 @@ export function extractCSharp(
       constructorSelectorTypes: CSHARP_CONSTRUCTOR_SELECTORS,
       ambiguousClassNames: ambiguousTypeNames,
       ignoredBareCallees: CSHARP_IGNORED_BARE_CALLEES,
+      ignoredMemberCallees: CSHARP_IGNORED_MEMBER_CALLEES,
     },
   );
   return { symbols: ctx.symbols, references, imports: ctx.imports };

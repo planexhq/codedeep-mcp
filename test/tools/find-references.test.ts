@@ -1098,3 +1098,165 @@ describe('runFindReferences — co-change partners', () => {
     expect(text).toContain('### Callers'); // structural sections unaffected
   });
 });
+
+describe('runFindReferences — weak-member row cap', () => {
+  it('caps tier-5 member-call rows and folds the rest into the omitted count', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const target = mkSym({
+      name: 'process',
+      file: 'src/svc.ts',
+      kind: 'method',
+      parent: 'Svc',
+      exported: true,
+      startLine: 5,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/svc.ts'), [target], [], []);
+    // 12 distinct callers, each an unknown-receiver member call `obj.process()`
+    // (tier 5 — the class chained/opaque-receiver capture floods). The cap (8)
+    // lists 8 and folds the remaining 4 into the omitted suffix.
+    const callers = Array.from({ length: 12 }, (_, i) =>
+      mkSym({ name: `caller${i}`, file: 'src/c.ts', startLine: 10 + i }),
+    );
+    const refs = callers.map((c, i) =>
+      mkMemberRef(c, 'process', 'obj', { file: 'src/c.ts', line: 10 + i }),
+    );
+    idx.addFile(makeFileInfo('typescript', 'src/c.ts'), callers, refs, []);
+
+    const text = (
+      await runFindReferences({ file: 'src/svc.ts', symbol: 'process' }, makeDeps(idx))
+    ).content[0].text;
+    const memberRows = (text.match(/\[member call, unverified\]/g) ?? []).length;
+    expect(memberRows).toBe(8); // WEAK_MEMBER_ROW_CAP
+    expect(text).toContain('more omitted');
+  });
+
+  it('does not advertise raising `limit` when the weak-member cap is what truncated', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const target = mkSym({
+      name: 'process',
+      file: 'src/svc.ts',
+      kind: 'method',
+      parent: 'Svc',
+      exported: true,
+      startLine: 5,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/svc.ts'), [target], [], []);
+    // 12 weak (unknown-receiver) member callers, 0 strong. The cap (8) drops 4
+    // that raising `limit` can never reveal — so the suffix must NOT promise it.
+    const callers = Array.from({ length: 12 }, (_, i) =>
+      mkSym({ name: `caller${i}`, file: 'src/c.ts', startLine: 10 + i }),
+    );
+    const refs = callers.map((c, i) =>
+      mkMemberRef(c, 'process', 'obj', { file: 'src/c.ts', line: 10 + i }),
+    );
+    idx.addFile(makeFileInfo('typescript', 'src/c.ts'), callers, refs, []);
+
+    // limit well above the 12 refs: raising it cannot lift the weak cap of 8.
+    const text = (
+      await runFindReferences(
+        { file: 'src/svc.ts', symbol: 'process', limit: 100 },
+        makeDeps(idx),
+      )
+    ).content[0].text;
+    expect((text.match(/\[member call, unverified\]/g) ?? []).length).toBe(8);
+    expect(text).toContain('more omitted');
+    // The honest message points at find_symbol's count, not the useless lever.
+    expect(text).not.toContain('raise `limit`');
+    expect(text).toContain('find_symbol');
+  });
+
+  it('advertises BOTH levers when limit cut strong rows AND the weak cap fired', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const target = mkSym({
+      name: 'process',
+      file: 'src/svc.ts',
+      kind: 'function',
+      exported: true,
+      startLine: 5,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/svc.ts'), [target], [], []);
+    // 25 STRONG callers (same-dir import-connected bare calls → tier 1); at the
+    // default limit=20, five overflow and are revealable ONLY by raising `limit`.
+    const strong = Array.from({ length: 25 }, (_, i) =>
+      mkSym({ name: `s${i}`, file: 'src/strong.ts', startLine: 100 + i }),
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/strong.ts'),
+      strong,
+      strong.map((c, i) =>
+        mkCallRef({ source: c, targetName: 'process', file: 'src/strong.ts', line: 100 + i }),
+      ),
+      [mkImport('src/strong.ts', './svc', [{ name: 'process' }])],
+    );
+    // 12 WEAK callers (unknown-receiver member refs → tier 5); >8 are cap-dropped
+    // and are NOT revealable by `limit` (only via find_symbol's count).
+    const weak = Array.from({ length: 12 }, (_, i) =>
+      mkSym({ name: `w${i}`, file: 'src/weak.ts', startLine: 200 + i }),
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/weak.ts'),
+      weak,
+      weak.map((c, i) => mkMemberRef(c, 'process', 'obj', { file: 'src/weak.ts', line: 200 + i })),
+      [],
+    );
+
+    const text = (
+      await runFindReferences({ file: 'src/svc.ts', symbol: 'process' }, makeDeps(idx))
+    ).content[0].text;
+    const suffix = text.split('\n').find((l) => l.includes('more omitted'))!;
+    // Both reasons applied, so BOTH levers must be advertised — raising `limit`
+    // surfaces the 5 hidden strong callers; find_symbol holds the capped weak count.
+    expect(suffix).toContain('raise `limit`');
+    expect(suffix).toContain('find_symbol');
+  });
+
+  it('does NOT promise high-confidence rows when only weak rows were limit-cut', async () => {
+    // Regression: the high-confidence `limit` hint must be gated on STRONG rows
+    // actually being cut by `limit` (`strong.length > limit`), not on "limit cut
+    // anything". Here all 5 strong callers fit under limit=10, but the weak cap
+    // (8) fires AND limit slices off some weakShown rows — raising `limit` would
+    // surface only more low-confidence `[member call]` rows, so advertising
+    // "high-confidence rows" (the prior bug) is wrong.
+    const idx = new CodeIndex(tmpRoot);
+    const target = mkSym({
+      name: 'process',
+      file: 'src/svc.ts',
+      kind: 'function',
+      exported: true,
+      startLine: 5,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/svc.ts'), [target], [], []);
+    // 5 STRONG callers (same-dir bare calls → tier 1); all fit under limit=10.
+    const strong = Array.from({ length: 5 }, (_, i) =>
+      mkSym({ name: `s${i}`, file: 'src/strong.ts', startLine: 100 + i }),
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/strong.ts'),
+      strong,
+      strong.map((c, i) =>
+        mkCallRef({ source: c, targetName: 'process', file: 'src/strong.ts', line: 100 + i }),
+      ),
+      [mkImport('src/strong.ts', './svc', [{ name: 'process' }])],
+    );
+    // 12 WEAK callers (unknown-receiver member refs → tier 5); >8 are cap-dropped.
+    const weak = Array.from({ length: 12 }, (_, i) =>
+      mkSym({ name: `w${i}`, file: 'src/weak.ts', startLine: 200 + i }),
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/weak.ts'),
+      weak,
+      weak.map((c, i) => mkMemberRef(c, 'process', 'obj', { file: 'src/weak.ts', line: 200 + i })),
+      [],
+    );
+
+    const text = (
+      await runFindReferences({ file: 'src/svc.ts', symbol: 'process', limit: 10 }, makeDeps(idx))
+    ).content[0].text;
+    const suffix = text.split('\n').find((l) => l.includes('more omitted'))!;
+    // No strong row is hidden by `limit`, so the high-confidence hint must be
+    // absent — but the cap fired, so still point at find_symbol's full count.
+    expect(suffix).not.toContain('high-confidence');
+    expect(suffix).not.toContain('raise `limit`');
+    expect(suffix).toContain('find_symbol');
+  });
+});

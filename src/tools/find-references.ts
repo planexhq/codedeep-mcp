@@ -9,6 +9,7 @@ import {
 } from '../indexer/code-index.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
+import { RECEIVER_OPAQUE } from '../types.js';
 import type { ImportInfo, ProbeConfig, Reference, Symbol } from '../types.js';
 
 import {
@@ -53,6 +54,11 @@ export interface FindReferencesDeps {
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 const SUGGEST_LIMIT = 5;
+// rankRefs' weakest tier: unresolved member refs with an unknown (non-import,
+// opaque/chained) receiver. Listed rows of this tier are capped so a hot
+// method's member-call sites can't dominate the caller list.
+const WEAK_MEMBER_TIER = 5;
+const WEAK_MEMBER_ROW_CAP = 8;
 
 const CALLERS_HEADER = `### Callers ${NAME_MATCH_HEADER_QUALIFIER}`;
 const CALLEES_HEADER = '### Callees (within-file — from AST resolution)';
@@ -168,7 +174,16 @@ function renderCallers(
     return a.ref.line - b.ref.line;
   });
 
-  const shown = ranked.slice(0, limit);
+  // Capturing chained/member calls makes the weakest tier (unresolved member
+  // refs with an unknown receiver — `obj.m()` / chained) explode on hot method
+  // names. They already sort last, so resolved/import-connected rows are never
+  // starved; ALSO cap how many we list so they don't dominate the output — the
+  // rest fold into the omitted count (find_symbol's `References: ~N` still counts
+  // them all). WEAK_MEMBER_TIER mirrors rankRefs' tier-5 (unknown-receiver member).
+  const strong = ranked.filter((r) => r.tier < WEAK_MEMBER_TIER);
+  const weak = ranked.filter((r) => r.tier >= WEAK_MEMBER_TIER);
+  const weakShown = weak.slice(0, WEAK_MEMBER_ROW_CAP);
+  const shown = [...strong, ...weakShown].slice(0, limit);
   const body: string[] = shown.map((r) => {
     const callerLabel = r.source ? `${r.source.name}()` : MODULE_LEVEL;
     // Resolved member refs (this.x() bound at extract time) carry the
@@ -180,8 +195,32 @@ function renderCallers(
         : NAME_MATCH_TAG;
     return `- ${r.ref.file}:${r.ref.line} — ${callerLabel}  ${tag}`;
   });
-  if (ranked.length > shown.length) {
-    body.push(omittedSuffix(ranked.length - shown.length));
+  const omitted = ranked.length - shown.length;
+  if (omitted > 0) {
+    // Two INDEPENDENT omission reasons, each with its own lever:
+    //  (1) `limit` truncated the list — raising it reveals more rows. Those rows
+    //      are HIGH-confidence only when STRONG rows were the ones cut
+    //      (`strong.length > limit`); if every strong row is already shown,
+    //      raising `limit` surfaces only more low-confidence `[member call]` rows,
+    //      so the high-confidence hint must NOT be advertised then.
+    //  (2) the weak-member cap dropped tier-5 rows beyond WEAK_MEMBER_ROW_CAP —
+    //      those are NOT revealable by `limit` (the full count lives in
+    //      find_symbol's `References: ~N`).
+    // Both can hold at once, so gate the high-confidence `limit` hint on
+    // `strongCut` (NOT on "limit cut anything" — weakShown rows can be limit-cut
+    // while all strong rows show) and the cap note on `capHidden`.
+    const capHidden = weak.length > weakShown.length;
+    const strongCut = strong.length > limit;
+    if (capHidden) {
+      const limitHint = strongCut ? ' raise `limit` to see more high-confidence rows;' : '';
+      body.push(
+        `- (${omitted} more omitted;${limitHint} low-confidence \`[member call]\` sites are capped — full count via find_symbol's \`References: ~N\`)`,
+      );
+    } else {
+      // No cap fired (every weak row is within WEAK_MEMBER_ROW_CAP), so all
+      // omitted rows are purely limit-truncated and fully revealable by `limit`.
+      body.push(omittedSuffix(omitted));
+    }
   }
   return sectionOrNone(CALLERS_HEADER, body);
 }
@@ -240,8 +279,15 @@ function rankRefs(
       // Unresolved member refs rank by their receiver binding: an
       // import-connected receiver (`import * as u; u.fn()`) is as strong
       // as an import-connected bare name; anything else is the noisiest
-      // tier — the property match alone is weak evidence.
-      tier = fileImportsReceiver(importsFor(ref.file), ref.receiver) ? 2 : 5;
+      // tier — the property match alone is weak evidence. An opaque
+      // (chained/computed) receiver can never name an import, so it goes
+      // straight to tier 5 — skipping the guaranteed-false import scan that
+      // chained-call capture makes the dominant unresolved-member case.
+      tier =
+        ref.receiver !== RECEIVER_OPAQUE &&
+        fileImportsReceiver(importsFor(ref.file), ref.receiver)
+          ? 2
+          : WEAK_MEMBER_TIER;
     } else if (refDir === targetDir) {
       tier = 1;
     } else if (fileImportsName(importsFor(ref.file), target.name)) {

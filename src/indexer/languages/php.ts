@@ -1,6 +1,7 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
 import { collectAmbiguousTypeNames } from '../extractor.js';
+import { RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportInfo, ImportedName, Symbol, SymbolKind } from '../../types.js';
 import {
   SIGNATURE_DISPLAY_CAP,
@@ -158,6 +159,26 @@ const PHP_IGNORED_BARE_CALLEES: ReadonlySet<string> = new Set([
   'iterator_to_array', 'ctype_digit', 'ctype_alpha', 'dd', 'dump',
 ]);
 
+// PHP instance methods are overwhelmingly domain/framework, so the member
+// suppression set is deliberately small — only clearly-stdlib SPL-protocol /
+// Throwable / magic methods whose chained captures would be pure noise (Iterator
+// current/next/rewind/valid, ArrayAccess offset*, IteratorAggregate/ArrayObject
+// getIterator/getArrayCopy, Throwable get*, jsonSerialize/__toString).
+// DELIBERATELY EXCLUDED: `format` — the measure-don't-guess rule (dogfood on
+// Carbon/php-parser/symfony-console) found 1166 `->format()` call-sites against 8
+// real DOMAIN definitions (Carbon dates, translators, formatters) and zero stdlib
+// protocol — i.e. a distinctive fluent domain method this feature exists to
+// capture, not the DateTime::format stdlib noise its name suggests. (current/next
+// /count are kept despite a few Carbon/collection domain defs: SPL-protocol-
+// dominant, small flood, and find_references caps tier-5 rows anyway.)
+// <=3-char names are gated downstream by SHORT_NAME_THRESHOLD.
+const PHP_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
+  'getMessage', 'getCode', 'getPrevious', 'getTrace', 'getTraceAsString',
+  'getFile', 'getLine', 'current', 'next', 'rewind', 'valid', 'count',
+  'offsetGet', 'offsetSet', 'offsetExists', 'offsetUnset', 'getIterator',
+  'getArrayCopy', 'jsonSerialize', '__toString',
+]);
+
 // ── call selectors ─────────────────────────────────────────────────────────
 
 // Bare `foo()` callee = the `function:` field, kept only when it is a plain
@@ -215,7 +236,8 @@ const PHP_SELECTORS: ReadonlyArray<CallSelector> = [
 //   `$obj->m()` / `$o?->m()`→ unresolvable instance call (receiver keeps the `$`)
 //   `Class::m()`            → receiver = `Class` (resolves via methodsByClass!)
 //   `self::m()`/`static::m()` → self-call; `parent::m()` → null (super-like)
-//   chained `$a->b->c()` / `qualified\Ns::m()` → null (skipped)
+//   chained/computed `$a->b->c()`, `$cls::m()`, `Foo::bar()::baz()` → RECEIVER_OPAQUE
+//   `qualified\Ns::m()`     → null (cross-namespace static path, identity-bearing)
 function phpMemberCallInfo(callee: Node): MemberCallInfo | null {
   const t = callee.type;
   if (isFirstClassCallable(callee)) return null; // `C::m(...)` / `$o->m(...)` closure creation
@@ -224,8 +246,17 @@ function phpMemberCallInfo(callee: Node): MemberCallInfo | null {
     const nameNode = callee.childForFieldName('name');
     // A dynamic name (`$obj->$prop()`) has a `variable_name` here, not a `name`;
     // drop it (its `$`-text would be junk in the ref store), like the bare path.
-    if (!obj || nameNode?.type !== 'name' || obj.type !== 'variable_name') return null;
+    if (!obj || nameNode?.type !== 'name') return null;
     const prop = nameNode.text;
+    // Any non-`variable_name` object is a runtime-computed receiver — chained
+    // `$a->b->c()` (member_access) / `$a->b()->c()` (member_call), indexed
+    // `$a[0]->m()` (subscript), parenthesized `(new X())->m()` — and is opaque:
+    // findable by method name, never resolved. ($this / $obj are variable_name,
+    // handled below; an instance receiver is always a value, so unlike the static
+    // path there is no class-name/qualified scope to exclude first.)
+    if (obj.type !== 'variable_name') {
+      return { receiver: RECEIVER_OPAQUE, property: prop, isSelf: false };
+    }
     const inner = innerVarName(obj);
     if (inner === 'this') return { receiver: 'this', property: prop, isSelf: true };
     // `->`/`?->` is an INSTANCE call: the receiver is a value, never a type. The
@@ -248,7 +279,19 @@ function phpMemberCallInfo(callee: Node): MemberCallInfo | null {
       if (kw === 'self' || kw === 'static') return { receiver: kw, property: prop, isSelf: true };
       return null; // parent:: → super-like
     }
-    return null; // qualified_name scope (cross-namespace static)
+    // `\Ns\C::m()` (qualified_name) and `namespace\C::m()` (relative_name, the
+    // namespace-relative operator) are identity-bearing — their final segment
+    // routinely collides with a same-named in-repo class, so they stay null (the
+    // deliberate cross-namespace drop, the Rust external-path rule).
+    if (scope.type === 'qualified_name' || scope.type === 'relative_name') return null;
+    // Every OTHER scope is a runtime-computed receiver — chained `Foo::bar()::baz()`
+    // (scoped_call) / `$x->m()::n()` (member_call), dynamic `$cls::create()`
+    // (variable_name, the Laravel/Eloquent idiom), indexed `$a[0]::m()` (subscript),
+    // parenthesized `(new X())::m()`, `$a->b::c()` (member_access), `make()::m()`
+    // (function_call). It is opaque: findable by method name, never resolved —
+    // mirroring the instance catch-all above (zero wrong-edge: '()' matches no
+    // class, so methodsByClass.get('()') is always undefined).
+    return { receiver: RECEIVER_OPAQUE, property: prop, isSelf: false };
   }
   return null;
 }
@@ -316,6 +359,7 @@ export function extractPHP(tree: Tree, content: string, fileInfo: FileInfo): Ext
       ambiguousClassNames,
       ambiguousBareCallees,
       ignoredBareCallees: PHP_IGNORED_BARE_CALLEES,
+      ignoredMemberCallees: PHP_IGNORED_MEMBER_CALLEES,
     },
   );
   return { symbols: ctx.symbols, references, imports: ctx.imports };

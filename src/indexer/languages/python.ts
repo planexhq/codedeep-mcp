@@ -1,6 +1,6 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
-import { IMPORT_NAMESPACE } from '../../types.js';
+import { IMPORT_NAMESPACE, RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import {
   SIGNATURE_DISPLAY_CAP,
@@ -35,19 +35,78 @@ const PY_SELECTORS: ReadonlyArray<CallSelector> = [
   { nodeType: 'decorator', getCallee: bareDecoratorIdentifier },
 ];
 
-// Single-level attribute callees only: `self.x()`, `cls.x()`, `obj.x()`.
-// Chained (`a.b.c()`) and computed (`super().x()` — object is a `call`
-// node) receivers return null and emit nothing.
+// Peels `parenthesized_expression` (`(a)`, `(super())`) — transparent to receiver
+// IDENTITY — so a parenthesized receiver resolves like its unwrapped form: `(a).x()`
+// like `a.x()`, and `(super()).x()` reaches the super-call drop below. The wrapped
+// expression is the first NON-COMMENT named child (a leading `# c` is a NAMED node;
+// skip it, the Go/TS receiver-unwrap pattern). A genuine expression receiver
+// (`(a + b).x()`) unwraps to a non-identifier/non-call node → stays opaque.
+function unwrapPyReceiver(node: Node): Node {
+  let n = node;
+  while (n.type === 'parenthesized_expression') {
+    let inner = n.firstNamedChild;
+    while (inner && inner.type === 'comment') inner = inner.nextNamedSibling;
+    if (!inner) break;
+    n = inner;
+  }
+  return n;
+}
+
+// `self.x()` / `cls.x()` / `obj.x()` carry their literal receiver token; a
+// parenthesized `(a).x()` / `(self).x()` receiver is unwrapped to that token too.
+// Chained and computed receivers (`a.b.c()`, `foo().x()`) carry RECEIVER_OPAQUE so
+// the called method stays findable by name (recall) but never resolves. `super().x()`
+// — including the parenthesized `(super()).x()` form — is parent-class dispatch,
+// dropped (the TS/Java/Dart rule), even though `super()` is syntactically a `call`
+// node like a genuine chain. A computed/non-clean attribute (no `identifier`
+// attribute) emits nothing.
 function pyMemberCallInfo(callee: Node): MemberCallInfo | null {
   if (callee.type !== 'attribute') return null;
-  const obj = callee.childForFieldName('object');
+  const obj0 = callee.childForFieldName('object');
   const prop = callee.childForFieldName('attribute');
-  if (!obj || !prop || prop.type !== 'identifier' || obj.type !== 'identifier') {
-    return null;
+  if (!obj0 || !prop || prop.type !== 'identifier') return null;
+  const obj = unwrapPyReceiver(obj0);
+  if (obj.type === 'identifier') {
+    const isSelf = obj.text === 'self' || obj.text === 'cls';
+    return { receiver: obj.text, property: prop.text, isSelf };
   }
-  const isSelf = obj.text === 'self' || obj.text === 'cls';
-  return { receiver: obj.text, property: prop.text, isSelf };
+  // `super().method()` — Python 3 super is always a `call`, so unlike the other
+  // languages there is no `super` TOKEN to match; detect the call shape and drop
+  // it (parent-class dispatch, deliberately untracked) before the opaque branch.
+  if (obj.type === 'call') {
+    const fn = obj.childForFieldName('function');
+    if (fn?.type === 'identifier' && fn.text === 'super') return null;
+  }
+  return { receiver: RECEIVER_OPAQUE, property: prop.text, isSelf: false };
 }
+
+// Dominant Python stdlib/builtin method names (>=4 chars) suppressed when a
+// member call to them is unresolved — capturing chained calls otherwise floods
+// the name-keyed store with `.append()`/`.items()`/`.format()`-style noise.
+// Domain method names are deliberately absent. <=3-char names (`.get`, `.pop`)
+// are gated downstream by SHORT_NAME_THRESHOLD, so they're omitted here.
+//
+// Composition checked against a requests dogfood (per-name member-call flood vs
+// in-repo `def` recall stake). The kept names are canonical-by-usage: even where
+// requests also defines one (its `CaseInsensitiveDict`/`RequestsCookieJar`
+// implement MutableMapping), ~0–12% of `.items()`/`.update()`/`.copy()`/`.values()`
+// sites target it, so capturing would inject mostly-FALSE weak callers (e.g. the
+// `copy.copy()` MODULE function would smear onto `def copy`). `close` was REMOVED
+// (now captured): a distinctive resource-teardown method (Response/Session/
+// HTTPAdapter), ~60% of `.close()` sites have in-repo receivers. NOTE: requests is
+// one small HTTP library — it does NOT exercise the Django/SQLAlchemy/parser
+// collision worry (update/match/search as ORM/parser methods); a confident trim of
+// those needs a flask/django/sqlalchemy dogfood (tracked as a follow-up).
+const PY_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
+  'append', 'extend', 'insert', 'remove', 'index', 'count', 'sort',
+  'reverse', 'copy', 'clear', 'items', 'keys', 'values', 'update',
+  'setdefault', 'format', 'format_map', 'strip', 'lstrip', 'rstrip',
+  'split', 'rsplit', 'splitlines', 'join', 'replace', 'encode', 'decode',
+  'startswith', 'endswith', 'lower', 'upper', 'title', 'find', 'rfind',
+  'isdigit', 'isalpha', 'isspace', 'read', 'readline', 'readlines',
+  'write', 'flush', 'group', 'groups', 'match', 'search',
+  'union', 'intersection', 'difference', 'discard',
+]);
 
 export function extractPython(
   tree: Tree,
@@ -73,6 +132,7 @@ export function extractPython(
     PY_SKIP_TYPES,
     PY_FUNCTION_BODY_SKIP_TYPES,
     pyMemberCallInfo,
+    { ignoredMemberCallees: PY_IGNORED_MEMBER_CALLEES },
   );
   return { symbols, references, imports };
 }

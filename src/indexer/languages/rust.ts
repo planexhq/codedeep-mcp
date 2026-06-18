@@ -1,6 +1,6 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
-import { IMPORT_NAMESPACE } from '../../types.js';
+import { IMPORT_NAMESPACE, RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import {
   SIGNATURE_DISPLAY_CAP,
@@ -88,7 +88,8 @@ function structExpressionCallee(node: Node): Node | null {
 // Java/Go for the `.` form; the `::` form additionally captures MULTI-segment
 // paths so fully-qualified calls aren't dropped (the cross-file recall gap).
 //  - field_expression: `self.x()` (value is the fixed `self` token → isSelf),
-//    `obj.x()` (identifier receiver). Chained/computed receivers → null.
+//    `obj.x()` (identifier receiver). Chained/computed receivers (`a.b().c()`,
+//    `obj.inner.m()`) → RECEIVER_OPAQUE (findable by method name, never resolved).
 //  - scoped_identifier / scoped_type_identifier (the `::` path form):
 //    * single-segment `foo::bar()` / `Type::assoc()` / `Enum::Variant {}` —
 //      `Self::x()` → isSelf (resolve against the enclosing impl type);
@@ -101,6 +102,36 @@ function structExpressionCallee(node: Node): Node | null {
 //      keyword is the only receiver token available.
 // Rust needs no PendingBody.selfReceiverName (Go's mechanism): `self` is a
 // fixed token and `Self` is a fixed identifier, decided here like Python.
+//
+// Dominant Rust stdlib/iterator/Option/Result/string method names (>=4 chars)
+// suppressed when a member call to them is unresolved — capturing chained
+// `.iter().map().collect()` calls otherwise floods the name-keyed store. Domain
+// method names are deliberately absent. <=3-char names (`.len`, `.get`) are
+// gated downstream by SHORT_NAME_THRESHOLD.
+//
+// Composition trimmed after a ripgrep dogfood measured flood-vs-recall PER name
+// (member-call sites vs in-repo `pub fn` defs). The kept names are
+// canonical-by-usage: even where ripgrep also defines one, ~0–28% of `.name()`
+// sites target it, so capturing would inject mostly-FALSE weak-include callers
+// onto a boilerplate/look-alike method (the precision-over-recall stance that
+// already drops external multi-segment path calls). Notably `parse` stays —
+// its in-repo defs are private/free-fns and every `.parse()` site is stdlib
+// `str::parse`, so trimming it surfaces ZERO real callers. `bytes`/`remove` were
+// REMOVED (now captured): distinctive domain methods (Sink/printer accessors;
+// ByteSet/Dir mutators) with real in-repo recall stake and ~0 stdlib false-include.
+const RUST_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
+  'unwrap', 'expect', 'unwrap_or', 'unwrap_or_else', 'unwrap_or_default',
+  'clone', 'into', 'into_iter', 'iter', 'iter_mut', 'collect',
+  'map_err', 'filter', 'filter_map', 'flat_map', 'fold', 'reduce',
+  'for_each', 'count', 'take', 'skip', 'chain', 'enumerate',
+  'next', 'peekable', 'cloned', 'copied', 'as_ref', 'as_mut', 'as_str',
+  'as_slice', 'to_string', 'to_owned', 'to_vec', 'borrow', 'borrow_mut',
+  'push', 'insert', 'contains', 'contains_key',
+  'is_empty', 'is_some', 'is_none', 'is_ok', 'is_err', 'ok_or', 'and_then',
+  'or_else', 'ok_or_else', 'trim', 'split', 'splitn', 'replace', 'starts_with',
+  'ends_with', 'parse', 'lock', 'read', 'write', 'lines', 'chars',
+]);
+
 function rustMemberCallInfo(callee: Node): MemberCallInfo | null {
   if (callee.type === 'field_expression') {
     const value = callee.childForFieldName('value');
@@ -110,15 +141,22 @@ function rustMemberCallInfo(callee: Node): MemberCallInfo | null {
     if (value.type === 'identifier') {
       return { receiver: value.text, property: field.text, isSelf: false };
     }
-    return null;
+    // Chained/computed `.` receiver (`obj.inner.method()`, `f().g()`) → opaque:
+    // findable by the called method name (recall) but never resolved.
+    return { receiver: RECEIVER_OPAQUE, property: field.text, isSelf: false };
   }
   if (callee.type === 'scoped_identifier' || callee.type === 'scoped_type_identifier') {
     const name = callee.childForFieldName('name');
     const path = callee.childForFieldName('path');
     if (!name || !path) return null;
+    // `::` path calls are pathQualified: a small intra-crate population (not the
+    // dot-method flood), so emit() exempts them from RUST_IGNORED_MEMBER_CALLEES
+    // — `crate::cfg::parse()` to an in-repo `fn parse` stays findable even though
+    // `.parse()` method calls are suppressed.
     if (path.type === 'identifier') {
-      if (path.text === 'Self') return { receiver: 'Self', property: name.text, isSelf: true };
-      return { receiver: path.text, property: name.text, isSelf: false };
+      if (path.text === 'Self')
+        return { receiver: 'Self', property: name.text, isSelf: true, pathQualified: true };
+      return { receiver: path.text, property: name.text, isSelf: false, pathQualified: true };
     }
     // Multi-segment path (`A::B::name()`). Emit ONLY when the path is rooted at
     // crate/self/super — those are reliably INTRA-crate, so the immediate
@@ -133,12 +171,12 @@ function rustMemberCallInfo(callee: Node): MemberCallInfo | null {
       if (!isCrateRooted(path)) return null;
       const qualifier = path.childForFieldName('name');
       if (!qualifier) return null;
-      return { receiver: qualifier.text, property: name.text, isSelf: false };
+      return { receiver: qualifier.text, property: name.text, isSelf: false, pathQualified: true };
     }
     // Two-segment root-relative path (`crate::f()`, `super::f()`, `self::f()`):
     // the path IS the keyword node — intra-crate, the keyword is the receiver.
     if (path.type === 'crate' || path.type === 'super' || path.type === 'self') {
-      return { receiver: path.text, property: name.text, isSelf: false };
+      return { receiver: path.text, property: name.text, isSelf: false, pathQualified: true };
     }
     return null;
   }
@@ -197,6 +235,7 @@ export function extractRust(
       constructorKinds: RUST_CONSTRUCTOR_KINDS,
       ambiguousClassNames: ambiguousTypeNames,
       ignoredBareCallees: RUST_IGNORED_BARE_CALLEES,
+      ignoredMemberCallees: RUST_IGNORED_MEMBER_CALLEES,
     },
   );
   return { symbols, references, imports };

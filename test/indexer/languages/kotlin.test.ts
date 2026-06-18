@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 import { extractSymbols } from '../../../src/indexer/extractor.js';
 import { initParser, parseFile } from '../../../src/indexer/parser.js';
+import { RECEIVER_OPAQUE } from '../../../src/types.js';
 import { makeFileInfo } from '../../helpers.js';
 
 function extract(src: string, language = 'kotlin', path = 'src/test.kt') {
@@ -271,6 +272,79 @@ describe('kotlin extractor — references', () => {
   it('skips :: callable references (not calls)', () => {
     const result = extract(`fun a() {\n  val f = String::length\n}\n`);
     expect(result.references.some((r) => r.targetName === 'length')).toBe(false);
+  });
+
+  it('captures a chained call under an opaque receiver', () => {
+    const result = extract(`fun a(obj: T) {\n  obj.b().run()\n}\n`);
+    // `obj.b()` keeps its single-identifier receiver; the chained `.run()`
+    // (receiver is a navigation_expression) is captured under RECEIVER_OPAQUE —
+    // findable by method name (recall) but never resolved.
+    const b = result.references.find((r) => r.targetName === 'b')!;
+    expect(b.receiver).toBe('obj');
+    const run = result.references.find((r) => r.targetName === 'run')!;
+    expect(run.receiver).toBe(RECEIVER_OPAQUE);
+    expect(run.targetId).toBeNull();
+  });
+
+  it('suppresses unresolved chained calls to common stdlib names', () => {
+    const result = extract(`fun a(xs: List<Int>) {\n  xs.filter { it > 0 }.toList()\n  xs.domainOp()\n}\n`);
+    const names = result.references.map((r) => r.targetName);
+    // Positive anchor: a non-ignored member call on the same body IS captured —
+    // so the absences below are real suppression, not a vacuous empty-body parse.
+    expect(names).toContain('domainOp');
+    // filter/toList ∈ KOTLIN_IGNORED_MEMBER_CALLEES and unresolved → dropped.
+    expect(names).not.toContain('filter');
+    expect(names).not.toContain('toList');
+  });
+
+  it('suppresses scope-function member calls (apply/also/takeIf), the dominant chained form', () => {
+    const result = extract(
+      `fun a(x: T) {\n  x.apply { }\n  foo().also { }\n  x.takeIf { true }\n  x.domainCall()\n}\n`,
+    );
+    const names = result.references.map((r) => r.targetName);
+    // Scope funcs in member position are pure-stdlib flood (apply/also/takeIf ∈
+    // KOTLIN_IGNORED_MEMBER_CALLEES) → dropped when unresolved; `x.apply{}`
+    // (single-level) and `foo().also{}` (opaque) both gated.
+    expect(names).not.toContain('apply');
+    expect(names).not.toContain('also');
+    expect(names).not.toContain('takeIf');
+    // A non-scope domain method on the same receiver is still captured.
+    expect(names).toContain('domainCall');
+  });
+
+  it('does not capture super.method() (parent-class dispatch)', () => {
+    const result = extract(`class C : B() {\n  override fun go() {\n    super.cleanup()\n  }\n}\n`);
+    // Positive anchor: the body parsed and produced the method (so the absence
+    // below is real super-dropping, not a vacuous zero-ref parse failure — most
+    // important for Kotlin, whose multiline-header grammar can swallow a body).
+    expect(result.symbols.some((s) => s.name === 'go')).toBe(true);
+    // `super` is a super_expression node, not a chained receiver — emit nothing.
+    expect(result.references.find((r) => r.targetName === 'cleanup')).toBeUndefined();
+  });
+
+  it('unwraps a!!.m() / (a).m() / comment-in-paren but not a++.m(), and keeps (super).m() dropped', () => {
+    const result = extract(
+      `fun z(a: T) {\n  a!!.foo()\n  (a).bar()\n  a++.bump()\n  (/*c*/ a).baz()\n  (\n  //c\n  a).qux()\n}\n`,
+    );
+    const byName = new Map(result.references.map((r) => [r.targetName, r]));
+    // a!! (unary_expression, trailing `!!`) and (a) unwrap to receiver `a`.
+    expect(byName.get('foo')!.receiver).toBe('a');
+    expect(byName.get('bar')!.receiver).toBe('a');
+    // Leading comments inside the parens are skipped — Kotlin names them
+    // `block_comment`/`line_comment` (never `comment`), so the receiver still
+    // unwraps to `a`.
+    expect(byName.get('baz')!.receiver).toBe('a');
+    expect(byName.get('qux')!.receiver).toBe('a');
+    // a++ is ALSO a unary_expression but its trailing token is `++`, not `!!`, so
+    // it is NOT unwrapped → stays opaque (the discriminator).
+    expect(byName.get('bump')!.receiver).toBe(RECEIVER_OPAQUE);
+  });
+
+  it('a peeled parenthesized (super).m() still hits the super-drop', () => {
+    const result = extract(`class C : B() {\n  fun z() {\n    (super).destroy()\n  }\n}\n`);
+    expect(result.symbols.some((s) => s.name === 'z')).toBe(true);
+    // (super) unwraps to the super_expression, which the guard drops — no leak.
+    expect(result.references.some((r) => r.targetName === 'destroy')).toBe(false);
   });
 
   it('labeled this@Outer.m() resolves against the labeled class, not the inner one', () => {

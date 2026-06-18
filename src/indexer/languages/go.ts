@@ -1,6 +1,6 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
-import { IMPORT_NAMESPACE } from '../../types.js';
+import { IMPORT_NAMESPACE, RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportedName, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import {
   SIGNATURE_DISPLAY_CAP,
@@ -96,18 +96,40 @@ function compositeLiteralCallee(node: Node): Node | null {
   return null;
 }
 
-// Single-level member callees only, mirroring TS/Python/Java: `s.log()`
-// and `pkg.Func()` qualify; chained (`s.conn.Close()`), computed
-// (`f().g()`), and indexed receivers return null and emit nothing.
+// Go member suppression is EMPTY by design. The ignoredMemberCallees gate keys
+// on the PROPERTY NAME alone (extractor.ts), never the receiver — so suppressing
+// a stdlib-looking name (Println/String/Write) would ALSO drop the legitimate
+// package-qualified call that shares it, and package-qualified calls
+// (`fmt.Println`, `strings.Join`) are the dominant RESOLVABLE Go cross-file
+// pattern. The two forms DO differ by receiver — `fmt.Println` keeps receiver
+// `fmt`, only chained `x.fmt().Println()` goes opaque — but the property-keyed
+// gate can't exploit that, so any non-empty set sacrifices the resolved
+// package-qualified refs. Chained opaque refs to hot names (String/Close/Write,
+// all >=4 chars) are therefore NOT suppressed: they stay tier-5 weak member
+// rows, display-capped (WEAK_MEMBER_ROW_CAP) — recall over precision, the
+// documented Go tradeoff. (Only <=3-char names are gated by SHORT_NAME_THRESHOLD.)
+const GO_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set<string>();
+
+// `s.log()` and `pkg.Func()` carry their literal receiver token; chained and
+// computed receivers (`s.conn.Close()`, `f().g()`, indexed) carry
+// RECEIVER_OPAQUE so the called method stays findable by name (recall) but
+// never resolves. A non-`field_identifier` field name emits nothing.
 // Never returns isSelf — Go has no this/self token; selfness is decided
 // in the engine by matching the receiver token against the enclosing
-// method's PendingBody.selfReceiverName.
+// method's PendingBody.selfReceiverName (opaque receivers never match it).
 function goMemberCallInfo(callee: Node): MemberCallInfo | null {
   if (callee.type === 'selector_expression') {
-    const operand = callee.childForFieldName('operand');
     const field = callee.childForFieldName('field');
-    if (operand?.type !== 'identifier' || field?.type !== 'field_identifier') return null;
-    return { receiver: operand.text, property: field.text, isSelf: false };
+    if (field?.type !== 'field_identifier') return null;
+    const operand = callee.childForFieldName('operand');
+    if (operand?.type === 'identifier') {
+      return { receiver: operand.text, property: field.text, isSelf: false };
+    }
+    // Chained/computed receiver (selector/call/index operand) → opaque. A
+    // missing operand (only on a malformed/ERROR parse — valid Go selectors
+    // always have one) emits nothing, preserving the pre-recall drop.
+    if (!operand) return null;
+    return { receiver: RECEIVER_OPAQUE, property: field.text, isSelf: false };
   }
   // Qualified composite literal `pkg.Config{}` — the constructor analog of
   // Java's `new pkg.Thing()` member path.
@@ -186,6 +208,7 @@ export function extractGo(
       constructorKinds: GO_CONSTRUCTOR_KINDS,
       ambiguousClassNames: ambiguousTypeNames,
       ignoredBareCallees: GO_IGNORED_BARE_CALLEES,
+      ignoredMemberCallees: GO_IGNORED_MEMBER_CALLEES,
     },
   );
   return { symbols, references, imports };

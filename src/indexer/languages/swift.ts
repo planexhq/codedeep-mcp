@@ -1,6 +1,6 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
-import { IMPORT_NAMESPACE } from '../../types.js';
+import { IMPORT_NAMESPACE, RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import {
   SIGNATURE_DISPLAY_CAP,
@@ -102,19 +102,55 @@ const SWIFT_SELECTORS: ReadonlyArray<CallSelector> = [
   { nodeType: 'call_expression', getCallee: swiftCallCallee },
 ];
 
+// Peels transparent receiver wrappers off a navigation target so a wrapped
+// receiver resolves like the bare form — force-unwrap `a!` (postfix_expression
+// with a `bang` child), bare parens `(a)` (a single-element tuple_expression —
+// Swift has no 1-tuples; comments are NAMED children, so it counts non-comment
+// elements), and an `as` cast (`a as T`, the value is firstNamedChild) — so
+// `a!.x()` / `(a).x()` / `(a as T).x()` resolve like `a.x()`. A peeled `(super)`
+// lands on the super_expression and is dropped by swiftMemberCallInfo's guard.
+function unwrapSwiftReceiver(node: Node): Node {
+  let n = node;
+  for (;;) {
+    if (n.type === 'postfix_expression') {
+      if (n.child(n.childCount - 1)?.type !== 'bang') break; // only force-unwrap `!`
+      const inner = n.firstNamedChild;
+      if (!inner) break;
+      n = inner;
+    } else if (n.type === 'tuple_expression') {
+      // A parenthesized single value `(a)` parses as a 1-element tuple. Comments
+      // (`//`→comment, `/* */`→multiline_comment) are NAMED children, so count by
+      // non-comment elements: exactly one means a transparent wrapper (a real
+      // 2-tuple `(a, b)` is not), and that element is the operand.
+      const elems = n.namedChildren.filter(
+        (c) => c.type !== 'comment' && c.type !== 'multiline_comment',
+      );
+      if (elems.length !== 1) break;
+      n = elems[0];
+    } else if (n.type === 'as_expression') {
+      const inner = n.firstNamedChild;
+      if (!inner) break;
+      n = inner;
+    } else break;
+  }
+  return n;
+}
+
 // Reduces a `navigation_expression` callee (`obj.m()`, `self.m()`, `C.make()`,
-// `Self.make()`) to {receiver, property}. Single-level receivers only: a
-// chained `a.b.c()` has a navigation_expression target and returns null
-// (same contract as TS/Python/Java/Go/Rust). `self` is a fixed token and
-// `Self` fixed identifier text, decided here like Python/Rust — Swift needs no
-// PendingBody.selfReceiverName.
+// `Self.make()`) to {receiver, property}, after unwrapSwiftReceiver peels any
+// wrapper off the target. A chained `a.b.c()` target → RECEIVER_OPAQUE (findable
+// by name, never resolved); `self`/`Self` → isSelf (decided here like
+// Python/Rust — no PendingBody.selfReceiverName); `super` → null (parent
+// dispatch, not tracked); a computed/optional suffix (no `simple_identifier`
+// property) emits nothing.
 function swiftMemberCallInfo(callee: Node): MemberCallInfo | null {
   if (callee.type !== 'navigation_expression') return null;
-  const target = callee.childForFieldName('target');
+  const rawTarget = callee.childForFieldName('target');
   const suffix = callee.childForFieldName('suffix');
-  if (!target || suffix?.type !== 'navigation_suffix') return null;
+  if (!rawTarget || suffix?.type !== 'navigation_suffix') return null;
   const property = suffix.childForFieldName('suffix');
   if (property?.type !== 'simple_identifier') return null; // computed/optional suffix → skip
+  const target = unwrapSwiftReceiver(rawTarget);
   if (target.type === 'self_expression') {
     return { receiver: 'self', property: property.text, isSelf: true };
   }
@@ -122,8 +158,27 @@ function swiftMemberCallInfo(callee: Node): MemberCallInfo | null {
     if (target.text === 'Self') return { receiver: 'Self', property: property.text, isSelf: true };
     return { receiver: target.text, property: property.text, isSelf: false };
   }
-  return null; // chained / computed receiver
+  // `super.m()` is a parent-class dispatch we deliberately don't track (the
+  // TS/Java/Kotlin/C#/Dart rule) — `super` is its own `super_expression` node.
+  if (target.type === 'super_expression') return null;
+  return { receiver: RECEIVER_OPAQUE, property: property.text, isSelf: false }; // chained receiver
 }
+
+// Dominant Swift stdlib/collection/string/Optional method names (>=4 chars)
+// suppressed when a member call to them is unresolved — capturing chained
+// `.map().filter()` calls otherwise floods the name-keyed store. Domain method
+// names are deliberately absent. <=3-char names (`.map`) are gated downstream
+// by SHORT_NAME_THRESHOLD.
+const SWIFT_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
+  'append', 'insert', 'remove', 'removeAll', 'removeFirst', 'removeLast',
+  'contains', 'filter', 'reduce', 'forEach', 'flatMap', 'compactMap',
+  'sorted', 'reversed', 'first', 'last', 'count', 'isEmpty', 'joined',
+  'prefix', 'suffix', 'dropFirst', 'dropLast', 'enumerated',
+  'replacingOccurrences', 'components', 'split', 'hasPrefix', 'hasSuffix',
+  'lowercased', 'uppercased', 'trimmingCharacters', 'description',
+  'allSatisfy', 'firstIndex', 'lastIndex', 'updateValue',
+  'removeValue', 'sink', 'store', 'receive', 'assign',
+]);
 
 // Per-file duplicate-id disambiguation. Two trait-conformance methods, or an
 // extension method duplicating a type method, can be byte-identical in
@@ -181,6 +236,7 @@ export function extractSwift(
       // a bare call to a 'class'-kind symbol via bareCallableKinds.
       ambiguousClassNames: ambiguousTypeNames,
       ignoredBareCallees: SWIFT_IGNORED_BARE_CALLEES,
+      ignoredMemberCallees: SWIFT_IGNORED_MEMBER_CALLEES,
     },
   );
   return { symbols: ctx.symbols, references, imports: ctx.imports };
