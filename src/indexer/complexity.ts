@@ -63,15 +63,19 @@ export interface ComplexityOptions {
   // COGNITIVE complexity (proposal §1.2): when present, a second nesting-aware
   // walk runs alongside the cyclomatic one and writes `Symbol.cognitiveComplexity`.
   // Absent ⇒ cognitive stays undefined for that language (the cyclomatic-only
-  // languages — TS/JS, Python, Go — this slice). The cognitive algorithm is the
-  // SonarSource whitepaper's, clean-room verified against `sonar-java`'s
-  // `CognitiveComplexityVisitor`: a +1 STRUCTURAL increment per break in linear
-  // flow, plus a +1-per-nesting-level SURCHARGE when the flow-breaker is nested.
-  // It is NOT expressible as the flat node-type sets cyclomatic uses (the
-  // if/else-if chain, the catch-at-unbumped-nesting rule, boolean-run collapse,
-  // and labeled jumps need structured handlers), so CognitiveOptions names each
-  // construct explicitly. See computeCognitive below + CLAUDE.md "Cyclomatic
-  // Complexity Rules" for the per-rule divergences.
+  // languages — Python, Go — and the not-yet-done Rust/Swift/Kotlin/Dart/C#/PHP).
+  // Populated for **Java + TS/JS**. The algorithm is the SonarSource whitepaper's,
+  // clean-room verified against `sonar-java`'s `CognitiveComplexityVisitor` (Java)
+  // AND `eslint-plugin-sonarjs`'s S3776 (TS/JS) — the two analyzers DIVERGE, so the
+  // per-language config differs: a +1 STRUCTURAL increment per break in linear
+  // flow, plus a +1-per-nesting-level SURCHARGE when the flow-breaker is nested. It
+  // is NOT expressible as the flat node-type sets cyclomatic uses (the if/else-if
+  // chain, the catch-at-unbumped-nesting rule, boolean-run collapse, and labeled
+  // jumps need structured handlers), so CognitiveOptions names each construct
+  // explicitly. The three OPTIONAL fields below (`elseClauseType`, `booleanRunStarts`,
+  // `excludeBooleanRun`) default to the Java/sonar-java behavior; TS sets all three
+  // for SonarJS S3776 (else_clause wrapper, `&&`-runs-only, JSX exclusion). See
+  // computeCognitive below + CLAUDE.md "Cognitive Complexity Rules".
   cognitive?: CognitiveOptions;
 }
 
@@ -88,6 +92,14 @@ export interface CognitiveOptions {
   conditionField: string;
   consequenceField: string;
   alternativeField: string;
+  // Some grammars wrap the `else`/`else if` in a dedicated node under the
+  // `alternativeField` instead of holding the if/block directly (tree-sitter-
+  // typescript: `alternative: else_clause → if_statement|statement_block`,
+  // UNLIKE tree-sitter-java where `alternative` is the if/block itself). When
+  // set, handleAlternative unwraps it (first named child = the real else-if /
+  // else body) before the else-if-vs-else test; without it an `else if` would be
+  // mis-read as a nested (surcharged) if. Java/Go/Py leave it unset.
+  elseClauseType?: string;
   // Surcharge (+1 + nesting) AND raise the nesting level for the whole subtree.
   // Loops + switch + ternary. A `switch` is +1 for the WHOLE switch regardless
   // of case count (the cognitive/cyclomatic divergence) — its case labels add
@@ -118,6 +130,27 @@ export interface CognitiveOptions {
   // run — `a&&b&&c`=1, `a&&b||c`=2, and crucially `a&&b&&(c||d)&&(e||f)`=4 (the
   // operator sequence &&,&&,||,&&,|| has 4 runs). Only kind EQUALITY is compared.
   booleanOperatorKind: (node: Node) => string | null;
+  // Decides whether a flattened boolean-run node STARTS a counted +1, given its
+  // operator `kind` and the previous flattened node's `prevKind` (null at the run
+  // start). DEFAULT (sonar-java / current behavior) = `prevKind === null ||
+  // prevKind !== kind` — a +1 at every operator-KIND change. SonarJS S3776 is
+  // different: it counts ONLY maximal runs of `&&` (`||`/`??` never count but DO
+  // break `&&` runs in source order), so TS passes
+  // `(kind, prev) => kind === '&&' && prev !== '&&'`. The flatten still keeps
+  // ALL operators in the source-order `run` (booleanOperatorKind must be non-null
+  // for them) so `||`/`??` remain run-breakers; this predicate only decides which
+  // contribute. VERIFIED against SonarJS source + oracle: `a&&b&&(c||d)&&(e||f)`=2
+  // (two `&&` runs split by the `||`s in source order), NOT sonar-java's 4.
+  booleanRunStarts?: (kind: string, prevKind: string | null) => boolean;
+  // Optional: when it returns true for a boolean-run ROOT (the topmost not-yet-
+  // counted logical node, which the top-down DFS hits first), the run's source-
+  // order flatten STILL runs (so the subtree enters `counted` and isn't recounted)
+  // but the count loop is skipped — the whole run contributes 0. Operands are
+  // still descended (to catch a nested ternary/control structure). Used by TS for
+  // SonarJS's JSX short-circuit exclusion: a uniform-operator logical expression
+  // whose immediate parent is a `jsx_expression` (`{cond && <X/>}`, attribute
+  // values) scores 0. Java/Go/Py leave it unset.
+  excludeBooleanRun?: (root: Node) => boolean;
   // The parenthesized-expression node type, unwrapped while linearizing a boolean
   // sequence so `a && (b || c)` reads the inner `||` as part of the same source-
   // order run rather than a detached one (sonar's ExpressionUtils.skipParentheses).
@@ -255,6 +288,16 @@ function skipParens(node: Node | null, parenthesizedType: string): Node | null {
   return n;
 }
 
+// First named child that is not a comment. tree-sitter attaches comments as
+// NAMED children ("extras"), so positional access (namedChild(0)) can land on a
+// comment instead of the real node — e.g. the body of `else /*c*/ {…}`. Every
+// grammar wired so far names this node type `comment`.
+function firstNonComment(node: Node): Node | null {
+  let child = node.namedChild(0);
+  while (child && child.type === 'comment') child = child.nextNamedSibling;
+  return child;
+}
+
 function computeCognitive(
   body: Node,
   cog: CognitiveOptions,
@@ -266,6 +309,10 @@ function computeCognitive(
   // Keyed on node.id (stable across web-tree-sitter wrapper objects); MUST be
   // call-local (per body) — hoisting it would undercount across symbols.
   const counted = new Set<number>();
+  // Per-language run-start rule; default = +1 at every operator-KIND change
+  // (sonar-java). TS overrides to count only `&&`-run-starts (SonarJS S3776).
+  const runStarts =
+    cog.booleanRunStarts ?? ((kind: string, prev: string | null) => prev === null || prev !== kind);
 
   const visitField = (node: Node, field: string, nesting: number, depth: number): void => {
     const child = node.childForFieldName(field);
@@ -282,7 +329,18 @@ function computeCognitive(
     // native stack despite MAX_COGNITIVE_DEPTH (the chain recurses here, not
     // through `visit`).
     if (depth > MAX_COGNITIVE_DEPTH) return;
-    const alt = ifNode.childForFieldName(cog.alternativeField);
+    const rawAlt = ifNode.childForFieldName(cog.alternativeField);
+    if (!rawAlt) return;
+    // Unwrap an else-wrapper node (TS `else_clause`) to the real else-if / else
+    // body; grammars that hold the if/block directly (Java) leave elseClauseType
+    // unset and use rawAlt as-is. SKIP a leading comment: tree-sitter attaches a
+    // comment sitting between `else` and the body as a NAMED child of the wrapper
+    // (`else /*c*/ {…}`), so a bare namedChild(0) would grab the comment and drop
+    // the entire else body's complexity.
+    const alt =
+      cog.elseClauseType && rawAlt.type === cog.elseClauseType
+        ? firstNonComment(rawAlt)
+        : rawAlt;
     if (!alt) return;
     total += 1; // the `else` / `else if` keyword: +1 flat, no surcharge
     if (alt.type === cog.ifType) {
@@ -309,6 +367,14 @@ function computeCognitive(
     }
 
     // --- loops / switch / ternary: surcharge, then ALL children one level deeper ---
+    // KNOWN DIVERGENCE (shared by Java + TS, pre-dates this slice, accepted): sonar
+    // nests ONLY the body/consequent/alternate, NOT the loop header / switch
+    // discriminant / ternary TEST, whereas this bumps every child. So a nested
+    // STRUCTURAL construct in those positions (`switch(a?b:c)`, `(a?b:c)?d:e`,
+    // `for(;cond?a:b;)`) over-counts by the bump. Booleans are flat (unaffected),
+    // and these positions rarely hold control flow — 0 cases in the 800-fn TS oracle
+    // (ky/zod/recharts/express) or gson. A precise fix needs per-construct body
+    // fields + re-oracling Java; deferred to a dedicated engine pass.
     if (cog.loopTypes.has(t) || cog.switchTypes.has(t) || t === cog.ternaryType) {
       total += 1 + nesting;
       for (const child of node.namedChildren) visit(child, nesting + 1, depth + 1);
@@ -355,17 +421,28 @@ function computeCognitive(
           const inner = skipParens(n, cog.parenthesizedType);
           if (inner && cog.booleanOperatorKind(inner) !== null) {
             counted.add(inner.id);
-            flatten(inner.namedChild(0), d + 1); // left
+            // Operands via the `left`/`right` FIELDS, not positional
+            // namedChild(0)/(1): a comment interleaved around the operator
+            // (`a && /*c*/ b`) is a named child, so positional access would
+            // read the comment as the right operand and drop a parenthesized
+            // sub-run. Every logical node in the cognitive grammars (Java/TS
+            // `binary_expression`) exposes `left`/`right`.
+            flatten(inner.childForFieldName('left'), d + 1);
             run.push(inner);
-            flatten(inner.namedChild(1), d + 1); // right
+            flatten(inner.childForFieldName('right'), d + 1);
           }
         };
-        flatten(node, depth);
-        let prevKind: string | null = null;
-        for (const n of run) {
-          const kind = cog.booleanOperatorKind(n);
-          if (prevKind === null || prevKind !== kind) total += 1;
-          prevKind = kind;
+        flatten(node, depth); // marks the whole subtree `counted`
+        // A run whose ROOT is excluded (TS JSX short-circuit) contributes 0 —
+        // but the flatten above still ran, so its inner logical nodes won't be
+        // recounted when the DFS descends below.
+        if (!cog.excludeBooleanRun?.(node)) {
+          let prevKind: string | null = null;
+          for (const n of run) {
+            const kind = cog.booleanOperatorKind(n)!; // non-null: it's in `run`
+            if (runStarts(kind, prevKind)) total += 1;
+            prevKind = kind;
+          }
         }
       }
       // Descend operands at the SAME nesting (booleans are flat). The flattened

@@ -21,6 +21,21 @@ const ts = (src: string, name = 'f') => cx(src, name, 'typescript', 'src/test.ts
 const py = (src: string, name = 'f') => cx(src, name, 'python', 'src/test.py');
 const go = (src: string, name = 'f') => cx(`package p\n${src}`, name, 'go', 'src/test.go');
 
+// Both metrics for the named symbol (mirrors the `java` helper), each undefined
+// when trivial (cyc 1 / cog 0). `tsCog` parses as .ts, `tsxCog` as .tsx (JSX).
+function bothCx(
+  src: string,
+  name: string,
+  language: string,
+  path: string,
+): { cyc: number | undefined; cog: number | undefined } {
+  const sym = syms(src, language, path).find((s) => s.name === name);
+  if (!sym) throw new Error(`no symbol named ${name}`);
+  return { cyc: sym.complexity, cog: sym.cognitiveComplexity };
+}
+const tsCog = (src: string, name = 'f') => bothCx(src, name, 'typescript', 'src/test.ts');
+const tsxCog = (src: string, name = 'f') => bothCx(src, name, 'tsx', 'src/test.tsx');
+
 // Java carries BOTH metrics (Phase 3). `src` is one or more member declarations;
 // they're wrapped in `class T { … }`. Returns { cyc, cog } for the named member
 // (default `m`), each undefined when trivial (cyc 1 / cog 0).
@@ -379,5 +394,151 @@ describe('Java — cyclomatic (sonar-java ComplexityVisitor) + cognitive (Cognit
   it('the whole switch is cognitive +1 regardless of case count (vs cyclomatic per-case)', () => {
     const sw = 'void m(int x){ switch(x){ case 1: break; case 2: break; case 3: break; case 4: break; } }';
     expect(java(sw)).toEqual({ cyc: 5, cog: 1 });
+  });
+});
+
+// VERIFIED-EXACT against SonarJS S3776 (eslint-plugin-sonarjs@4.1.0
+// `cjs/S3776/rule.js`) — read clean-room AND ground-truthed at threshold 0 (every
+// number below was emitted by the real `sonarjs/cognitive-complexity` rule). The
+// SonarJS cognitive rule differs MATERIALLY from sonar-java's (booleans +
+// JSX), so these are independent pins, not a copy of the Java block.
+describe('cognitive complexity — TypeScript/JS (SonarJS S3776)', () => {
+  it('omits the trivial value (cog 0)', () => {
+    expect(tsCog('function f(){ return 1; }').cog).toBeUndefined();
+  });
+
+  // --- Booleans: ONLY maximal `&&` runs count; `||`/`??` never count but DO
+  // break `&&` runs in SOURCE order (the sonar-java divergence) ---
+  it('a single && run = cog 1; || and ?? never count', () => {
+    expect(tsCog('function f(a,b){ return a && b; }').cog).toBe(1);
+    expect(tsCog('function f(a,b){ return a || b; }').cog).toBeUndefined();
+    expect(tsCog('function f(a,b){ return a ?? b; }').cog).toBeUndefined();
+    expect(tsCog('function f(a,b,c){ return a && b && c; }').cog).toBe(1);
+    expect(tsCog('function f(a,b,c){ return a || b || c; }').cog).toBeUndefined();
+  });
+
+  it('|| / ?? break && runs in source order (count = number of && runs)', () => {
+    expect(tsCog('function f(a,b,c){ return a && b || c; }').cog).toBe(1);
+    expect(tsCog('function f(a,b,c){ return a || b && c; }').cog).toBe(1);
+    expect(tsCog('function f(a,b,c,d){ return a && b || c && d; }').cog).toBe(2);
+    expect(tsCog('function f(a,b,c){ return a || (b && c); }').cog).toBe(1);
+  });
+
+  it('boolean runs linearize in SOURCE order: a&&b&&(c||d)&&(e||f) = cog 2 (NOT java 4, NOT 1)', () => {
+    // The two parenthesized ||s split the && spine into two source-order && runs.
+    const src = 'function f(a,b,c,d,e,g){ return a && b && (c || d) && (e || g); }';
+    expect(tsCog(src).cog).toBe(2);
+  });
+
+  it('cyclomatic still counts || and ?? — the expected cyc/cog divergence', () => {
+    // cyclomatic: 3 operators (&&,||) → 1+2 = 3; ?? → 1+1 = 2. cognitive: 1 / 0.
+    expect(tsCog('function f(a,b,c){ return a && b || c; }')).toEqual({ cyc: 3, cog: 1 });
+    expect(tsCog('function f(a,b){ return a ?? b; }')).toEqual({ cyc: 2, cog: undefined });
+  });
+
+  // --- Structural ---
+  it('if = +1+nesting; else = +1 flat; else-if = +1 flat (else_clause unwrap)', () => {
+    expect(tsCog('function f(a){ if(a){} else {} }').cog).toBe(2);
+    // else-if must be FLAT — the else_clause-unwrap engine path. Without it the
+    // else-if would surcharge and this would read 5.
+    expect(tsCog('function f(a){ if(a){} else if(a){} else {} }').cog).toBe(3);
+    expect(tsCog('function f(a){ if(a){ if(a){ if(a){} } } }').cog).toBe(6); // 1+2+3
+  });
+
+  it('nesting surcharge: for{ if{} } = cog 3 (loop 1 + nested if 2)', () => {
+    expect(tsCog('function f(a){ for(;;){ if(a){} } }').cog).toBe(3);
+  });
+
+  it('the whole switch is cog +1 regardless of case count', () => {
+    const sw = 'function f(x){ switch(x){ case 1: break; case 2: break; case 3: break; default: break; } }';
+    expect(tsCog(sw)).toEqual({ cyc: 4, cog: 1 }); // cyc per non-default case
+  });
+
+  it('+1+nesting per loop and ternary', () => {
+    expect(tsCog('function f(){ for(;;){} while(true){} do{}while(0); }').cog).toBe(3);
+    expect(tsCog('function f(xs){ for(const x of xs){} }').cog).toBe(1);
+    expect(tsCog('function f(a){ return a ? 1 : 2; }').cog).toBe(1);
+  });
+
+  it('catch is +1+nesting; try/finally/throw add nothing (cyc-trivial, cog 1)', () => {
+    expect(tsCog('function f(){ try{} catch(e){} finally{} }')).toEqual({ cyc: undefined, cog: 1 });
+    expect(tsCog('function f(){ throw new Error(); }')).toEqual({ cyc: undefined, cog: undefined });
+  });
+
+  it('labeled break/continue = +1 flat; a plain break adds nothing', () => {
+    expect(tsCog('function f(){ OUT: for(;;){ for(;;){ break OUT; } } }').cog).toBe(4);
+    expect(tsCog('function f(){ for(;;){ break; } }').cog).toBe(1);
+  });
+
+  // --- Per-symbol model: nested functions reported separately (== SonarJS) ---
+  it('a nested function/callback does NOT fold into the enclosing symbol', () => {
+    // SonarJS reports outer=1 and inner=3 separately; Probe extracts only `outer`
+    // and its cognitive (1, just its own if) matches SonarJS's outer report.
+    expect(tsCog('function outer(a){ if(a){} function inner(b,c){ if(b){ if(c){} } } }', 'outer').cog).toBe(1);
+    // A callback arrow's branches count toward nobody (the cyclomatic gap, mirrored).
+    expect(tsCog('function f(xs,a){ return xs.map(x => { if(a){ if(x){} } }); }').cog).toBeUndefined();
+  });
+
+  it('a top-level arrow-const gets its OWN cognitive number', () => {
+    expect(bothCx('const g = (x) => x ? 1 : 2;', 'g', 'typescript', 'src/test.ts').cog).toBe(1);
+  });
+
+  // --- JSX short-circuit exclusion (.tsx) ---
+  it('a uniform-operator logical directly in a JSX container scores 0', () => {
+    expect(tsxCog('function f(a){ return <div>{a && <span/>}</div>; }').cog).toBeUndefined();
+    expect(tsxCog('function f(a,b){ return <div>{a && b && <span/>}</div>; }').cog).toBeUndefined();
+    expect(tsxCog('function f(){ return <div>{foo() && bar()}</div>; }').cog).toBeUndefined();
+    // attribute-value `={...}` is also a jsx_expression → excluded.
+    expect(tsxCog('function f(a){ return <div data-x={a && a}>hi</div>; }').cog).toBeUndefined();
+    // cyclomatic still counts the JSX && (no cognitive-style exclusion there).
+    expect(tsxCog('function f(a){ return <div>{a && <span/>}</div>; }').cyc).toBe(2);
+  });
+
+  it('a MIXED-operator JSX expression is NOT excluded; non-JSX-container && counts', () => {
+    expect(tsxCog('function f(a,b){ return <div>{(a||b) && <span/>}</div>; }').cog).toBe(1);
+    // `{...}` excluded, but the trailing `return a && y` is not in a container → 1.
+    const src = 'function f(a,b){ const y = <div>{a && b && <span/>}</div>; return a && y; }';
+    expect(tsxCog(src).cog).toBe(1);
+  });
+
+  it('counts cognitive on a method and in a .js file', () => {
+    expect(tsCog('class C { m(a){ if(a){ if(a){} } } }', 'm').cog).toBe(3);
+    expect(bothCx('function f(a){ if(a){} else {} }', 'f', 'javascript', 'src/test.js').cog).toBe(2);
+  });
+
+  // DOCUMENTED DIVERGENCE (Probe is whitepaper-correct; the ONLY mismatch in an
+  // 800-fn ky/zod/recharts/express oracle run): when a ternary's branch is a
+  // FUNCTION expression and control flow follows it in the same function, SonarJS
+  // OVER-counts via a visitor-ordering artifact — the nesting-node enter-bump hits
+  // the enclosing function's nesting counter but the exit-unbump hits the inner
+  // function's, permanently elevating the encloser's nesting (compounds per such
+  // ternary). The whitepaper scopes nesting; Probe does too. Here SonarJS reports
+  // 3 (ternary 1 + if at a leaked nesting 1 = 2), Probe the correct 2.
+  it('does NOT reproduce the SonarJS ternary-function-branch nesting leak (Probe = whitepaper)', () => {
+    const src = 'function f(x){ const d = { fn: typeof x === "function" ? x : (v) => x(v) }; if (x) {} }';
+    expect(tsCog(src).cog).toBe(2); // ternary +1, if +1 — SonarJS's quirk gives 3
+  });
+
+  // --- Review-found edge cases (all oracle-confirmed against SonarJS) ---
+  it('a WHOLE-expression-parenthesized JSX short-circuit is still excluded', () => {
+    // SonarJS's ESTree drops parens, so `{(a && b)}` sits directly under the JSX
+    // container and scores 0 — the engine must walk up through parenthesized_expression.
+    expect(tsxCog('function f(a,b){ return <div>{(a && b)}</div>; }').cog).toBeUndefined();
+    expect(tsxCog('function f(c){ return <div>{(c && <span/>)}</div>; }').cog).toBeUndefined();
+    expect(tsxCog('function f(a,b){ return <div>{((a && b))}</div>; }').cog).toBeUndefined();
+    // mixed-operator paren'd is still NOT excluded; a non-container paren'd && counts.
+    expect(tsxCog('function f(a,b){ return <div>{(a||b) && <span/>}</div>; }').cog).toBe(1);
+    expect(tsxCog('function f(a,b){ const x = (a && b); return <div/>; }').cog).toBe(1);
+  });
+
+  it('comment nodes do not perturb labels, else bodies, or boolean operands', () => {
+    // tree-sitter attaches comments as NAMED children, so positional access must
+    // be comment-robust. All three values oracle-confirmed against SonarJS.
+    // (a) an unlabeled break with a comment is NOT a labeled jump (+0).
+    expect(tsCog('function f(){ for(;;){ break /*c*/; } }').cog).toBe(1);
+    // (b) a comment between `else` and its body must not drop the body's complexity.
+    expect(tsCog('function f(a){ if(a){} else /*c*/ { if(a){} } }').cog).toBe(4);
+    // (c) a comment around a boolean operator must not drop a sub-run.
+    expect(tsCog('function f(a,b,c){ return a || /*c*/ b && c; }').cog).toBe(1);
   });
 });

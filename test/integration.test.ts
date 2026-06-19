@@ -241,11 +241,12 @@ describe('integration: end-to-end pipeline + tools', () => {
     expect(text).toContain('### Imports');
   });
 
-  it('renders cyclomatic complexity on find_symbol and get_context', async () => {
+  it('renders cyclomatic + cognitive complexity on find_symbol and get_context', async () => {
     const proj = makeProjectDir('probe-int-cyclo-');
     try {
       writeTree(proj, {
-        // 3 decision points (two ifs + a ternary) → cyclomatic 4.
+        // 3 decision points (two ifs + a ternary) → cyclomatic 4; cognitive 3
+        // (two flat ifs + a flat ternary, all at nesting 0).
         'src/classify.ts':
           'export function classify(n: number): string {\n' +
           "  if (n < 0) return 'neg';\n" +
@@ -264,16 +265,16 @@ describe('integration: end-to-end pipeline + tools', () => {
       const deps = { index, indexer, config, git: makeGitStub() };
 
       const found = (await runFindSymbol({ name: 'classify' }, deps)).content[0].text;
-      // TS gets cyclomatic only this slice (no cognitive) → "cyc N" alone.
-      expect(found).toContain('Complexity: cyc 4 [structural]');
-      // A trivial function (complexity 1) omits the line entirely.
+      // TS now carries BOTH metrics → "cyc N / cog M".
+      expect(found).toContain('Complexity: cyc 4 / cog 3 [structural]');
+      // A trivial function (cyc 1 / cog 0) omits the line entirely.
       const trivial = (await runFindSymbol({ name: 'trivial' }, deps)).content[0].text;
       expect(trivial).not.toContain('Complexity:');
 
       const ctx = (
         await runGetContext({ file: 'src/classify.ts', symbol: 'classify' }, deps)
       ).content[0].text;
-      expect(sectionAfter(ctx, '### Coupling')).toContain('- Complexity: cyc 4 [structural]');
+      expect(sectionAfter(ctx, '### Coupling')).toContain('- Complexity: cyc 4 / cog 3 [structural]');
     } finally {
       rmSync(proj, { recursive: true, force: true });
     }

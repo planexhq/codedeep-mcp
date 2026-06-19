@@ -17,7 +17,12 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
-import { computeComplexity, isCFamilyBooleanOperator } from '../complexity.js';
+import {
+  cFamilyBooleanOperatorKind,
+  computeComplexity,
+  isCFamilyBooleanOperator,
+} from '../complexity.js';
+import type { CognitiveOptions } from '../complexity.js';
 
 // Function-like nodes whose bodies contain calls that shouldn't attribute
 // to an enclosing body. walkDecorators uses this subset (NOT the full
@@ -74,6 +79,15 @@ const TS_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
   'padEnd', 'repeat', 'delete',
 ]);
 
+// The four TS loop nodes (`for_in_statement` covers both for-of and for-in) —
+// shared by the cyclomatic decision set and the cognitive surcharge set.
+const TS_LOOP_NODE_TYPES: ReadonlySet<string> = new Set([
+  'for_statement',
+  'for_in_statement',
+  'while_statement',
+  'do_statement',
+]);
+
 // Cyclomatic decision nodes — VERIFIED against SonarJS source (S1541 rule.ts):
 // each adds +1. `for_in_statement` covers both `for…of` and `for…in`;
 // `switch_case` counts per non-default case label (the extractor's `switch_case`
@@ -84,14 +98,85 @@ const TS_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
 // / CatchClause are absent from SonarJS's cyclomatic switch); `else`/`finally`/
 // `default` never count; logical-assignment `&&=`/`||=`/`??=` do NOT count.
 const TS_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  ...TS_LOOP_NODE_TYPES,
   'if_statement',
-  'for_statement',
-  'for_in_statement',
-  'while_statement',
-  'do_statement',
   'switch_case',
   'ternary_expression',
 ]);
+
+// COGNITIVE config — VERIFIED-EXACT against SonarJS S3776 (eslint-plugin-sonarjs
+// `cjs/S3776/rule.js`, clean-room read + threshold-0 oracle), which differs
+// MATERIALLY from sonar-java (do not assume the Java config transfers): see the
+// boolean + JSX notes below. All node names AST-dumped against the bundled
+// grammars. See complexity.ts + CLAUDE.md "Cognitive Complexity Rules".
+const TS_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if_statement',
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  // tree-sitter-typescript wraps else/else-if in an `else_clause` node (UNLIKE
+  // Java's direct `alternative`); the engine unwraps it. else-if = +1 flat.
+  elseClauseType: 'else_clause',
+  loopTypes: TS_LOOP_NODE_TYPES,
+  // TS uses `switch_statement` (not Java's `switch_expression`); the WHOLE switch
+  // is +1 regardless of case count (the cognitive/cyclomatic divergence).
+  switchTypes: new Set(['switch_statement']),
+  ternaryType: 'ternary_expression',
+  catchType: 'catch_clause',
+  // EMPTY by design: nested functions/arrows are already in TS_SKIP_TYPES (the
+  // cognitive walk's boundary prunes them), so each top-level fn / method /
+  // arrow-const gets its OWN standalone cognitive number and nested-fn control
+  // flow counts toward nobody — matching SonarJS's per-function report (an
+  // extracted symbol's number == SonarJS's) and the TS cyclomatic arrow-callback
+  // gap. Adding arrows here would double-count them into the encloser.
+  nestOnlyTypes: new Set(),
+  labeledJumpTypes: new Set(['break_statement', 'continue_statement']),
+  // Read the `label` FIELD, not namedChildCount: an unlabeled `break /*c*/;`
+  // carries a comment as a named child, so counting children would misread it as
+  // labeled and add a spurious +1.
+  hasLabel: (node) => node.childForFieldName('label') != null,
+  // SonarJS counts ONLY maximal `&&` runs; `cFamilyBooleanOperatorKind` returns
+  // the kind for `&&`/`||`/`??` so `||`/`??` stay in the source-order run as
+  // breakers, and booleanRunStarts filters to `&&`-run-starts (`||`/`??` never
+  // count). NB cyclomatic DOES count `||`/`??` — the expected cyc/cog divergence.
+  booleanOperatorKind: cFamilyBooleanOperatorKind,
+  booleanRunStarts: (kind, prev) => kind === '&&' && prev !== '&&',
+  excludeBooleanRun: tsBooleanRunExcluded,
+  parenthesizedType: 'parenthesized_expression',
+};
+
+// SonarJS S3776 excludes a UNIFORM-operator logical expression whose immediate
+// parent is a JSX `{...}` container (`jsx_expression` — covers both JSX children
+// and attribute values) from the cognitive count: `{cond && <X/>}` / `{a && b}` /
+// `{foo() && bar()}` / `<div x={a && a}/>` all score 0 (oracle-confirmed). A
+// MIXED-operator tree is NOT excluded (`{(a || b) && <X/>}` = 1). Mirrors the
+// plugin's `flattenJsxShortCircuitNodes`: bail on a ternary or a different-operator
+// logical node; recurse same-operator operands; any other leaf is fine.
+function tsBooleanRunExcluded(root: Node): boolean {
+  // Walk up through parenthesized_expression wrappers before the container test:
+  // SonarJS runs on ESTree, which has no paren nodes, so a WHOLE-expression-
+  // parenthesized short-circuit (`{(cond && <X/>)}`, a common conditional-render
+  // idiom) sits DIRECTLY under the JSX container there and IS excluded. tree-sitter
+  // keeps the paren node between them, so without this walk Probe would over-count.
+  let container = root.parent;
+  while (container?.type === 'parenthesized_expression') container = container.parent;
+  if (container?.type !== 'jsx_expression') return false;
+  const rootOp = cFamilyBooleanOperatorKind(root);
+  if (rootOp === null) return false;
+  const uniform = (node: Node | null): boolean => {
+    // Unwrap parens like the engine's skipParens (sonar's ESTree has no paren
+    // nodes, so operands are the raw children).
+    let n = node;
+    while (n && n.type === 'parenthesized_expression') n = n.namedChild(0);
+    if (!n) return true;
+    if (n.type === 'ternary_expression') return false;
+    const k = cFamilyBooleanOperatorKind(n);
+    if (k === null) return true; // non-logical leaf
+    if (k !== rootOp) return false; // different operator → not a JSX short-circuit
+    return uniform(n.childForFieldName('left')) && uniform(n.childForFieldName('right'));
+  };
+  return uniform(root);
+}
 
 // Peels receiver wrappers that are transparent to receiver IDENTITY:
 // `non_null_expression` (`a!`) and `parenthesized_expression` (`(a)`). The
@@ -175,6 +260,7 @@ export function extractTypeScript(
     decisionNodeTypes: TS_DECISION_NODE_TYPES,
     isBooleanOperator: isCFamilyBooleanOperator,
     skipTypes: TS_SKIP_TYPES,
+    cognitive: TS_COGNITIVE_OPTIONS,
   });
   return { symbols, references, imports };
 }

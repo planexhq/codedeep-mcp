@@ -23,6 +23,11 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v11: per-symbol COGNITIVE complexity now also computed for TS/JS
+// (`.ts`/`.tsx`/`.js`), VERIFIED-EXACT against SonarJS S3776 (differs from
+// sonar-java: `&&`-runs-only booleans, JSX short-circuit exclusion). Adding the
+// field to TS symbols is an extraction-logic change `isUnchanged`
+// (mtime/size/language) can't detect, so the bump force-invalidates warm caches.
 // v10: per-symbol COGNITIVE complexity (`Symbol.cognitiveComplexity?`, the
 // SonarSource whitepaper nesting-aware metric) is now computed at extract time
 // for Java, alongside cyclomatic which also rolled to Java this slice. A new
@@ -47,7 +52,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both
