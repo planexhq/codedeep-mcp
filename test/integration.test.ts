@@ -264,15 +264,16 @@ describe('integration: end-to-end pipeline + tools', () => {
       const deps = { index, indexer, config, git: makeGitStub() };
 
       const found = (await runFindSymbol({ name: 'classify' }, deps)).content[0].text;
-      expect(found).toContain('Cyclomatic: 4 [structural]');
+      // TS gets cyclomatic only this slice (no cognitive) → "cyc N" alone.
+      expect(found).toContain('Complexity: cyc 4 [structural]');
       // A trivial function (complexity 1) omits the line entirely.
       const trivial = (await runFindSymbol({ name: 'trivial' }, deps)).content[0].text;
-      expect(trivial).not.toContain('Cyclomatic:');
+      expect(trivial).not.toContain('Complexity:');
 
       const ctx = (
         await runGetContext({ file: 'src/classify.ts', symbol: 'classify' }, deps)
       ).content[0].text;
-      expect(sectionAfter(ctx, '### Coupling')).toContain('- Cyclomatic: 4 [structural]');
+      expect(sectionAfter(ctx, '### Coupling')).toContain('- Complexity: cyc 4 [structural]');
     } finally {
       rmSync(proj, { recursive: true, force: true });
     }

@@ -17,6 +17,7 @@ import {
   NAME_MATCH_TAG,
   STRUCTURAL_TAG,
   displaySignature,
+  formatComplexity,
   normalizeFilePath,
   pickByLine,
   plural,
@@ -358,13 +359,12 @@ function renderCoupling(target: Symbol, index: CodeIndex): string {
       : `- Blast radius: ${blast.callers}${cap} ${plural('caller', blast.callers)} across ` +
         `${blast.depths} ${plural('depth', blast.depths)} ` +
         `(${blast.files} ${plural('file', blast.files)}) ${NAME_MATCH_TAG}`;
+  const complexity = formatComplexity(target);
   return [
     '### Coupling',
     `- Fan-in: ~${fanIn} (callers) ${NAME_MATCH_TAG}`,
     `- Fan-out: ${fanOut} (callees) ${STRUCTURAL_TAG}`,
-    ...(target.complexity !== undefined
-      ? [`- Cyclomatic: ${target.complexity} ${STRUCTURAL_TAG}`]
-      : []),
+    ...(complexity ? [`- Complexity: ${complexity}`] : []),
     blastLine,
   ].join('\n');
 }

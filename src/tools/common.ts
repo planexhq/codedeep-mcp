@@ -182,6 +182,20 @@ export const NAME_MATCH_HEADER_QUALIFIER = '(approximate — from AST name match
 // `get_context` symbol-mode caller/callee lists.
 export const STRUCTURAL_TAG = '[structural]';
 
+// Renders the combined complexity body ("cyc N / cog M [structural]") for a
+// symbol, or null when neither metric is present. Cyclomatic is omitted at the
+// trivial 1, cognitive at 0, so a symbol may carry either, both, or neither;
+// show whichever the extractor populated. Both are genuinely structural (no
+// name-match approximation, unlike fan-in), so one [structural] tag covers the
+// line. Callers add their own prefix ("Complexity:" / "- Complexity:").
+export function formatComplexity(sym: Symbol): string | null {
+  const parts: string[] = [];
+  if (sym.complexity !== undefined) parts.push(`cyc ${sym.complexity}`);
+  if (sym.cognitiveComplexity !== undefined) parts.push(`cog ${sym.cognitiveComplexity}`);
+  if (parts.length === 0) return null;
+  return `${parts.join(' / ')} ${STRUCTURAL_TAG}`;
+}
+
 // Tier tag for git-derived data: commit co-occurrence and history, not
 // code structure. Pairs with the DESIGN.md tier vocabulary
 // ([structural] / [approximate] / [behavioral]).

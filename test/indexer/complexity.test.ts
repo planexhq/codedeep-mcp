@@ -21,6 +21,15 @@ const ts = (src: string, name = 'f') => cx(src, name, 'typescript', 'src/test.ts
 const py = (src: string, name = 'f') => cx(src, name, 'python', 'src/test.py');
 const go = (src: string, name = 'f') => cx(`package p\n${src}`, name, 'go', 'src/test.go');
 
+// Java carries BOTH metrics (Phase 3). `src` is one or more member declarations;
+// they're wrapped in `class T { … }`. Returns { cyc, cog } for the named member
+// (default `m`), each undefined when trivial (cyc 1 / cog 0).
+function java(src: string, name = 'm'): { cyc: number | undefined; cog: number | undefined } {
+  const sym = syms(`class T {\n${src}\n}`, 'java', 'src/T.java').find((s) => s.name === name);
+  if (!sym) throw new Error(`no symbol named ${name}`);
+  return { cyc: sym.complexity, cog: sym.cognitiveComplexity };
+}
+
 beforeAll(async () => {
   await initParser();
 });
@@ -191,5 +200,184 @@ describe('cyclomatic complexity — Go (Probe convention / gocyclo-grounded)', (
 
   it('a top-level var func-literal is its own symbol, counted exactly once', () => {
     expect(go('var f = func(x bool) { if x {} }')).toBe(2);
+  });
+});
+
+describe('Java — cyclomatic (sonar-java ComplexityVisitor) + cognitive (CognitiveComplexityVisitor)', () => {
+  it('omits both trivial values (cyc 1 / cog 0)', () => {
+    expect(java('void m(){}')).toEqual({ cyc: undefined, cog: undefined });
+    expect(java('void m(int a){ return; }')).toEqual({ cyc: undefined, cog: undefined });
+  });
+
+  // --- Whitepaper worked examples (cognitive), transcribed clean-room ---
+  it('getWords → cog 1 (whole switch), cyc 3 (per non-default case)', () => {
+    const src =
+      'String getWords(int number){ switch (number) {' +
+      ' case 1: return "one"; case 2: return "a couple"; default: return "lots"; } }';
+    expect(java(src, 'getWords')).toEqual({ cyc: 3, cog: 1 });
+  });
+
+  it('sumOfPrimes → cog 7 (nesting surcharge + labeled continue), cyc 4', () => {
+    const src =
+      'int sumOfPrimes(int max){ int total = 0;' +
+      ' OUT: for (int i = 2; i <= max; ++i) {' +
+      '   for (int j = 2; j < i; ++j) {' +
+      '     if (i % j == 0) { continue OUT; } } total += i; } return total; }';
+    expect(java(src, 'sumOfPrimes')).toEqual({ cyc: 4, cog: 7 });
+  });
+
+  it('myMethod → cog 9 (try/catch + deep nesting), cyc 5', () => {
+    const src =
+      'void myMethod(boolean condition1, boolean condition2){' +
+      ' try {' +
+      '   if (condition1) {' +
+      '     for (int i = 0; i < 10; i++) {' +
+      '       while (condition2) {} } }' +
+      ' } catch (IllegalArgumentException | IllegalStateException e) {' +
+      '   if (condition2) {} } }';
+    expect(java(src, 'myMethod')).toEqual({ cyc: 5, cog: 9 });
+  });
+
+  it('a && b || c → cog 2, cyc 3 (per boolean operator)', () => {
+    expect(java('boolean m(boolean a, boolean b, boolean c){ return a && b || c; }')).toEqual({
+      cyc: 3,
+      cog: 2,
+    });
+  });
+
+  // --- Cyclomatic Java invariants ---
+  it('a lambda is excluded from the method cyclomatic (sonar per-method behavior)', () => {
+    // sonar-java's ComplexityVisitor (root = method) counts neither the lambda
+    // arrow nor the lambda body. So an empty lambda leaves the method trivial,
+    // and a lambda's INTERNAL branch does NOT lift the method's cyclomatic.
+    expect(java('void m(){ Runnable r = () -> {}; }')).toEqual({ cyc: undefined, cog: undefined });
+    // The `if` lives inside the lambda → excluded from cyclomatic, but cognitive
+    // descends the lambda (nest-only) so the if surcharges at nesting 1 → cog 2.
+    expect(java('void m(boolean a){ Runnable r = () -> { if (a) {} }; }')).toEqual({
+      cyc: undefined,
+      cog: 2,
+    });
+  });
+
+  it('+1 per non-default switch_label, default excluded (colon and arrow)', () => {
+    expect(
+      java('void m(int x){ switch(x){ case 1: break; case 2: break; case 3: break; default: break; } }'),
+    ).toEqual({ cyc: 4, cog: 1 });
+    // Arrow switch: `case 2, 3 ->` is ONE label (one non-default case) → cyc 3.
+    expect(
+      java('int m(int x){ return switch(x){ case 1 -> 1; case 2, 3 -> 2; default -> 0; }; } '),
+    ).toEqual({ cyc: 3, cog: 1 });
+  });
+
+  it('if/else-if/else → cyc 3 (two if nodes, else free), cog 3 (all flat in a chain)', () => {
+    expect(java('void m(int a){ if(a>0){} else if(a<0){} else {} }')).toEqual({ cyc: 3, cog: 3 });
+    expect(java('void m(boolean a){ if(a){} else {} }')).toEqual({ cyc: 2, cog: 2 });
+  });
+
+  it('throw/catch/finally add nothing to cyclomatic (a try/catch is cyc-trivial)', () => {
+    // catch is +1 for COGNITIVE but nothing for cyclomatic → cyc omitted, cog 1.
+    expect(java('void m(){ try {} catch(RuntimeException e){} finally {} }')).toEqual({
+      cyc: undefined,
+      cog: 1,
+    });
+    expect(java('void m(){ throw new RuntimeException(); }')).toEqual({
+      cyc: undefined,
+      cog: undefined,
+    });
+  });
+
+  it('try-with-resources catch is counted like a plain try (distinct grammar node)', () => {
+    // `try (R r = …) {} catch (E e) { if(c){} }` is `try_with_resources_statement`,
+    // a DISTINCT node from `try_statement`. Catch is matched by its own node type,
+    // so the catch (+1) and the nested if (+1+1) score the same as a plain try.
+    const twr = 'void m(boolean c){ try (AutoCloseable r = open()){} catch (Exception e){ if (c) {} } }';
+    const plain = 'void m(boolean c){ try {} catch (Exception e){ if (c) {} } }';
+    expect(java(plain, 'm').cog).toBe(3);
+    expect(java(twr, 'm').cog).toBe(3);
+  });
+
+  // The catch refactor (catch handled as its own node case; try containers are
+  // plain pass-through) — edge cases ground-truthed against sonar-java itself.
+  it('try/finally with NO catch: body + finally are flat pass-through (no surcharge)', () => {
+    // try body if(a) at nesting 0 (+1); finally body if(b) at nesting 0 (+1, no
+    // bump, no catch) → cog 2. sonar-java: cyc 3 / cog 2.
+    expect(java('void m(boolean a, boolean b){ try { if(a){} } finally { if(b){} } }', 'm')).toEqual({
+      cyc: 3,
+      cog: 2,
+    });
+  });
+
+  it('nested try inside a catch body: the inner catch surcharges at the bumped nesting', () => {
+    // outer catch +1 (n0); inner catch +1+1 (n1); inner-catch-body if +1+2 (n2)
+    // → cog 1+2+3 = 6. sonar-java: cyc 2 / cog 6.
+    const src =
+      'void m(boolean a){ try {} catch (RuntimeException e){' +
+      ' try {} catch (RuntimeException e2){ if(a){} } } }';
+    expect(java(src, 'm')).toEqual({ cyc: 2, cog: 6 });
+  });
+
+  it('nested try inside the try BODY: outer try is pass-through, inner catch surcharges at base', () => {
+    // inner try-body if(a) at n0 (+1); inner catch +1 (n0), its if(b) at n1 (+2);
+    // outer catch +1 (n0) → cog 1+1+2+1 = 5. sonar-java: cyc 3 / cog 5.
+    const src =
+      'void m(boolean a, boolean b){ try {' +
+      ' try { if(a){} } catch (RuntimeException e){ if(b){} }' +
+      ' } catch (RuntimeException e2){} }';
+    expect(java(src, 'm')).toEqual({ cyc: 3, cog: 5 });
+  });
+
+  it('+1 per loop (for / enhanced-for / while / do-while)', () => {
+    expect(java('void m(int[] a){ for(int i=0;i<1;i++){} while(true){} do{}while(false); }').cyc).toBe(4);
+    expect(java('void m(int[] a){ for(int v : a){} }').cyc).toBe(2);
+  });
+
+  // --- Cognitive invariants ---
+  it('nesting surcharge accumulates: triple-nested if → cog 6 (1+2+3), cyc 4', () => {
+    expect(java('void m(boolean a){ if(a){ if(a){ if(a){} } } }')).toEqual({ cyc: 4, cog: 6 });
+  });
+
+  it('lambdas raise the cognitive nesting level but are excluded from cyclomatic', () => {
+    // 3 lambdas nest the `if` to cognitive level 3 → cog = 1 + 3 = 4. For
+    // cyclomatic the lambdas (and the if inside them) are excluded → trivial.
+    // The metric asymmetry: lambdas count for cognitive nesting, never cyclomatic.
+    const src =
+      'void m(boolean a){ Runnable r = () -> { Runnable s = () -> { Runnable t = () -> {' +
+      ' if (a) {} }; }; }; }';
+    expect(java(src)).toEqual({ cyc: undefined, cog: 4 });
+  });
+
+  it('else is +1 flat with NO surcharge, but a real nested if inside it surcharges', () => {
+    // if(a) +1 (n0); else +1 flat; else body at n1; nested if +2 (n1) → cog 4.
+    expect(java('void m(boolean a){ if(a){} else { if(a){} } }')).toEqual({ cyc: 3, cog: 4 });
+  });
+
+  it('boolean-run collapse: a&&b&&c → cog 1 (one run); a&&b||c → cog 2 (kind change)', () => {
+    expect(java('boolean m(boolean a, boolean b, boolean c){ return a && b && c; }')).toEqual({
+      cyc: 3,
+      cog: 1,
+    });
+    expect(java('boolean m(boolean a, boolean b, boolean c){ return a && b || c; }').cog).toBe(2);
+  });
+
+  it('boolean runs linearize in SOURCE order, not by left-spine (sonar flatten)', () => {
+    // a && b && (c||d) && (e||f) → operator sequence [&&,&&,||,&&,||] = 4 runs.
+    // A left-spine-only flatten would merge the &&s split by the parenthesized ||
+    // and give 3; sonar (and Probe) descend both operands through parens → 4.
+    const src =
+      'boolean m(boolean a,boolean b,boolean c,boolean d,boolean e,boolean f){' +
+      ' return a && b && (c || d) && (e || f); }';
+    expect(java(src).cog).toBe(4);
+    // The simple parenthesized-mix case from the whitepaper: a || (b && c) = 2.
+    expect(java('boolean m(boolean a,boolean b,boolean c){ return a || (b && c); }').cog).toBe(2);
+  });
+
+  it('labeled break = +1 cognitive; a plain break adds nothing', () => {
+    expect(java('void m(){ OUT: for(;;){ for(;;){ break OUT; } } }')).toEqual({ cyc: 3, cog: 4 });
+    expect(java('void m(){ for(;;){ break; } }')).toEqual({ cyc: 2, cog: 1 });
+  });
+
+  it('the whole switch is cognitive +1 regardless of case count (vs cyclomatic per-case)', () => {
+    const sw = 'void m(int x){ switch(x){ case 1: break; case 2: break; case 3: break; case 4: break; } }';
+    expect(java(sw)).toEqual({ cyc: 5, cog: 1 });
   });
 });

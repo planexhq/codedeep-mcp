@@ -23,7 +23,12 @@ import type {
   SymbolKind,
 } from '../types.js';
 
-// v9: per-symbol cyclomatic complexity (`Symbol.complexity?`, 1 + decision
+// v10: per-symbol COGNITIVE complexity (`Symbol.cognitiveComplexity?`, the
+// SonarSource whitepaper nesting-aware metric) is now computed at extract time
+// for Java, alongside cyclomatic which also rolled to Java this slice. A new
+// extraction-computed field `isUnchanged` (mtime/size/language) can't detect, so
+// the bump force-invalidates warm caches to re-extract and populate it. v9:
+// per-symbol cyclomatic complexity (`Symbol.complexity?`, 1 + decision
 // points) is now computed at extract time for TS/JS, Python, and Go. An
 // extraction-computed field `isUnchanged` (mtime/size/language) can't detect, so
 // the bump force-invalidates warm caches to re-extract and populate it. v8:
@@ -38,7 +43,11 @@ import type {
 // extraction; v5 added persisted git enrichment: FileInfo.commitFrequency,
 // co-change lists, hotspots, gitMeta; v4 added member-expression call refs; v3
 // added ImportedName.kind.)
-const SCHEMA_VERSION = 9;
+// Exported so shape-validation tests can build fixtures at the CURRENT version
+// (they must pass the version gate to reach the shape validators). Hardcoding
+// the number in tests silently neutered them on each bump — see the v9→v10
+// regression where version:9 fixtures began short-circuiting at the version check.
+export const SCHEMA_VERSION = 10;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both

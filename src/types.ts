@@ -99,8 +99,14 @@ export interface Symbol {
   // function/method symbols. OMITTED when trivial (=1) — the `receiver?`-omit
   // hygiene — and kept OUT of the symbolId hash (body-volatile: hashing it would
   // re-key symbols on body-only edits and fracture the persisted call graph).
-  // Currently populated for TS/JS, Python, and Go only (Phase 2 MVP).
+  // Populated for TS/JS, Python, Go (Phase 2 MVP) and Java (Phase 3).
   complexity?: number;
+  // Cognitive complexity (SonarSource whitepaper §1.2: a nesting-aware sum of
+  // increments measuring how hard the control flow is to FOLLOW, vs cyclomatic's
+  // count of independent paths). OMITTED when trivial (=0) and likewise kept OUT
+  // of the symbolId hash. Populated for Java only (Phase 3 slice); the other
+  // languages get cognitive in a follow-up.
+  cognitiveComplexity?: number;
 }
 
 export interface Reference {

@@ -2,7 +2,12 @@ import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { CodeIndex, countDistinctCallers, isCallerOf } from '../../src/indexer/code-index.js';
+import {
+  CodeIndex,
+  SCHEMA_VERSION,
+  countDistinctCallers,
+  isCallerOf,
+} from '../../src/indexer/code-index.js';
 import { RECEIVER_OPAQUE } from '../../src/types.js';
 import type { CoChange, Reference, SymbolKind } from '../../src/types.js';
 import {
@@ -887,7 +892,7 @@ describe('CodeIndex edge cases', () => {
     await idx.save(cachePath);
 
     const data = JSON.parse(readFileSync(cachePath, 'utf8'));
-    expect(data.version).toBe(9);
+    expect(data.version).toBe(10);
     expect(data.projectRoot).toBe(tmpRoot);
     expect(Array.isArray(data.symbols)).toBe(true);
     expect(Array.isArray(data.files)).toBe(true);
@@ -2262,7 +2267,7 @@ describe('CodeIndex persistence — references round-trip', () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
-        version: 9,
+        version: SCHEMA_VERSION,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],
@@ -2807,7 +2812,7 @@ describe('CodeIndex git enrichment (schema v5)', () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
-        version: 9,
+        version: SCHEMA_VERSION,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],
@@ -2830,7 +2835,7 @@ describe('CodeIndex git enrichment (schema v5)', () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
-        version: 9,
+        version: SCHEMA_VERSION,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],

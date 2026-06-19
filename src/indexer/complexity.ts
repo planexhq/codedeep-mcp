@@ -45,6 +45,83 @@ export interface ComplexityOptions {
   // region entirely. A deliberate, SonarJS-faithful choice (curried inner = its
   // own scope) at the cost of fan-out/complexity diverging on that one idiom.
   skipTypes: ReadonlySet<string>;
+  // CYCLOMATIC-ONLY child-skip override. When present, the cyclomatic DFS skips
+  // these node types instead of `skipTypes`; the cognitive walk and root-skip
+  // still use `skipTypes`. This exists because a lambda's boundary DIFFERS
+  // between the two metrics for Java: sonar-java's `ComplexityVisitor`, when
+  // computing a METHOD's cyclomatic number (root = the method), counts NEITHER
+  // the lambda arrow NOR the lambda body — a lambda is a separate unit, excluded
+  // from the enclosing method (verified against source + the oracle). But the
+  // cognitive `CognitiveComplexityVisitor` DOES descend lambdas (rolling their
+  // structure into the method with a nesting bump). So Java passes
+  // `JAVA_SKIP_TYPES ∪ {lambda_expression}` here while leaving `skipTypes`
+  // lambda-free (so cognitive descends and `resolveCalls` still attributes lambda
+  // calls to the enclosing method). TS already skips arrows in `skipTypes`
+  // itself (SonarJS-aligned) and Go intentionally descends closures
+  // (gocyclo-aligned), so neither sets this.
+  cyclomaticSkipTypes?: ReadonlySet<string>;
+  // COGNITIVE complexity (proposal §1.2): when present, a second nesting-aware
+  // walk runs alongside the cyclomatic one and writes `Symbol.cognitiveComplexity`.
+  // Absent ⇒ cognitive stays undefined for that language (the cyclomatic-only
+  // languages — TS/JS, Python, Go — this slice). The cognitive algorithm is the
+  // SonarSource whitepaper's, clean-room verified against `sonar-java`'s
+  // `CognitiveComplexityVisitor`: a +1 STRUCTURAL increment per break in linear
+  // flow, plus a +1-per-nesting-level SURCHARGE when the flow-breaker is nested.
+  // It is NOT expressible as the flat node-type sets cyclomatic uses (the
+  // if/else-if chain, the catch-at-unbumped-nesting rule, boolean-run collapse,
+  // and labeled jumps need structured handlers), so CognitiveOptions names each
+  // construct explicitly. See computeCognitive below + CLAUDE.md "Cyclomatic
+  // Complexity Rules" for the per-rule divergences.
+  cognitive?: CognitiveOptions;
+}
+
+// Per-construct node-type config for the cognitive walk. Each field is a
+// tree-sitter node TYPE name (or set of names) for one whitepaper construct
+// category; the SHARED algorithm in computeCognitive is language-agnostic, only
+// the names differ per grammar. Currently filled for Java only (Phase 3 slice).
+export interface CognitiveOptions {
+  // The `if` node + the field names used to walk its chain. `else if` is detected
+  // structurally: the `alternative` field holding another `ifType` node is an
+  // else-if (+1 flat, NO surcharge); any other `alternative` is a plain `else`
+  // (+1 flat). There is no dedicated else node in C-family grammars.
+  ifType: string;
+  conditionField: string;
+  consequenceField: string;
+  alternativeField: string;
+  // Surcharge (+1 + nesting) AND raise the nesting level for the whole subtree.
+  // Loops + switch + ternary. A `switch` is +1 for the WHOLE switch regardless
+  // of case count (the cognitive/cyclomatic divergence) — its case labels add
+  // nothing, so only the container type goes here.
+  loopTypes: ReadonlySet<string>;
+  switchTypes: ReadonlySet<string>;
+  ternaryType: string;
+  // The catch clause: EACH `catchType` surcharges (+1 + nesting) at its current
+  // (the try's) nesting, with its body scanned one level deeper. Handled as its
+  // OWN node-type case (NOT gated on recognizing the try parent), so it works
+  // for every try-like container — `try_statement`, `try_with_resources_statement`,
+  // etc. — which are otherwise plain pass-through (the try body, resource specs,
+  // and `finally` add nothing and don't raise nesting, so no parent node needs
+  // naming).
+  catchType: string;
+  // Raise nesting for the subtree but add NOTHING (lambdas; later: nested fns).
+  // The whitepaper-derived "hybrid +1 flat" hypothesis was WRONG — sonar-java's
+  // visitLambdaExpression does `nesting++; super.visit; nesting--` with no
+  // increment. So a lambda is nesting-only, +0.
+  nestOnlyTypes: ReadonlySet<string>;
+  // break/continue that count +1 FLAT (no nesting) IFF they jump to a label.
+  labeledJumpTypes: ReadonlySet<string>;
+  hasLabel: (node: Node) => boolean;
+  // Boolean-run collapse: returns the operator KIND ('&&'/'||', or per-language
+  // equivalent) for a logical-operator node, else null. The whole boolean tree is
+  // linearized IN SOURCE ORDER (sonar's flattenLogicalExpression: in-order over
+  // both operands, unwrapping parens) and a +1 is charged per maximal same-kind
+  // run — `a&&b&&c`=1, `a&&b||c`=2, and crucially `a&&b&&(c||d)&&(e||f)`=4 (the
+  // operator sequence &&,&&,||,&&,|| has 4 runs). Only kind EQUALITY is compared.
+  booleanOperatorKind: (node: Node) => string | null;
+  // The parenthesized-expression node type, unwrapped while linearizing a boolean
+  // sequence so `a && (b || c)` reads the inner `||` as part of the same source-
+  // order run rather than a detached one (sonar's ExpressionUtils.skipParentheses).
+  parenthesizedType: string;
 }
 
 // Shared C-family boolean-operator reader (TS/JS + Go). One `binary_expression`
@@ -60,10 +137,18 @@ export interface ComplexityOptions {
 // (sonar-go counts `&&`/`||` only); Python uses a distinct `boolean_operator`
 // node and does not pass this predicate.
 const C_BOOLEAN_OPS: ReadonlySet<string> = new Set(['&&', '||', '??']);
-export function isCFamilyBooleanOperator(node: Node): boolean {
-  if (node.type !== 'binary_expression') return false;
+// Returns the short-circuit logical operator KIND (`&&`/`||`/`??`) of a C-family
+// `binary_expression` node, else null. The single source for "read a C-family
+// boolean operator token": the cyclomatic predicate below counts any of the
+// three; per-language cognitive `booleanOperatorKind` readers compare the kind
+// for run-collapse (and filter out `??` where the language lacks it).
+export function cFamilyBooleanOperatorKind(node: Node): string | null {
+  if (node.type !== 'binary_expression') return null;
   const op = node.childForFieldName('operator')?.type;
-  return op !== undefined && C_BOOLEAN_OPS.has(op);
+  return op !== undefined && C_BOOLEAN_OPS.has(op) ? op : null;
+}
+export function isCFamilyBooleanOperator(node: Node): boolean {
+  return cFamilyBooleanOperatorKind(node) !== null;
 }
 
 // Only function/method symbols carry a cyclomatic number. The gate excludes the
@@ -76,6 +161,14 @@ const COMPLEXITY_KINDS: ReadonlySet<string> = new Set(['function', 'method']);
 // in the thousands and would otherwise dominate tool output and the (future)
 // risk ranking on code agents never touch.
 const COMPLEXITY_CAP = 999;
+
+// The cognitive walk is RECURSIVE (the if/else-if chain, try/catch, and
+// boolean-run flatten are irreducibly recursive — a frame stack would need
+// synthetic marker frames and be more bug-prone). The Phase-2 stack-safety
+// rationale (a generated file can be pathologically deep) is preserved by this
+// explicit depth guard: descent stops past MAX_COGNITIVE_DEPTH. Real source
+// nests orders of magnitude below this.
+const MAX_COGNITIVE_DEPTH = 2000;
 
 // Walks each function/method PendingBody and writes `symbol.complexity` onto the
 // live Symbol instances (omitting the trivial value 1, the `receiver?`-omit
@@ -92,6 +185,12 @@ export function computeComplexity(
   // accumulate (matters for Kotlin/C# later; a no-op for the MVP three, where
   // each function/method has exactly one body). complexity = 1 + decisionPoints.
   const decisionPoints = new Map<string, number>();
+  // Cognitive points accrue the same way (sum across bodies, omit at 0). Null
+  // until a language opts in via `opts.cognitive`.
+  const cognitivePoints = opts.cognitive ? new Map<string, number>() : null;
+  // The cyclomatic DFS may skip a wider set than the cognitive walk (Java
+  // excludes lambdas from cyclomatic but descends them for cognitive).
+  const cycSkip = opts.cyclomaticSkipTypes ?? opts.skipTypes;
 
   for (const { symbolId, body } of bodies) {
     const sym = byId.get(symbolId);
@@ -113,14 +212,173 @@ export function computeComplexity(
       if (opts.decisionNodeTypes.has(node.type)) count++;
       else if (opts.isBooleanOperator?.(node)) count++;
       for (const child of node.namedChildren) {
-        if (!opts.skipTypes.has(child.type)) stack.push(child);
+        if (!cycSkip.has(child.type)) stack.push(child);
       }
     }
     decisionPoints.set(symbolId, count);
+
+    if (cognitivePoints) {
+      const prev = cognitivePoints.get(symbolId) ?? 0;
+      cognitivePoints.set(symbolId, prev + computeCognitive(body, opts.cognitive!, opts.skipTypes));
+    }
   }
 
   for (const [id, count] of decisionPoints) {
     if (count === 0) continue; // complexity 1 → omit (kept clean in JSON)
     byId.get(id)!.complexity = Math.min(1 + count, COMPLEXITY_CAP);
   }
+  if (cognitivePoints) {
+    for (const [id, points] of cognitivePoints) {
+      if (points === 0) continue; // cognitive 0 → omit (the receiver?-omit hygiene)
+      byId.get(id)!.cognitiveComplexity = Math.min(points, COMPLEXITY_CAP);
+    }
+  }
+}
+
+// Computes the cognitive complexity of ONE body subtree (whitepaper §1.2,
+// clean-room verified against sonar-java's CognitiveComplexityVisitor). Returns
+// the increment total (0 when trivial). Reuses the SAME skipTypes boundary as
+// the cyclomatic walk so "this symbol's body" means the same thing for both
+// metrics — methods containing anon/local classes therefore UNDER-COUNT vs
+// sonar-java (which rolls those bodies into the enclosing method); a deliberate
+// per-symbol-model divergence, like the TS/Py arrow-callback gap.
+//
+// Nesting starts at 0; a SURCHARGE node adds `1 + nesting` (the whitepaper
+// "+1 plus one per level of nesting"; sonar-java's base-1 + `+= nesting` is
+// algebraically identical). Booleans, labeled jumps, and `else`/`else if` are
+// FLAT (+1, no surcharge). Lambdas raise nesting but add nothing.
+// Unwraps nested parenthesized expressions to the inner expression (sonar's
+// ExpressionUtils.skipParentheses), used while linearizing a boolean sequence.
+function skipParens(node: Node | null, parenthesizedType: string): Node | null {
+  let n = node;
+  while (n && n.type === parenthesizedType) n = n.namedChild(0);
+  return n;
+}
+
+function computeCognitive(
+  body: Node,
+  cog: CognitiveOptions,
+  skipTypes: ReadonlySet<string>,
+): number {
+  let total = 0;
+  // node.id of every logical-operator node already counted as part of a boolean
+  // run, so the DFS doesn't recount them when it later descends the left spine.
+  // Keyed on node.id (stable across web-tree-sitter wrapper objects); MUST be
+  // call-local (per body) — hoisting it would undercount across symbols.
+  const counted = new Set<number>();
+
+  const visitField = (node: Node, field: string, nesting: number, depth: number): void => {
+    const child = node.childForFieldName(field);
+    if (child) visit(child, nesting, depth + 1);
+  };
+
+  // Walks an `if`'s else/else-if chain. The head `if` is handled by the caller
+  // (it surcharges); each link here is +1 FLAT. An `else if` (alternative is
+  // another `if`) keeps the chain's base nesting for its own condition and
+  // surcharge-free body; a plain `else` scans its body one level deeper.
+  const handleAlternative = (ifNode: Node, nesting: number, depth: number): void => {
+    // Bound the else-if chain recursion by the same depth guard as `visit` — a
+    // pathologically long `if/else if/else if/…` chain would otherwise blow the
+    // native stack despite MAX_COGNITIVE_DEPTH (the chain recurses here, not
+    // through `visit`).
+    if (depth > MAX_COGNITIVE_DEPTH) return;
+    const alt = ifNode.childForFieldName(cog.alternativeField);
+    if (!alt) return;
+    total += 1; // the `else` / `else if` keyword: +1 flat, no surcharge
+    if (alt.type === cog.ifType) {
+      visitField(alt, cog.conditionField, nesting, depth);
+      visitField(alt, cog.consequenceField, nesting + 1, depth);
+      handleAlternative(alt, nesting, depth + 1);
+    } else {
+      visit(alt, nesting + 1, depth + 1);
+    }
+  };
+
+  function visit(node: Node, nesting: number, depth: number): void {
+    if (depth > MAX_COGNITIVE_DEPTH) return;
+    const t = node.type;
+    if (skipTypes.has(t)) return; // nested classes / methods: own symbols' bodies
+
+    // --- if / else-if / else chain (head if surcharges; chain links are flat) ---
+    if (t === cog.ifType) {
+      total += 1 + nesting;
+      visitField(node, cog.conditionField, nesting, depth);
+      visitField(node, cog.consequenceField, nesting + 1, depth);
+      handleAlternative(node, nesting, depth);
+      return;
+    }
+
+    // --- loops / switch / ternary: surcharge, then ALL children one level deeper ---
+    if (cog.loopTypes.has(t) || cog.switchTypes.has(t) || t === cog.ternaryType) {
+      total += 1 + nesting;
+      for (const child of node.namedChildren) visit(child, nesting + 1, depth + 1);
+      return;
+    }
+
+    // --- catch clause: surcharge at the current (try's) nesting, body one level
+    // deeper. Handled as its own case rather than nested inside a try-node
+    // branch, so it fires for ANY try container — `try_statement` AND
+    // `try_with_resources_statement` — which are themselves plain pass-through
+    // (the try body / resource spec / `finally` add nothing and don't bump). ---
+    if (t === cog.catchType) {
+      total += 1 + nesting;
+      for (const child of node.namedChildren) visit(child, nesting + 1, depth + 1);
+      return;
+    }
+
+    // --- nesting-only (lambda): raise nesting, add nothing ---
+    if (cog.nestOnlyTypes.has(t)) {
+      for (const child of node.namedChildren) visit(child, nesting + 1, depth + 1);
+      return;
+    }
+
+    // --- labeled break/continue: +1 flat (the only break/continue that counts) ---
+    if (cog.labeledJumpTypes.has(t)) {
+      if (cog.hasLabel(node)) total += 1;
+      return; // the only named child is the label identifier — nothing to descend
+    }
+
+    // --- boolean runs: +1 per maximal same-kind sequence in SOURCE order ---
+    if (cog.booleanOperatorKind(node) !== null) {
+      if (!counted.has(node.id)) {
+        // Linearize the whole boolean tree IN SOURCE ORDER (sonar's
+        // flattenLogicalExpression): in-order over BOTH operands, unwrapping
+        // parens, so `a && b && (c||d)` → [&&, &&, ||]. A +1 is charged at the
+        // start and at each operator-kind change. (A left-spine-only flatten
+        // would wrongly merge &&s split by a parenthesized || — oracle-caught.)
+        const run: Node[] = [];
+        // `d` carries the visit depth so a pathologically long boolean spine
+        // (`a && a && … `, tens of thousands of operands in generated code)
+        // can't overflow the native stack — bounded by the same guard as `visit`.
+        const flatten = (n: Node | null, d: number): void => {
+          if (d > MAX_COGNITIVE_DEPTH) return;
+          const inner = skipParens(n, cog.parenthesizedType);
+          if (inner && cog.booleanOperatorKind(inner) !== null) {
+            counted.add(inner.id);
+            flatten(inner.namedChild(0), d + 1); // left
+            run.push(inner);
+            flatten(inner.namedChild(1), d + 1); // right
+          }
+        };
+        flatten(node, depth);
+        let prevKind: string | null = null;
+        for (const n of run) {
+          const kind = cog.booleanOperatorKind(n);
+          if (prevKind === null || prevKind !== kind) total += 1;
+          prevKind = kind;
+        }
+      }
+      // Descend operands at the SAME nesting (booleans are flat). The flattened
+      // logical nodes are in `counted` so they skip the run-count but are still
+      // descended (to catch a nested ternary / control structure in an operand).
+      for (const child of node.namedChildren) visit(child, nesting, depth + 1);
+      return;
+    }
+
+    // --- default: pass through, nesting unchanged ---
+    for (const child of node.namedChildren) visit(child, nesting, depth + 1);
+  }
+
+  visit(body, 0, 0);
+  return total;
 }

@@ -17,6 +17,8 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
+import { cFamilyBooleanOperatorKind, computeComplexity, isCFamilyBooleanOperator } from '../complexity.js';
+import type { CognitiveOptions } from '../complexity.js';
 
 // Function-like nodes whose bodies contain calls that shouldn't attribute
 // to an enclosing body. lambda_expression is deliberately absent: Java
@@ -43,6 +45,80 @@ const JAVA_SKIP_TYPES: ReadonlySet<string> = new Set([
   // walkCalls never checks the root's own type, only children.
   'class_body',
 ]);
+
+// The four Java loop nodes — shared by the cyclomatic decision set and the
+// cognitive surcharge set.
+const JAVA_LOOP_NODE_TYPES: ReadonlySet<string> = new Set([
+  'for_statement',
+  'enhanced_for_statement',
+  'while_statement',
+  'do_statement',
+]);
+
+// CYCLOMATIC decision nodes (sonar-java ComplexityVisitor, clean-room verified +
+// oracled). Each adds +1. `switch_expression` (container), `catch`/`throw`/
+// `finally`/`default`/plain break-continue, AND `lambda_expression` are
+// deliberately absent; non-default `switch_label` and `&&`/`||` come via the
+// javaCyclomaticExtra predicate. LAMBDAS are excluded entirely from a METHOD's
+// cyclomatic number: sonar-java's ComplexityVisitor, when its root is the method,
+// counts neither the lambda arrow nor the lambda body (a lambda is a separate
+// unit) — confirmed by the oracle diff (counting them over-reported every
+// lambda-bearing method). See JAVA_CYCLOMATIC_SKIP_TYPES below; cognitive still
+// DESCENDS lambdas (with a nesting bump), the metric asymmetry.
+const JAVA_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  ...JAVA_LOOP_NODE_TYPES,
+  'if_statement',
+  'ternary_expression',
+]);
+
+// Cyclomatic-only skip set: JAVA_SKIP_TYPES plus `lambda_expression`, so a
+// lambda's arrow + body are excluded from the enclosing method's cyclomatic
+// number (sonar's per-method behavior). NOT added to JAVA_SKIP_TYPES itself —
+// that set is shared with resolveCalls (which attributes lambda calls to the
+// method) and with the cognitive walk (which descends lambdas).
+const JAVA_CYCLOMATIC_SKIP_TYPES: ReadonlySet<string> = new Set([
+  ...JAVA_SKIP_TYPES,
+  'lambda_expression',
+]);
+
+// The "+1 per node" cyclomatic cases a flat type set can't express, composed
+// into the engine's `isBooleanOperator` slot (really an "extra +1 predicate"):
+// (1) a NON-DEFAULT `switch_label` — a `default` label has zero named children
+// (just the keyword token), a `case X`/`case X,Y` label has ≥1; this counts each
+// case label like sonar-java's CASE_LABEL, default excluded; (2) the C-family
+// `&&`/`||` (one binary_expression node for all operators — read the op token).
+function javaCyclomaticExtra(node: Node): boolean {
+  if (node.type === 'switch_label') return node.namedChildCount > 0;
+  return isCFamilyBooleanOperator(node);
+}
+
+// COGNITIVE config (sonar-java CognitiveComplexityVisitor, clean-room verified;
+// all node names AST-dumped against the bundled grammar). See complexity.ts.
+const JAVA_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if_statement',
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  loopTypes: JAVA_LOOP_NODE_TYPES,
+  // Colon AND Java-14 arrow switch are BOTH `switch_expression` (no
+  // `switch_statement` node); the whole switch is +1 regardless of case count.
+  switchTypes: new Set(['switch_expression']),
+  ternaryType: 'ternary_expression',
+  // Catch is recognized by its own node type, so this covers BOTH plain
+  // `try_statement` and `try_with_resources_statement` for free.
+  catchType: 'catch_clause',
+  // Lambdas raise nesting but add nothing (NOT "+1 hybrid").
+  nestOnlyTypes: new Set(['lambda_expression']),
+  labeledJumpTypes: new Set(['break_statement', 'continue_statement']),
+  // A break/continue's only named child is its optional label identifier.
+  hasLabel: (node) => node.namedChildCount > 0,
+  // Java has `&&`/`||` (no `??`); reuse the shared C-family token reader.
+  booleanOperatorKind: (node) => {
+    const op = cFamilyBooleanOperatorKind(node);
+    return op === '&&' || op === '||' ? op : null;
+  },
+  parenthesizedType: 'parenthesized_expression',
+};
 
 // `object_creation_expression`'s callee is a type_identifier, never a plain
 // identifier — without this, every `new X()` ref would be dropped.
@@ -222,6 +298,13 @@ export function extractJava(
       ignoredMemberCallees: JAVA_IGNORED_MEMBER_CALLEES,
     },
   );
+  computeComplexity(bodies, symbols, {
+    decisionNodeTypes: JAVA_DECISION_NODE_TYPES,
+    isBooleanOperator: javaCyclomaticExtra,
+    skipTypes: JAVA_SKIP_TYPES,
+    cyclomaticSkipTypes: JAVA_CYCLOMATIC_SKIP_TYPES,
+    cognitive: JAVA_COGNITIVE_OPTIONS,
+  });
   return { symbols, references, imports };
 }
 
