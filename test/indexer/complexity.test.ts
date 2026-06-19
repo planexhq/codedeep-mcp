@@ -35,6 +35,9 @@ function bothCx(
 }
 const tsCog = (src: string, name = 'f') => bothCx(src, name, 'typescript', 'src/test.ts');
 const tsxCog = (src: string, name = 'f') => bothCx(src, name, 'tsx', 'src/test.tsx');
+// Go carries both metrics (cognitive added this slice). Wraps `src` in `package p`.
+const goCog = (src: string, name = 'f') =>
+  bothCx(`package p\n${src}`, name, 'go', 'src/test.go');
 
 // Java carries BOTH metrics (Phase 3). `src` is one or more member declarations;
 // they're wrapped in `class T { … }`. Returns { cyc, cog } for the named member
@@ -540,5 +543,99 @@ describe('cognitive complexity — TypeScript/JS (SonarJS S3776)', () => {
     expect(tsCog('function f(a){ if(a){} else /*c*/ { if(a){} } }').cog).toBe(4);
     // (c) a comment around a boolean operator must not drop a sub-run.
     expect(tsCog('function f(a,b,c){ return a || /*c*/ b && c; }').cog).toBe(1);
+  });
+});
+
+// Go cognitive is gocognit-aligned (uudashr/gocognit), the cognitive sibling of
+// the gocyclo choice the cyclomatic side made — and DELIBERATELY diverges from
+// sonar-go. Every value below is ORACLE-CONFIRMED EXACT against gocognit v1.2.1
+// (376/376 functions on spf13/cobra + gin-gonic/gin + a synthetic edge-case file).
+// The four gocognit-vs-sonar divergences each get a dedicated test.
+describe('cognitive complexity — Go (gocognit-faithful)', () => {
+  it('omits the trivial value (=0)', () => {
+    expect(goCog('func f() {}').cog).toBeUndefined();
+  });
+
+  it('nesting surcharge: a nested if is +1 + its depth', () => {
+    // outer if at nesting 0 (+1), inner if at nesting 1 (+2) → 3.
+    expect(goCog('func f(a, b bool) { if a { if b {} } }').cog).toBe(3);
+  });
+
+  // --- DIVERGENCE 1: a plain `else` body is NOT nested (gocognit), vs sonar's
+  // nesting+1. `else if` chains are unaffected. ---
+  it('plain else does not nest its body (gocognit ≠ sonar)', () => {
+    // if(1) + else(1) → 2.
+    expect(goCog('func f(a bool) { if a {} else {} }').cog).toBe(2);
+    // if(1) + else(1) + for at BASE nesting(1) → 3. sonar would nest the for → 4.
+    expect(goCog('func f(a, b bool) { if a {} else { for b {} } }').cog).toBe(3);
+    // chain: if(1) + else-if(1, flat) + terminal else(1) + for in the else at
+    // BASE nesting(1) → 4. (else-if bodies ARE nesting+1; the terminal else isn't.)
+    expect(goCog('func f(a, b, c bool) { if a {} else if b {} else { for c {} } }').cog).toBe(4);
+  });
+
+  // --- DIVERGENCE 2: the `if`-init clause is walked (gocognit). ---
+  it('walks the if-init clause', () => {
+    // if(1) + the init boolean a&&b(1) → 2.
+    expect(goCog('func f(a, b bool) { if x := a && b; x {} }').cog).toBe(2);
+  });
+
+  // --- DIVERGENCE 3: parentheses are NOT unwrapped in a boolean chain, so a
+  // parenthesized boolean is its own run (gocognit ≠ sonar). ---
+  it('does not unwrap parens across boolean runs', () => {
+    // (a&&b) is its own run(1) + the outer &&(1) → 2; sonar-unwrap would merge → 1.
+    expect(goCog('func f(a, b, c bool) bool { return (a && b) && c }').cog).toBe(2);
+    // un-parenthesized same-kind run collapses to 1.
+    expect(goCog('func f(a, b, c bool) bool { return a && b && c }').cog).toBe(1);
+    // a kind change starts a new run.
+    expect(goCog('func f(a, b, c bool) bool { return a && b || c }').cog).toBe(2);
+  });
+
+  // --- DIVERGENCE 4: direct recursion = +1 per call-site, function-only. ---
+  it('counts direct recursion +1 per call-site', () => {
+    expect(goCog('func f() { f() }').cog).toBe(1);
+    // if(1) + two recursive sites(2) → 3.
+    expect(goCog('func f(n int) int { if n > 0 { return f(n-1) + f(n-2) }; return 0 }').cog).toBe(3);
+  });
+
+  it('a self-call inside a closure still counts as recursion', () => {
+    // the func_literal raises nesting (+0); the f() inside → +1.
+    expect(goCog('func f() { x := func() { f() }; x() }').cog).toBe(1);
+  });
+
+  it('a method does NOT recurse (bare-call rule excludes methods)', () => {
+    // `m()` bare inside method m is a package-call, not method recursion; the
+    // kind gate (function-only) excludes it. Selector self-calls never match.
+    expect(goCog('type T struct{}\nfunc (s *T) m() { m() }', 'm').cog).toBeUndefined();
+    expect(goCog('type T struct{}\nfunc (s *T) m() { s.m() }', 'm').cog).toBeUndefined();
+  });
+
+  it('the whole switch/select/type-switch is +1, not per-case (cyc/cog divergence)', () => {
+    // cyclomatic counts each case; cognitive counts the container once.
+    expect(goCog('func f(x int) { switch x { case 1: case 2: case 3: } }')).toEqual({
+      cyc: 4,
+      cog: 1,
+    });
+    expect(goCog('func f(a chan int) { select { case <-a: } }')).toEqual({ cyc: 2, cog: 1 });
+    expect(goCog('func f(v any) { switch v.(type) { case int: } }')).toEqual({ cyc: 2, cog: 1 });
+  });
+
+  it('labeled break/continue and goto are +1; a bare break is 0', () => {
+    // for(1) + labeled break(1) → 2.
+    expect(goCog('func f() { L: for { break L } }').cog).toBe(2);
+    // for(1) + labeled continue(1) → 2.
+    expect(goCog('func f() { L: for { continue L } }').cog).toBe(2);
+    // for(1) + bare break(0) → 1.
+    expect(goCog('func f() { for { break } }').cog).toBe(1);
+    // goto is always a labeled jump → +1.
+    expect(goCog('func f() { L: for { goto L } }').cog).toBe(2);
+  });
+
+  it('a closure (func_literal) raises nesting for its body', () => {
+    // the if inside the closure is at nesting 1 → 1+1 = 2.
+    expect(goCog('func f(a bool) { x := func() { if a {} }; _ = x }').cog).toBe(2);
+  });
+
+  it('a top-level var func-literal carries its own cognitive number', () => {
+    expect(goCog('var f = func(a, b bool) { if a { if b {} } }').cog).toBe(3);
   });
 });

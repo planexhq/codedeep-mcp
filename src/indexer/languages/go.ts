@@ -18,7 +18,12 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
-import { computeComplexity, isCFamilyBooleanOperator } from '../complexity.js';
+import {
+  cFamilyBooleanOperatorKind,
+  computeComplexity,
+  isCFamilyBooleanOperator,
+} from '../complexity.js';
+import type { CognitiveOptions } from '../complexity.js';
 
 // Function-like nodes whose bodies contain calls that shouldn't attribute
 // to an enclosing body. func_literal is deliberately absent (the Java
@@ -133,6 +138,83 @@ const GO_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
   'communication_case',
 ]);
 
+// Cognitive-complexity config — gocognit-aligned (uudashr/gocognit, gocyclo's
+// cognitive sibling), the same convention call the cyclomatic side made for
+// gocyclo. ORACLE-VERIFIED EXACT against gocognit v1.2.1: 376/376 functions on
+// spf13/cobra (157) + gin-gonic/gin (213) + a synthetic edge-case fixture (6).
+// gocognit's nesting math is the shared whitepaper algorithm, but it DIVERGES
+// from sonar-java (the engine default) in FOUR oracle-confirmed ways — each
+// handled here without touching Java/TS:
+//   1. nestElseBody:false — a plain `else { … }` body stays at the if's BASE
+//      nesting (gocognit decNesting's after the then-body), vs sonar's nesting+1.
+//   2. initField — the `if x := f(); cond {}` init is walked (gocognit), where
+//      Go's `if err := recurse(); err != nil` idiom hides the recursive call.
+//   3. parenthesizedType sentinel — gocognit does NOT unwrap parens in a boolean
+//      chain, so `(a&&b)&&c` = 2 (the inner && is its own run), not sonar's 1.
+//   4. recursion — +1 per bare self-call site (gocognit counts direct recursion;
+//      sonar-java/SonarJS don't). function-only (methods self-call via selector).
+// The 3 switch forms + select are each whole-switch +1 (cases add nothing — the
+// cognitive/cyclomatic divergence, since GO_DECISION_NODE_TYPES counts each
+// case). `for_statement` is Go's only loop; `func_literal` raises nesting (+0),
+// matching the cyclomatic side which also descends closures (gocyclo-aligned).
+// RESIDUAL DIVERGENCE (rare, deferred — the only place Probe ≠ gocognit on Go):
+// the engine's loop/switch branch bumps nesting for ALL children incl. the
+// HEADER, while gocognit walks a for-clause (init/cond/post) and a switch/select
+// init/tag at BASE nesting (incNesting runs only before the body). `initField`
+// fixes this for the `if` header but the for/switch/select header still
+// overbumps a nested STRUCTURAL construct (a closure-with-control-flow in a
+// loop/switch header) — `if`-init vs for/switch-init asymmetry. Booleans in a
+// header are flat (unaffected). 0 cases in the 376-fn oracle; this is the Go
+// aperture of the pre-existing, accepted loop-header overbump (complexity.ts
+// "KNOWN DIVERGENCE" note), shared with Java/TS and deferred to a dedicated
+// engine pass (per-construct body fields + re-oracling Java).
+const GO_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if_statement',
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  // `if x := f(); cond {}` — walked at base nesting (gocognit walks if.Init).
+  initField: 'initializer',
+  // Go holds `alternative` as the if/block directly (Java-style) — no wrapper.
+  // Terminal `else` body stays at base nesting (gocognit ≠ sonar's nesting+1).
+  nestElseBody: false,
+  loopTypes: new Set(['for_statement']),
+  switchTypes: new Set([
+    'expression_switch_statement',
+    'type_switch_statement',
+    'select_statement',
+  ]),
+  // Go has no ternary nor try/catch — sentinels that never match a real node.
+  ternaryType: '__go_no_ternary__',
+  catchType: '__go_no_catch__',
+  // Closures raise nesting and roll their control flow into the enclosing func
+  // (gocognit's FuncLit rule; the cyclomatic side descends them too).
+  nestOnlyTypes: new Set(['func_literal']),
+  // break/continue (optionally labeled) + goto (always labeled). Labels are a
+  // positional `label_name` named child, NOT a field — so detect by child type
+  // (robust to interleaved comments, unlike a positional namedChild check).
+  labeledJumpTypes: new Set(['break_statement', 'continue_statement', 'goto_statement']),
+  hasLabel: (n) => n.namedChildren.some((c) => c?.type === 'label_name'),
+  // `&&`/`||` via the shared C-family reader (Go has no `??`). booleanRunStarts
+  // unset → the default (+1 at every operator-kind change) matches gocognit's
+  // `lastOp != op` exactly.
+  booleanOperatorKind: cFamilyBooleanOperatorKind,
+  // Sentinel: do NOT unwrap parens — gocognit's collectBinaryOps stops at a
+  // parenthesized expression, so each parenthesized boolean is its own run.
+  parenthesizedType: '__go_no_paren__',
+  // Direct recursion (+1 per bare self-call site). Restricted to 'function'
+  // (top-level funcs + `var f = func(){}`); a method self-call is `s.m()`, a
+  // selector callee that bareCalleeName already returns null for.
+  recursion: {
+    callType: 'call_expression',
+    bareCalleeName: (n) => {
+      const callee = n.childForFieldName('function');
+      return callee?.type === 'identifier' ? callee.text : null;
+    },
+    eligibleKinds: new Set(['function']),
+  },
+};
+
 // `s.log()` and `pkg.Func()` carry their literal receiver token; chained and
 // computed receivers (`s.conn.Close()`, `f().g()`, indexed) carry
 // RECEIVER_OPAQUE so the called method stays findable by name (recall) but
@@ -238,6 +320,7 @@ export function extractGo(
     decisionNodeTypes: GO_DECISION_NODE_TYPES,
     isBooleanOperator: isCFamilyBooleanOperator,
     skipTypes: GO_SKIP_TYPES,
+    cognitive: GO_COGNITIVE_OPTIONS,
   });
   return { symbols, references, imports };
 }

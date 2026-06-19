@@ -63,26 +63,29 @@ export interface ComplexityOptions {
   // COGNITIVE complexity (proposal §1.2): when present, a second nesting-aware
   // walk runs alongside the cyclomatic one and writes `Symbol.cognitiveComplexity`.
   // Absent ⇒ cognitive stays undefined for that language (the cyclomatic-only
-  // languages — Python, Go — and the not-yet-done Rust/Swift/Kotlin/Dart/C#/PHP).
-  // Populated for **Java + TS/JS**. The algorithm is the SonarSource whitepaper's,
-  // clean-room verified against `sonar-java`'s `CognitiveComplexityVisitor` (Java)
-  // AND `eslint-plugin-sonarjs`'s S3776 (TS/JS) — the two analyzers DIVERGE, so the
-  // per-language config differs: a +1 STRUCTURAL increment per break in linear
-  // flow, plus a +1-per-nesting-level SURCHARGE when the flow-breaker is nested. It
-  // is NOT expressible as the flat node-type sets cyclomatic uses (the if/else-if
-  // chain, the catch-at-unbumped-nesting rule, boolean-run collapse, and labeled
-  // jumps need structured handlers), so CognitiveOptions names each construct
-  // explicitly. The three OPTIONAL fields below (`elseClauseType`, `booleanRunStarts`,
-  // `excludeBooleanRun`) default to the Java/sonar-java behavior; TS sets all three
-  // for SonarJS S3776 (else_clause wrapper, `&&`-runs-only, JSX exclusion). See
-  // computeCognitive below + CLAUDE.md "Cognitive Complexity Rules".
+  // language Python, and the not-yet-done Rust/Swift/Kotlin/Dart/C#/PHP).
+  // Populated for **Java + TS/JS + Go**. The algorithm is the SonarSource
+  // whitepaper's, clean-room verified against `sonar-java`'s
+  // `CognitiveComplexityVisitor` (Java), `eslint-plugin-sonarjs`'s S3776 (TS/JS),
+  // AND `uudashr/gocognit` (Go) — the three analyzers DIVERGE, so the per-language
+  // config differs: a +1 STRUCTURAL increment per break in linear flow, plus a
+  // +1-per-nesting-level SURCHARGE when the flow-breaker is nested. It is NOT
+  // expressible as the flat node-type sets cyclomatic uses (the if/else-if chain,
+  // the catch-at-unbumped-nesting rule, boolean-run collapse, and labeled jumps
+  // need structured handlers), so CognitiveOptions names each construct
+  // explicitly. The OPTIONAL fields below (`elseClauseType`, `initField`,
+  // `nestElseBody`, `booleanRunStarts`, `excludeBooleanRun`, `recursion`) default
+  // to the Java/sonar-java behavior; TS sets `elseClauseType`/`booleanRunStarts`/
+  // `excludeBooleanRun` (SonarJS S3776), Go sets `initField`/`nestElseBody`/
+  // `recursion` + sentinel `parenthesizedType` (gocognit). See computeCognitive
+  // below + CLAUDE.md "Cognitive Complexity Rules".
   cognitive?: CognitiveOptions;
 }
 
 // Per-construct node-type config for the cognitive walk. Each field is a
 // tree-sitter node TYPE name (or set of names) for one whitepaper construct
 // category; the SHARED algorithm in computeCognitive is language-agnostic, only
-// the names differ per grammar. Currently filled for Java only (Phase 3 slice).
+// the names differ per grammar. Currently filled for Java, TS/JS, and Go.
 export interface CognitiveOptions {
   // The `if` node + the field names used to walk its chain. `else if` is detected
   // structurally: the `alternative` field holding another `ifType` node is an
@@ -100,6 +103,23 @@ export interface CognitiveOptions {
   // else body) before the else-if-vs-else test; without it an `else if` would be
   // mis-read as a nested (surcharged) if. Java/Go/Py leave it unset.
   elseClauseType?: string;
+  // Some grammars put an INITIALIZER statement on the `if` (C-family `if (init;
+  // cond)` — Go's `if x := f(); cond {}`). When set, the if-case AND the else-if
+  // branch of handleAlternative visit this field at the if's BASE nesting (the
+  // init runs before the then-body's nesting bump — gocognit walks it there).
+  // Without it the init subtree is never walked, undercounting any decision
+  // point it hosts — notably Go's `if err := recurse(); err != nil` idiom, where
+  // the recursive call lives in the init. Java/TS have no if-init field → unset.
+  initField?: string;
+  // Whether a plain (terminal) `else { … }` block raises the nesting level for
+  // its body. DEFAULT true (sonar-java / the original behavior: the else body is
+  // at nesting+1). gocognit does NOT nest the else body — it `decNesting`s after
+  // the then-body and walks `n.Else` at the if's BASE nesting — so Go sets this
+  // false (else body at `nesting`). MUST be read as `=== false`, not truthiness:
+  // an unset value is falsy and would wrongly switch Java/TS to base-nesting.
+  // Only the TERMINAL plain `else` differs; `else if` bodies are nesting+1 in
+  // both conventions (handled by the chain recursion, unaffected by this flag).
+  nestElseBody?: boolean;
   // Surcharge (+1 + nesting) AND raise the nesting level for the whole subtree.
   // Loops + switch + ternary. A `switch` is +1 for the WHOLE switch regardless
   // of case count (the cognitive/cyclomatic divergence) — its case labels add
@@ -154,7 +174,29 @@ export interface CognitiveOptions {
   // The parenthesized-expression node type, unwrapped while linearizing a boolean
   // sequence so `a && (b || c)` reads the inner `||` as part of the same source-
   // order run rather than a detached one (sonar's ExpressionUtils.skipParentheses).
+  // Go sets this to a NEVER-MATCHING sentinel so skipParens is a no-op: gocognit's
+  // boolean collection (`collectBinaryOps`) stops at a parenthesized expression
+  // rather than unwrapping it, so a parenthesized boolean is counted as its OWN
+  // separate run when the DFS later descends into it (`(a&&b)&&c` = 2, not 1).
   parenthesizedType: string;
+  // Direct-recursion increment (whitepaper's recursion rule; gocognit implements
+  // it, sonar-java/SonarJS do not). When set AND `eligibleKinds` contains the
+  // enclosing symbol's kind, a node of type `callType` whose `bareCalleeName`
+  // equals the symbol's own name adds +1 FLAT, PER call-site (no surcharge, no
+  // return — the call's arguments still descend). gocognit keys on a bare-
+  // identifier callee matching the enclosing FuncDecl name, so member self-calls
+  // (`s.m()`, a selector) never match and methods are excluded via eligibleKinds.
+  // Java/TS leave it unset (their analyzers omit recursion → matches the oracle).
+  // ACCEPTED DIVERGENCE: gocognit also checks the callee's resolved OBJECT
+  // identity (`obj == fn.Name.Obj`), so a LOCAL that shadows the function name
+  // (`func f(g func()){ f := g; f() }`) is not recursion there but is +1 here.
+  // bareCalleeName is name-only (no resolver at extract time), the same accepted
+  // class as Go self-call receiver shadowing — rare, 0 cases in the oracle corpus.
+  recursion?: {
+    callType: string;
+    bareCalleeName: (node: Node) => string | null;
+    eligibleKinds: ReadonlySet<string>;
+  };
 }
 
 // Shared C-family boolean-operator reader (TS/JS + Go). One `binary_expression`
@@ -252,7 +294,10 @@ export function computeComplexity(
 
     if (cognitivePoints) {
       const prev = cognitivePoints.get(symbolId) ?? 0;
-      cognitivePoints.set(symbolId, prev + computeCognitive(body, opts.cognitive!, opts.skipTypes));
+      cognitivePoints.set(
+        symbolId,
+        prev + computeCognitive(body, opts.cognitive!, opts.skipTypes, sym),
+      );
     }
   }
 
@@ -302,8 +347,15 @@ function computeCognitive(
   body: Node,
   cog: CognitiveOptions,
   skipTypes: ReadonlySet<string>,
+  sym: Symbol,
 ): number {
   let total = 0;
+  // Direct recursion (gocognit): +1 per bare self-call, but only for symbol
+  // kinds the language opts in (Go: 'function' — methods self-call via a
+  // selector, never a bare identifier, so they're excluded). Hoisted once; the
+  // `rec` capture lets TS narrow it inside visit() (no non-null assertions).
+  const rec = cog.recursion;
+  const recEligible = rec !== undefined && rec.eligibleKinds.has(sym.kind);
   // node.id of every logical-operator node already counted as part of a boolean
   // run, so the DFS doesn't recount them when it later descends the left spine.
   // Keyed on node.id (stable across web-tree-sitter wrapper objects); MUST be
@@ -344,11 +396,15 @@ function computeCognitive(
     if (!alt) return;
     total += 1; // the `else` / `else if` keyword: +1 flat, no surcharge
     if (alt.type === cog.ifType) {
+      if (cog.initField) visitField(alt, cog.initField, nesting, depth);
       visitField(alt, cog.conditionField, nesting, depth);
       visitField(alt, cog.consequenceField, nesting + 1, depth);
       handleAlternative(alt, nesting, depth + 1);
     } else {
-      visit(alt, nesting + 1, depth + 1);
+      // Plain (terminal) else: body at nesting+1 (sonar default) or at base
+      // nesting (gocognit, via nestElseBody === false). `=== false` so an unset
+      // value keeps the sonar-java/TS behavior unchanged.
+      visit(alt, cog.nestElseBody === false ? nesting : nesting + 1, depth + 1);
     }
   };
 
@@ -357,9 +413,22 @@ function computeCognitive(
     const t = node.type;
     if (skipTypes.has(t)) return; // nested classes / methods: own symbols' bodies
 
+    // --- direct recursion: +1 FLAT per self-call site (no surcharge, no return:
+    // the call's arguments still descend below to catch nested control flow). A
+    // call node is never a boolean (so never in `counted`) and matches no other
+    // dispatch branch, so this can't double-count. The walk descends func_literal
+    // (nestOnly), so a self-call inside a closure counts toward the enclosing
+    // function — matching gocognit, whose FuncDecl-rooted walk doesn't reset the
+    // target across closures. ---
+    if (recEligible && rec && t === rec.callType) {
+      const callee = rec.bareCalleeName(node);
+      if (callee !== null && callee === sym.name) total += 1;
+    }
+
     // --- if / else-if / else chain (head if surcharges; chain links are flat) ---
     if (t === cog.ifType) {
       total += 1 + nesting;
+      if (cog.initField) visitField(node, cog.initField, nesting, depth);
       visitField(node, cog.conditionField, nesting, depth);
       visitField(node, cog.consequenceField, nesting + 1, depth);
       handleAlternative(node, nesting, depth);

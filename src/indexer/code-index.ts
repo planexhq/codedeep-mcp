@@ -23,6 +23,14 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v12: per-symbol COGNITIVE complexity now also computed for Go (`.go`),
+// VERIFIED-EXACT against uudashr/gocognit (376/376 functions: cobra 157 + gin 213
+// + a synthetic edge-case fixture 6; differs
+// from sonar-go — gocognit-aligned, like Go cyclomatic is gocyclo-aligned: no
+// plain-else nesting, if-init walked, no paren-unwrap in boolean chains, +1 per
+// direct-recursion call-site). Adding the field to Go symbols is an
+// extraction-logic change `isUnchanged` (mtime/size/language) can't detect, so the
+// bump force-invalidates warm caches.
 // v11: per-symbol COGNITIVE complexity now also computed for TS/JS
 // (`.ts`/`.tsx`/`.js`), VERIFIED-EXACT against SonarJS S3776 (differs from
 // sonar-java: `&&`-runs-only booleans, JSX short-circuit exclusion). Adding the
@@ -52,7 +60,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both

@@ -104,8 +104,9 @@ export interface Symbol {
   // Cognitive complexity (SonarSource whitepaper §1.2: a nesting-aware sum of
   // increments measuring how hard the control flow is to FOLLOW, vs cyclomatic's
   // count of independent paths). OMITTED when trivial (=0) and likewise kept OUT
-  // of the symbolId hash. Populated for Java only (Phase 3 slice); the other
-  // languages get cognitive in a follow-up.
+  // of the symbolId hash. Populated for Java, TS/JS, and Go (each verified-exact
+  // against sonar-java / SonarJS S3776 / gocognit respectively); the remaining
+  // languages (Python + Rust/Swift/Kotlin/Dart/C#/PHP) get cognitive in a follow-up.
   cognitiveComplexity?: number;
 }
 
