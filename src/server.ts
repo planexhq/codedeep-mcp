@@ -54,7 +54,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "find_symbol",
     {
       description:
-        "AST-aware symbol lookup. Returns definitions matching a name (exact, prefix, or fuzzy), each with fan-in (references) and fan-out (callees) coupling counts. Optional kind/scope/limit filters.",
+        "AST-aware symbol lookup. Returns definitions matching a name (exact, prefix, or fuzzy), each with fan-in (references), fan-out (callees), and cyclomatic complexity (TS/JS, Python, Go). Optional kind/scope/limit filters.",
       inputSchema: {
         name: z.string().describe("Symbol name (exact, prefix, or fuzzy)"),
         kind: z
@@ -90,7 +90,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "get_context",
     {
       description:
-        "Return everything needed to understand a symbol: full body, within-file callers/callees, coupling (fan-in/fan-out/blast radius), and imports — plus co-change partners and recent commits when git is available.",
+        "Return everything needed to understand a symbol: full body, within-file callers/callees, coupling (fan-in/fan-out/cyclomatic complexity/blast radius), and imports — plus co-change partners and recent commits when git is available.",
       inputSchema: {
         file: z.string().describe("File path (relative to project root)"),
         symbol: z

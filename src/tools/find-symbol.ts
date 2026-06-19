@@ -5,6 +5,7 @@ import { errMsg } from '../logger.js';
 import type { ProbeConfig, Symbol, SymbolKind } from '../types.js';
 
 import {
+  STRUCTURAL_TAG,
   readinessBanner,
   renderSuggestions,
   textResponse,
@@ -113,6 +114,11 @@ function renderMatch(sym: Symbol, index: CodeIndex): string {
   // callees, a lower bound). Both O(1) — no caller-tree walk per match.
   lines.push(`References: ~${index.getCallerCount(sym.id)}`);
   lines.push(`Fan-out: ${index.getFanOut(sym.id)}`);
+  // Cyclomatic complexity — genuinely structural (no name-match approximation,
+  // unlike fan-in). Present only for function/method symbols above the trivial 1.
+  if (sym.complexity !== undefined) {
+    lines.push(`Cyclomatic: ${sym.complexity} ${STRUCTURAL_TAG}`);
+  }
   return lines.join('\n');
 }
 

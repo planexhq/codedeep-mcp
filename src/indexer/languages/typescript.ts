@@ -17,6 +17,7 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
+import { computeComplexity, isCFamilyBooleanOperator } from '../complexity.js';
 
 // Function-like nodes whose bodies contain calls that shouldn't attribute
 // to an enclosing body. walkDecorators uses this subset (NOT the full
@@ -71,6 +72,25 @@ const TS_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
   'substring', 'toLowerCase', 'toUpperCase', 'toString', 'valueOf',
   'keys', 'values', 'entries', 'hasOwnProperty', 'charAt', 'padStart',
   'padEnd', 'repeat', 'delete',
+]);
+
+// Cyclomatic decision nodes — VERIFIED against SonarJS source (S1541 rule.ts):
+// each adds +1. `for_in_statement` covers both `for…of` and `for…in`;
+// `switch_case` counts per non-default case label (the extractor's `switch_case`
+// node corresponds to a SwitchCase WITH a test) while `switch_default` and the
+// `switch_statement` container do NOT. `&&`/`||`/`??` count via the shared
+// isCFamilyBooleanOperator. NOTE the deliberate omissions that match SonarJS but
+// differ from the textbook set: `throw` and `catch` do NOT count (ThrowStatement
+// / CatchClause are absent from SonarJS's cyclomatic switch); `else`/`finally`/
+// `default` never count; logical-assignment `&&=`/`||=`/`??=` do NOT count.
+const TS_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'if_statement',
+  'for_statement',
+  'for_in_statement',
+  'while_statement',
+  'do_statement',
+  'switch_case',
+  'ternary_expression',
 ]);
 
 // Peels receiver wrappers that are transparent to receiver IDENTITY:
@@ -151,6 +171,11 @@ export function extractTypeScript(
     tsMemberCallInfo,
     { ignoredMemberCallees: TS_IGNORED_MEMBER_CALLEES },
   );
+  computeComplexity(bodies, symbols, {
+    decisionNodeTypes: TS_DECISION_NODE_TYPES,
+    isBooleanOperator: isCFamilyBooleanOperator,
+    skipTypes: TS_SKIP_TYPES,
+  });
   return { symbols, references, imports };
 }
 

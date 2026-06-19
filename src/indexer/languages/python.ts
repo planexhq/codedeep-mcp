@@ -15,6 +15,7 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
+import { computeComplexity } from '../complexity.js';
 
 // Function-like nodes whose bodies contain calls that shouldn't attribute
 // to an enclosing body. walkDecorators uses this subset so it still
@@ -108,6 +109,31 @@ const PY_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
   'union', 'intersection', 'difference', 'discard',
 ]);
 
+// Cyclomatic decision nodes — Probe's convention (radon/McCabe-aligned), since
+// Python is undocumented by SonarQube. Verified against the sonar-python source
+// (metrics/ComplexityVisitor): sonar-python counts only def/if/for/while/ternary/
+// (and|or)/comprehension-if and notably OMITS `elif`, `except`, and `match`/`case`
+// entirely (the visitor has no handler for them — the metric file predates 3.10).
+// Probe DELIBERATELY DIVERGES from those omissions and counts every genuine
+// branch (radon-style): `elif_clause` (+1 each), `except_clause` (+1 per clause),
+// `case_clause` (each `match` arm incl. the wildcard `case _:`). `if_clause`
+// covers BOTH comprehension filters (`[x for x in y if c]` — counted by radon AND
+// sonar-python) and match-case guards (`case X if g:`). `else_clause`/
+// `finally_clause`/comprehension-`for` never count. `boolean_operator` is a
+// DISTINCT node (each `and`/`or` nests to its own node → per-operator total),
+// folded straight in — no token-read predicate, unlike the C-family.
+const PY_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'if_statement',
+  'elif_clause',
+  'for_statement',
+  'while_statement',
+  'except_clause',
+  'conditional_expression',
+  'case_clause',
+  'if_clause',
+  'boolean_operator',
+]);
+
 export function extractPython(
   tree: Tree,
   content: string,
@@ -134,6 +160,10 @@ export function extractPython(
     pyMemberCallInfo,
     { ignoredMemberCallees: PY_IGNORED_MEMBER_CALLEES },
   );
+  computeComplexity(bodies, symbols, {
+    decisionNodeTypes: PY_DECISION_NODE_TYPES,
+    skipTypes: PY_SKIP_TYPES,
+  });
   return { symbols, references, imports };
 }
 

@@ -18,6 +18,7 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
+import { computeComplexity, isCFamilyBooleanOperator } from '../complexity.js';
 
 // Function-like nodes whose bodies contain calls that shouldn't attribute
 // to an enclosing body. func_literal is deliberately absent (the Java
@@ -109,6 +110,28 @@ function compositeLiteralCallee(node: Node): Node | null {
 // rows, display-capped (WEAK_MEMBER_ROW_CAP) — recall over precision, the
 // documented Go tradeoff. (Only <=3-char names are gated by SHORT_NAME_THRESHOLD.)
 const GO_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set<string>();
+
+// Cyclomatic decision nodes — Probe's convention, since Go is undocumented by
+// SonarQube. `for_statement` is Go's ONLY loop node (covers 3-clause, range, and
+// infinite forms). All THREE switch arms count — `expression_case`, `type_case`,
+// AND `communication_case` (select) — while the switch CONTAINERS and
+// `default_case` do NOT. Go has no ternary/`while`/`catch`. `&&`/`||` count via
+// the shared isCFamilyBooleanOperator. Closures (`func_literal`) are descended
+// (GO_SKIP_TYPES omits them), so a closure's branches count toward the enclosing
+// func. VERIFIED divergences from the two reference tools (which disagree with
+// each other): sonar-go DROPS select-`case`s (its Go→SLANG converter maps select
+// CommClauses to nil, so they never count) — Probe counts them as genuine
+// branches, matching gocyclo. gocyclo, conversely, counts `default` and every
+// case incl. select — Probe excludes `default` (the SonarQube/McCabe convention),
+// matching sonar-go on that point. So Probe = "count each non-default case of all
+// three switch forms," a deliberate hybrid of the two.
+const GO_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'if_statement',
+  'for_statement',
+  'expression_case',
+  'type_case',
+  'communication_case',
+]);
 
 // `s.log()` and `pkg.Func()` carry their literal receiver token; chained and
 // computed receivers (`s.conn.Close()`, `f().g()`, indexed) carry
@@ -211,6 +234,11 @@ export function extractGo(
       ignoredMemberCallees: GO_IGNORED_MEMBER_CALLEES,
     },
   );
+  computeComplexity(bodies, symbols, {
+    decisionNodeTypes: GO_DECISION_NODE_TYPES,
+    isBooleanOperator: isCFamilyBooleanOperator,
+    skipTypes: GO_SKIP_TYPES,
+  });
   return { symbols, references, imports };
 }
 

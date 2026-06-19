@@ -241,6 +241,43 @@ describe('integration: end-to-end pipeline + tools', () => {
     expect(text).toContain('### Imports');
   });
 
+  it('renders cyclomatic complexity on find_symbol and get_context', async () => {
+    const proj = makeProjectDir('probe-int-cyclo-');
+    try {
+      writeTree(proj, {
+        // 3 decision points (two ifs + a ternary) → cyclomatic 4.
+        'src/classify.ts':
+          'export function classify(n: number): string {\n' +
+          "  if (n < 0) return 'neg';\n" +
+          "  if (n === 0) return 'zero';\n" +
+          "  return n > 100 ? 'big' : 'small';\n" +
+          '}\n' +
+          'export function trivial(n: number): number {\n' +
+          '  return n;\n' +
+          '}\n',
+      });
+      const config = makeConfig(proj);
+      const index = new CodeIndex(proj);
+      const indexer = new Indexer(config, index);
+      silenceStderr();
+      await indexer.indexAll();
+      const deps = { index, indexer, config, git: makeGitStub() };
+
+      const found = (await runFindSymbol({ name: 'classify' }, deps)).content[0].text;
+      expect(found).toContain('Cyclomatic: 4 [structural]');
+      // A trivial function (complexity 1) omits the line entirely.
+      const trivial = (await runFindSymbol({ name: 'trivial' }, deps)).content[0].text;
+      expect(trivial).not.toContain('Cyclomatic:');
+
+      const ctx = (
+        await runGetContext({ file: 'src/classify.ts', symbol: 'classify' }, deps)
+      ).content[0].text;
+      expect(sectionAfter(ctx, '### Coupling')).toContain('- Cyclomatic: 4 [structural]');
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  });
+
   it('find_references surfaces cross-file callers from AST name matching', async () => {
     // The fixture's auth.ts calls hash() (defined in utils.ts) — a real
     // cross-file call edge that exercises Reference.targetId=null storage

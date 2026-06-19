@@ -671,6 +671,48 @@ describe('CodeIndex persistence', () => {
     expect(existsSync(cachePath)).toBe(false);
   });
 
+  it('load deletes and returns false on a v8 cache (the v9 bump)', async () => {
+    // A v8 cache predates Symbol.complexity — it must be force-invalidated so
+    // the next index re-extracts and populates the field. The payload is
+    // otherwise WELL-FORMED for v9 (every required array + gitMeta present), so
+    // the version mismatch is the SOLE failing condition — proving the bump (not
+    // a missing field) is what rejects it.
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        version: 8,
+        createdAt: 0,
+        projectRoot: tmpRoot,
+        symbols: [],
+        files: [],
+        imports: [],
+        callees: [],
+        callers: [],
+        references: [],
+        cochanges: [],
+        hotspots: [],
+        gitMeta: null,
+      }),
+    );
+    const idx = new CodeIndex(tmpRoot);
+    const ok = await idx.load(cachePath);
+    expect(ok).toBe(false);
+    expect(existsSync(cachePath)).toBe(false);
+  });
+
+  it('round-trips Symbol.complexity through save/load', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const branchy = mkSym({ name: 'branchy', file: 'src/a.ts', complexity: 7 });
+    const trivial = mkSym({ name: 'trivial', file: 'src/a.ts' }); // no complexity
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [branchy, trivial], [], []);
+    await idx.save(cachePath);
+
+    const loaded = new CodeIndex(tmpRoot);
+    expect(await loaded.load(cachePath)).toBe(true);
+    expect(loaded.findSymbolByName('branchy')[0]!.complexity).toBe(7);
+    expect(loaded.findSymbolByName('trivial')[0]!.complexity).toBeUndefined();
+  });
+
   it('load deletes and returns false on projectRoot mismatch', async () => {
     const writer = new CodeIndex('/some/project');
     await writer.save(cachePath);
@@ -845,7 +887,7 @@ describe('CodeIndex edge cases', () => {
     await idx.save(cachePath);
 
     const data = JSON.parse(readFileSync(cachePath, 'utf8'));
-    expect(data.version).toBe(8);
+    expect(data.version).toBe(9);
     expect(data.projectRoot).toBe(tmpRoot);
     expect(Array.isArray(data.symbols)).toBe(true);
     expect(Array.isArray(data.files)).toBe(true);
@@ -2220,7 +2262,7 @@ describe('CodeIndex persistence — references round-trip', () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
-        version: 8,
+        version: 9,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],
@@ -2765,7 +2807,7 @@ describe('CodeIndex git enrichment (schema v5)', () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
-        version: 8,
+        version: 9,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],
@@ -2788,7 +2830,7 @@ describe('CodeIndex git enrichment (schema v5)', () => {
     writeFileSync(
       cachePath,
       JSON.stringify({
-        version: 8,
+        version: 9,
         createdAt: 0,
         projectRoot: tmpRoot,
         symbols: [],

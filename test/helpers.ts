@@ -85,6 +85,7 @@ export interface SymOpts {
   endLine?: number;
   doc?: string | null;
   parent?: string;
+  complexity?: number;
 }
 
 export function mkSym(opts: SymOpts): Symbol {
@@ -94,7 +95,7 @@ export function mkSym(opts: SymOpts): Symbol {
   const fqn = opts.parent
     ? `${file}:${opts.parent}.${opts.name}`
     : `${file}:${opts.name}`;
-  return {
+  const sym: Symbol = {
     id: symbolId(file, opts.name, kind, signature, opts.parent ?? ''),
     name: opts.name,
     fqn,
@@ -107,6 +108,8 @@ export function mkSym(opts: SymOpts): Symbol {
     exported: opts.exported ?? false,
     language: opts.language ?? 'typescript',
   };
+  if (opts.complexity !== undefined) sym.complexity = opts.complexity;
+  return sym;
 }
 
 export function mkRef(source: Symbol, target: Symbol): Reference {

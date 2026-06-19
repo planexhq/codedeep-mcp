@@ -95,6 +95,12 @@ export interface Symbol {
   doc: string | null;
   exported: boolean;
   language: string;
+  // Cyclomatic complexity (1 + decision points), computed at extract time for
+  // function/method symbols. OMITTED when trivial (=1) — the `receiver?`-omit
+  // hygiene — and kept OUT of the symbolId hash (body-volatile: hashing it would
+  // re-key symbols on body-only edits and fracture the persisted call graph).
+  // Currently populated for TS/JS, Python, and Go only (Phase 2 MVP).
+  complexity?: number;
 }
 
 export interface Reference {

@@ -362,6 +362,9 @@ function renderCoupling(target: Symbol, index: CodeIndex): string {
     '### Coupling',
     `- Fan-in: ~${fanIn} (callers) ${NAME_MATCH_TAG}`,
     `- Fan-out: ${fanOut} (callees) ${STRUCTURAL_TAG}`,
+    ...(target.complexity !== undefined
+      ? [`- Cyclomatic: ${target.complexity} ${STRUCTURAL_TAG}`]
+      : []),
     blastLine,
   ].join('\n');
 }

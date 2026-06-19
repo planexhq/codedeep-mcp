@@ -23,7 +23,11 @@ import type {
   SymbolKind,
 } from '../types.js';
 
-// v8: chained/computed member calls (`a.b().c()`, `foo().bar()`) are now
+// v9: per-symbol cyclomatic complexity (`Symbol.complexity?`, 1 + decision
+// points) is now computed at extract time for TS/JS, Python, and Go. An
+// extraction-computed field `isUnchanged` (mtime/size/language) can't detect, so
+// the bump force-invalidates warm caches to re-extract and populate it. v8:
+// chained/computed member calls (`a.b().c()`, `foo().bar()`) are now
 // captured as name-keyed member refs with an opaque receiver (RECEIVER_OPAQUE).
 // A pure extraction-logic change that `isUnchanged` (mtime/size/language) can't
 // detect, so the bump force-invalidates warm caches to re-extract. v7: symbol
@@ -34,7 +38,7 @@ import type {
 // extraction; v5 added persisted git enrichment: FileInfo.commitFrequency,
 // co-change lists, hotspots, gitMeta; v4 added member-expression call refs; v3
 // added ImportedName.kind.)
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both
