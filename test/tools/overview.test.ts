@@ -10,6 +10,7 @@ import {
   makeGitStub,
   makeProjectDir,
   mkGitMeta,
+  mkRef,
   mkSym,
   silenceStderr,
   writeTree,
@@ -1079,6 +1080,97 @@ describe('runOverview — git sections', () => {
     expect(text).not.toContain('### Branch');
     expect(text).not.toContain('Hotspots');
     expect(text).not.toContain('[behavioral]');
+  });
+
+  it('renders the Risk Hotspots section ranked by churn × coupling, offender named', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    // hub.ts: a 5-caller hub with high churn. cold.ts: a 5-caller hub with low
+    // churn. The product ranks hub.ts first and names the offending symbol.
+    const seedHub = (file: string, hubName: string) => {
+      const hub = mkSym({ name: hubName, file, startLine: 1 });
+      const callers = Array.from({ length: 5 }, (_, i) =>
+        mkSym({ name: `${hubName}_c${i}`, file, startLine: 10 + i }),
+      );
+      idx.addFile(
+        makeFileInfo('typescript', file),
+        [hub, ...callers],
+        callers.map((c) => mkRef(c, hub)),
+        [],
+      );
+    };
+    seedHub('src/hub.ts', 'hub');
+    seedHub('src/cold.ts', 'coldhub');
+    await idx.applyGitAnalysis({
+      counts: new Map([
+        ['src/hub.ts', 50],
+        ['src/cold.ts', 1],
+      ]),
+      cochanges: new Map(),
+      hotspots: ['src/hub.ts', 'src/cold.ts'],
+      meta: mkGitMeta(),
+    });
+
+    const text = (await runOverview({}, makeDeps(idx))).content[0].text;
+    expect(text).toContain('### Risk Hotspots (churn × coupling) [behavioral]');
+    expect(text).toContain(
+      '- src/hub.ts — hub — 50 commits × 5 references (blast radius 5 across 1 file)',
+    );
+    // Scope ordering to the risk section — 'src/hub.ts —' also appears in the
+    // earlier plain Hotspots section, so an unscoped indexOf would test nothing.
+    const riskSection = text.slice(text.indexOf('### Risk Hotspots'));
+    expect(riskSection.indexOf('src/hub.ts —')).toBeLessThan(
+      riskSection.indexOf('src/cold.ts —'),
+    );
+  });
+
+  it('Risk Hotspots order is the churn×coupling score, not the plain churn order', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const seedHub = (file: string, hubName: string, callerCount: number) => {
+      const hub = mkSym({ name: hubName, file, startLine: 1 });
+      const callers = Array.from({ length: callerCount }, (_, i) =>
+        mkSym({ name: `${hubName}_c${i}`, file, startLine: 10 + i }),
+      );
+      idx.addFile(
+        makeFileInfo('typescript', file),
+        [hub, ...callers],
+        callers.map((c) => mkRef(c, hub)),
+        [],
+      );
+    };
+    // cold.ts has MORE commits (leads the plain Hotspots section) but FEWER
+    // callers; churn×coupling must still rank hub.ts first in Risk Hotspots —
+    // so the two sections disagree and the assertion can't be satisfied by Hotspots.
+    seedHub('src/hub.ts', 'hub', 20);
+    seedHub('src/cold.ts', 'coldhub', 1);
+    await idx.applyGitAnalysis({
+      counts: new Map([['src/hub.ts', 10], ['src/cold.ts', 40]]),
+      cochanges: new Map(),
+      // Hotspots render in churn order (cold leads) — as the analyzer produces.
+      hotspots: ['src/cold.ts', 'src/hub.ts'],
+      meta: mkGitMeta(),
+    });
+
+    const text = (await runOverview({}, makeDeps(idx))).content[0].text;
+    // Plain Hotspots: cold.ts (40 commits) leads hub.ts (10).
+    const hotspots = text.slice(text.indexOf('### Hotspots'), text.indexOf('### Risk Hotspots'));
+    expect(hotspots.indexOf('src/cold.ts')).toBeLessThan(hotspots.indexOf('src/hub.ts'));
+    // Risk: log1p(10)*log1p(20) ≈ 7.18 > log1p(40)*log1p(1) ≈ 2.56 → hub.ts leads.
+    const risk = text.slice(text.indexOf('### Risk Hotspots'));
+    expect(risk.indexOf('src/hub.ts —')).toBeLessThan(risk.indexOf('src/cold.ts —'));
+  });
+
+  it('omits the Risk Hotspots section outside git repos', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const hub = mkSym({ name: 'hub', file: 'src/a.ts', startLine: 1 });
+    const caller = mkSym({ name: 'caller', file: 'src/a.ts', startLine: 2 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [hub, caller],
+      [mkRef(caller, hub)],
+      [],
+    );
+    const text = (await runOverview({}, makeDeps(idx))).content[0].text;
+    expect(text).not.toContain('Risk Hotspots');
   });
 
   it('a rejecting branchSummary never breaks the response', async () => {

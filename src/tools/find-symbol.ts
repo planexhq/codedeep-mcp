@@ -109,7 +109,10 @@ function renderMatch(sym: Symbol, index: CodeIndex): string {
     sym.signature,
   ];
   if (sym.doc && sym.doc.length > 0) lines.push(sym.doc);
+  // Fan-in (reference-granular, cross-file) and fan-out (resolved within-file
+  // callees, a lower bound). Both O(1) — no caller-tree walk per match.
   lines.push(`References: ~${index.getCallerCount(sym.id)}`);
+  lines.push(`Fan-out: ${index.getFanOut(sym.id)}`);
   return lines.join('\n');
 }
 

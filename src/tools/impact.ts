@@ -3,6 +3,7 @@ import {
   type CallerTreeResult,
   type CodeIndex,
   type EdgeStrength,
+  countDistinctCallers,
 } from '../indexer/code-index.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
@@ -237,26 +238,21 @@ function renderImpact(
 
   const byDepth = flattenByDepth(tree.root);
   const depths = [...byDepth.keys()].sort((a, b) => a - b);
-  const files = new Set<string>();
-  const distinct = new Set<string>();
-  let depthCapped = false;
-  for (const nodes of byDepth.values()) {
-    for (const n of nodes) {
-      files.add(n.file);
-      // Count DISTINCT affected callers: a symbol reached via several upstream
-      // branches (a DAG diamond) is ONE caller, not N. Module-level call sites
-      // key by file+line.
-      distinct.add(n.symbolId ?? `m:${n.file}:${n.line}`);
-      if (n.depthCapped) depthCapped = true;
-    }
-  }
-  const callerCount = distinct.size;
+  // Distinct caller/file/depth counts (and the depth-wall flag) via the shared
+  // helper (a DAG diamond is ONE caller, not N) — the single source of truth
+  // get_context and overview reuse, so the surfaces never report divergent
+  // numbers. impact keeps tree.truncated and depthCapped SEPARATE below: they
+  // map to two distinct remediation hints (raise max_tokens/narrow vs raise
+  // depth), unlike the scalar BlastRadius which collapses both into one `+`.
+  const blast = countDistinctCallers(tree.root);
+  const depthCapped = blast.depthCapped;
+  const callerCount = blast.callers;
   // A trailing `+` flags that a breadth/size cap fired, so the true total may
   // be higher than the number shown.
   blocks.push(
     `${callerCount}${tree.truncated ? '+' : ''} ${plural('caller', callerCount)} across ` +
-      `${depths.length} ${plural('depth', depths.length)} ` +
-      `(${files.size} ${plural('file', files.size)}).`,
+      `${blast.depths} ${plural('depth', blast.depths)} ` +
+      `(${blast.files} ${plural('file', blast.files)}).`,
   );
 
   let used = estimate(blocks.join('\n\n'));

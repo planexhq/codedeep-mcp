@@ -54,7 +54,7 @@ const SUGGEST_LIMIT = 5;
 // unrelated files. The section returns when re-export edges land.
 // `co_changes` and `git` sit last: they render at the end and are the
 // first casualties under max_tokens pressure (enrichment, not core).
-const ALL_SECTIONS = ['body', 'callers', 'callees', 'imports', 'co_changes', 'git'] as const;
+const ALL_SECTIONS = ['body', 'callers', 'callees', 'coupling', 'imports', 'co_changes', 'git'] as const;
 type Section = typeof ALL_SECTIONS[number];
 
 type SectionItem = {
@@ -245,6 +245,12 @@ async function renderSymbolBlock(
       peekNonEmpty: () => true,
     },
     {
+      name: 'coupling',
+      includeKey: 'coupling',
+      render: () => renderCoupling(target, deps.index),
+      peekNonEmpty: () => true,
+    },
+    {
       name: 'imports',
       includeKey: 'imports',
       render: () => renderImports(file, deps.index),
@@ -329,6 +335,35 @@ function renderCallerEdges(edges: CallerEdge[]): string {
       return `- ${e.file}:${e.line} — ${label} ${STRUCTURAL_TAG}`;
     }),
   );
+}
+
+// Per-symbol coupling. The lines sit in different precision tiers, so each
+// carries its own tag rather than a blanket one: fan-out is the id-keyed
+// RESOLVED callee count ([structural]); fan-in (getCallerCount) and the
+// transitive blast radius walk the SAME approximate name-match caller set
+// find_references tags [name match, unverified]. Blast radius uses depth-2
+// (enough to tell a leaf from a hub, cheap for one symbol) and the SAME
+// counting method as `impact` via countDistinctCallers — the method matches,
+// not necessarily the number, since `impact` defaults to a deeper walk; a
+// trailing `+` flags an undercount from ANY cap (breadth/node OR the depth-2
+// wall), so a deep caller chain is never silently truncated here.
+function renderCoupling(target: Symbol, index: CodeIndex): string {
+  const fanIn = index.getCallerCount(target.id);
+  const fanOut = index.getFanOut(target.id);
+  const blast = index.getBlastRadius(target.id, { maxDepth: 2 });
+  const cap = blast.truncated ? '+' : '';
+  const blastLine =
+    blast.callers === 0
+      ? `- Blast radius: 0 callers (no upstream call sites in the index) ${NAME_MATCH_TAG}`
+      : `- Blast radius: ${blast.callers}${cap} ${plural('caller', blast.callers)} across ` +
+        `${blast.depths} ${plural('depth', blast.depths)} ` +
+        `(${blast.files} ${plural('file', blast.files)}) ${NAME_MATCH_TAG}`;
+  return [
+    '### Coupling',
+    `- Fan-in: ~${fanIn} (callers) ${NAME_MATCH_TAG}`,
+    `- Fan-out: ${fanOut} (callees) ${STRUCTURAL_TAG}`,
+    blastLine,
+  ].join('\n');
 }
 
 function renderCalleeEdges(edges: Symbol[]): string {

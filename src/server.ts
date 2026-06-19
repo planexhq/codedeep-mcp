@@ -41,7 +41,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "overview",
     {
       description:
-        "Get a structural overview of the codebase: language breakdown, top-level directories, entry points, and symbol counts — plus branch summary and git hotspots when in a git repo.",
+        "Get a structural overview of the codebase: language breakdown, top-level directories, entry points, and symbol counts — plus branch summary, git hotspots, and risk hotspots (churn × call-graph coupling) when in a git repo.",
       inputSchema: {
         path: z.string().optional().describe("Project root (default: cwd)"),
       },
@@ -54,7 +54,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "find_symbol",
     {
       description:
-        "AST-aware symbol lookup. Returns definitions matching a name (exact, prefix, or fuzzy). Optional kind/scope/limit filters.",
+        "AST-aware symbol lookup. Returns definitions matching a name (exact, prefix, or fuzzy), each with fan-in (references) and fan-out (callees) coupling counts. Optional kind/scope/limit filters.",
       inputSchema: {
         name: z.string().describe("Symbol name (exact, prefix, or fuzzy)"),
         kind: z
@@ -90,7 +90,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "get_context",
     {
       description:
-        "Return everything needed to understand a symbol: full body, within-file callers/callees, and imports — plus co-change partners and recent commits when git is available.",
+        "Return everything needed to understand a symbol: full body, within-file callers/callees, coupling (fan-in/fan-out/blast radius), and imports — plus co-change partners and recent commits when git is available.",
       inputSchema: {
         file: z.string().describe("File path (relative to project root)"),
         symbol: z
@@ -112,7 +112,7 @@ export function createServer(deps: ServerDeps): McpServer {
           .array(z.string())
           .optional()
           .describe(
-            "Sections to include: body, callers, callees, imports, co_changes, git",
+            "Sections to include: body, callers, callees, coupling, imports, co_changes, git",
           ),
       },
       annotations: SHARED_ANNOTATIONS,

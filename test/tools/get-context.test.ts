@@ -1818,3 +1818,65 @@ describe('runGetContext — file mode member outline (Go split files)', () => {
     expect(text).not.toContain('- HandleGet (method');
   });
 });
+
+describe('runGetContext — coupling section', () => {
+  it('renders fan-in, fan-out, and blast radius for a symbol', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, {
+      'src/svc.ts':
+        'function runner() {}\nfunction handler() {}\nfunction a() {}\nfunction b() {}\n',
+    });
+    const handler = mkSym({ name: 'handler', file: 'src/svc.ts', startLine: 2, endLine: 2 });
+    const runner = mkSym({ name: 'runner', file: 'src/svc.ts', startLine: 1, endLine: 1 });
+    const a = mkSym({ name: 'a', file: 'src/svc.ts', startLine: 3, endLine: 3 });
+    const b = mkSym({ name: 'b', file: 'src/svc.ts', startLine: 4, endLine: 4 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/svc.ts'),
+      [handler, runner, a, b],
+      [mkRef(runner, handler), mkRef(handler, a), mkRef(handler, b)],
+      [],
+    );
+
+    const result = await runGetContext(
+      { file: 'src/svc.ts', symbol: 'handler' },
+      makeDeps(idx),
+    );
+    const text = result.content[0].text;
+
+    expect(text).toContain('### Coupling');
+    expect(text).toContain('- Fan-in: ~1 (callers) [name match, unverified]');
+    expect(text).toContain('- Fan-out: 2 (callees) [structural]');
+    expect(text).toContain('- Blast radius: 1 caller across 1 depth (1 file) [name match, unverified]');
+  });
+
+  it('include: ["coupling"] isolates the coupling section', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, { 'src/svc.ts': 'function handler() {}\n' });
+    const handler = mkSym({ name: 'handler', file: 'src/svc.ts', startLine: 1, endLine: 1 });
+    idx.addFile(makeFileInfo('typescript', 'src/svc.ts'), [handler], [], []);
+
+    const result = await runGetContext(
+      { file: 'src/svc.ts', symbol: 'handler', include: ['coupling'] },
+      makeDeps(idx),
+    );
+    const text = result.content[0].text;
+    expect(text).toContain('### Coupling');
+    expect(text).not.toContain('### Callers');
+    expect(text).not.toContain('### Imports');
+  });
+
+  it('renders the 0-caller honest blast-radius line', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, { 'src/svc.ts': 'function lonely() {}\n' });
+    const lonely = mkSym({ name: 'lonely', file: 'src/svc.ts', startLine: 1, endLine: 1 });
+    idx.addFile(makeFileInfo('typescript', 'src/svc.ts'), [lonely], [], []);
+
+    const result = await runGetContext(
+      { file: 'src/svc.ts', symbol: 'lonely' },
+      makeDeps(idx),
+    );
+    expect(result.content[0].text).toContain(
+      '- Blast radius: 0 callers (no upstream call sites in the index)',
+    );
+  });
+});

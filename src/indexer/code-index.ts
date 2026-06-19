@@ -187,6 +187,37 @@ export interface CallerTreeOptions {
   includeWeak?: boolean;   // default false — let name-match/weak-member recurse
 }
 
+// Distinct transitive callers under a caller tree (the impact-set size).
+export interface CallerCounts {
+  callers: number;         // distinct caller symbols/sites (DAG-diamond deduped)
+  files: number;           // distinct files those callers live in
+  depths: number;          // distinct hop depths reached
+  depthCapped: boolean;    // a node hit the maxDepth wall — deeper callers exist
+}
+
+// Scalar blast radius. `truncated` means the count is a LOWER BOUND for ANY
+// reason — a breadth/node cap (tree.truncated) OR the depth wall (depthCapped) —
+// so a scalar consumer renders one `+` and points to `impact` for the full
+// per-depth breakdown. (Distinct from CallerCounts: no depthCapped, since the
+// scalar collapses both undercount sources into the single `+`.)
+export interface BlastRadius {
+  callers: number;
+  files: number;
+  depths: number;
+  truncated: boolean;
+}
+
+// One row of the churn × coupling risk ranking (getRiskHotspots).
+export interface RiskRow {
+  file: string;
+  symbol: string;          // offender: the highest-fan-in symbol in the file
+  symbolId: string;
+  churn: number;           // file commit frequency in the git window
+  fanIn: number;           // offender's caller count (the coupling factor)
+  blast: BlastRadius;      // offender's transitive blast radius (depth-bounded)
+  score: number;           // log1p(churn) * log1p(fanIn)
+}
+
 // Ordinal edge weights feeding the path-confidence product, plus a rank for
 // "strongest edge wins" when one caller reaches the target several ways.
 const EDGE_WEIGHT: Readonly<Record<EdgeStrength, number>> = Object.freeze({
@@ -214,6 +245,13 @@ const EXPANDABLE_BY_DEFAULT: ReadonlySet<EdgeStrength> = new Set<EdgeStrength>([
   'resolved',
   'import-connected',
 ]);
+
+// Risk Hotspots (churn × coupling) cost knobs. Hybrid ranking: rank a bounded
+// candidate set by the O(1) cached fan-in, then run the expensive transitive
+// getBlastRadius only for the rows actually displayed.
+const RISK_CANDIDATE_FILES = 40;   // most-churned files scanned
+const RISK_BLAST_DEPTH = 2;        // caller-tree depth for the displayed blast radius
+const DEFAULT_RISK_HOTSPOTS = 10;  // rows returned by getRiskHotspots
 
 // Static disclosure rendered as a footnote — the caller tree is upstream-only
 // and inheritance-blind by construction, so an empty/shallow tree is a blind
@@ -649,6 +687,14 @@ export class CodeIndex {
     return this.resolveIds(this.callees.get(symbolId));
   }
 
+  // Fan-out: resolved within-file callees (id-keyed adjacency). A lower bound
+  // — cross-file/unresolved calls live name-keyed and are NOT counted here,
+  // unlike fan-in's getCallerCount which is reference-granular. Tag rendered
+  // surfaces accordingly.
+  getFanOut(symbolId: string): number {
+    return this.callees.get(symbolId)?.size ?? 0;
+  }
+
   getCallers(symbolId: string): Symbol[] {
     return this.resolveIds(this.callers.get(symbolId));
   }
@@ -831,6 +877,94 @@ export class CodeIndex {
     }
 
     return { root, totalNodes, truncated, limitations: CALLER_TREE_LIMITATIONS };
+  }
+
+  // Transitive blast radius (impact-set size) as a scalar — the same distinct
+  // counting impact.ts renders, shared via countDistinctCallers so the two
+  // surfaces agree. NOT tree.totalNodes, which double-counts a caller reached
+  // through several upstream branches (a DAG diamond).
+  getBlastRadius(symbolId: string, opts?: CallerTreeOptions): BlastRadius {
+    const tree = this.getCallerTree(symbolId, opts);
+    const counts = countDistinctCallers(tree.root);
+    // Lower bound if EITHER a breadth/node cap fired OR the depth wall stopped
+    // expansion — the scalar can't carry impact's two distinct hints, so one `+`.
+    return {
+      callers: counts.callers,
+      files: counts.files,
+      depths: counts.depths,
+      truncated: tree.truncated || counts.depthCapped,
+    };
+  }
+
+  // Risk Hotspots: files ranked by churn × coupling (the CodeScene/Feathers
+  // intersection model — churny-but-decoupled and coupled-but-frozen both fall
+  // away). Empty off-git (no churn signal). Hybrid for cost: rank a bounded
+  // candidate set by the O(1) cached fan-in, run the expensive transitive
+  // blast-radius walk only for the rows returned.
+  getRiskHotspots(limit = DEFAULT_RISK_HOTSPOTS): RiskRow[] {
+    if (this.gitMetaState === null) return [];
+
+    // Tie-break the candidate cut by path so the slice is deterministic across
+    // re-index orderings (getAllFiles is raw Map insertion order).
+    const candidates = this.getAllFiles()
+      .filter((f) => (f.commitFrequency ?? 0) > 0)
+      .sort(
+        (a, b) =>
+          (b.commitFrequency ?? 0) - (a.commitFrequency ?? 0) ||
+          a.path.localeCompare(b.path),
+      )
+      .slice(0, RISK_CANDIDATE_FILES);
+    if (candidates.length === 0) return [];
+
+    // Per file the offender is its single highest-fan-in symbol (MAX, not sum:
+    // a file's risk is its most-coupled hub, not a pile of trivial helpers).
+    // Single pass — only the max is consumed.
+    const scored: Array<{
+      file: string;
+      symbol: Symbol;
+      fanIn: number;
+      churn: number;
+    }> = [];
+    for (const f of candidates) {
+      let best: Symbol | null = null;
+      let bestFanIn = 0;
+      for (const s of this.getSymbolsInFile(f.path)) {
+        const fanIn = this.getCallerCount(s.id);
+        if (fanIn > bestFanIn) {
+          bestFanIn = fanIn;
+          best = s;
+        }
+      }
+      if (best && bestFanIn > 0) {
+        scored.push({
+          file: f.path,
+          symbol: best,
+          fanIn: bestFanIn,
+          churn: f.commitFrequency ?? 0,
+        });
+      }
+    }
+    if (scored.length === 0) return [];
+
+    // Product on a log scale (heavy-tailed counts). No Math.max(...spread)
+    // anywhere — the ranking is a pure per-row product, so the RangeError
+    // guard that gitBoostMap needs does not apply here. Tie-break by file so
+    // equal-score rows order (and survive the limit slice) deterministically.
+    const rows = scored
+      .map((s) => ({ ...s, score: Math.log1p(s.churn) * Math.log1p(s.fanIn) }))
+      .sort((a, b) => b.score - a.score || a.file.localeCompare(b.file))
+      .slice(0, Math.max(0, limit));
+
+    // Expensive transitive walk ONLY for the displayed rows.
+    return rows.map((r) => ({
+      file: r.file,
+      symbol: r.symbol.name,
+      symbolId: r.symbol.id,
+      churn: r.churn,
+      fanIn: r.fanIn,
+      blast: this.getBlastRadius(r.symbol.id, { maxDepth: RISK_BLAST_DEPTH }),
+      score: r.score,
+    }));
   }
 
   // Filtered + memoized direct callers of `target` — the same candidate set
@@ -1640,6 +1774,30 @@ export function isCallerOf(ref: Reference, target: Symbol): boolean {
 
 export function isClassMember(s: Symbol): boolean {
   return classNameFromFqn(s.fqn) !== null;
+}
+
+// Distinct transitive callers under a caller-tree root. Walks EVERY emitted
+// node (cycles included — shown once) and dedupes by symbolId, falling back to
+// `m:file:line` for module-level call sites (null symbolId). This is the exact
+// counting impact.ts renders ("N callers across D depths (F files)"), shared so
+// impact and the risk surface never diverge — and deduped, unlike
+// CallerTreeResult.totalNodes which double-counts DAG diamonds.
+export function countDistinctCallers(root: CallerTreeNode): CallerCounts {
+  const callers = new Set<string>();
+  const files = new Set<string>();
+  const depths = new Set<number>();
+  let depthCapped = false;
+  const walk = (node: CallerTreeNode): void => {
+    for (const child of node.children) {
+      callers.add(child.symbolId ?? `m:${child.file}:${child.line}`);
+      files.add(child.file);
+      depths.add(child.depth);
+      if (child.depthCapped) depthCapped = true;
+      walk(child);
+    }
+  };
+  walk(root);
+  return { callers: callers.size, files: files.size, depths: depths.size, depthCapped };
 }
 
 // True when `imports` brings `name` into scope as a value binding the bare

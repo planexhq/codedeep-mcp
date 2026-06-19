@@ -131,6 +131,7 @@ describe('runFindSymbol — exact match', () => {
       'src/util.ts:1-1 | function',
       'function helper()',
       'References: ~0',
+      'Fan-out: 0',
     ]);
   });
 
@@ -145,6 +146,21 @@ describe('runFindSymbol — exact match', () => {
 
     const result = await runFindSymbol({ name: 'foo' }, makeDeps(idx));
     expect(result.content[0].text).toContain('References: ~0');
+  });
+
+  it('renders Fan-out as the resolved within-file callee count', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    const foo = mkSym({ name: 'foo', file: 'src/util.ts', startLine: 1 });
+    const a = mkSym({ name: 'a', file: 'src/util.ts', startLine: 2 });
+    const b = mkSym({ name: 'b', file: 'src/util.ts', startLine: 3 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/util.ts'),
+      [foo, a, b],
+      [mkRef(foo, a), mkRef(foo, b)],
+      [],
+    );
+    const result = await runFindSymbol({ name: 'foo' }, makeDeps(idx));
+    expect(result.content[0].text).toContain('Fan-out: 2');
   });
 });
 

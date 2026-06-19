@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { CodeIndex, isCallerOf } from '../../src/indexer/code-index.js';
+import { CodeIndex, countDistinctCallers, isCallerOf } from '../../src/indexer/code-index.js';
 import { RECEIVER_OPAQUE } from '../../src/types.js';
 import type { CoChange, Reference, SymbolKind } from '../../src/types.js';
 import {
@@ -3202,5 +3202,192 @@ describe('CodeIndex.getCallerTree', () => {
     expect(res.limitations.length).toBeGreaterThan(0);
 
     expect(idx.getCallerTree('deadbeefdeadbeef').totalNodes).toBe(0);
+  });
+});
+
+describe('CodeIndex.getFanOut', () => {
+  it('counts resolved within-file callees, not unresolved/name-match refs', () => {
+    const idx = new CodeIndex();
+    const caller = mkSym({ name: 'caller', file: 'src/x.ts', startLine: 1 });
+    const a = mkSym({ name: 'a', file: 'src/x.ts', startLine: 2 });
+    const b = mkSym({ name: 'b', file: 'src/x.ts', startLine: 3 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/x.ts'),
+      [caller, a, b],
+      [
+        mkRef(caller, a), // resolved → counts
+        mkRef(caller, b), // resolved → counts
+        mkUnresolvedRef(caller, 'external', 'src/x.ts', 9), // no targetId → not counted
+      ],
+      [],
+    );
+    expect(idx.getFanOut(caller.id)).toBe(2);
+    expect(idx.getFanOut(a.id)).toBe(0);
+  });
+});
+
+describe('CodeIndex.getBlastRadius / countDistinctCallers', () => {
+  it('counts a multi-hop chain by distinct callers', () => {
+    const idx = new CodeIndex();
+    const gamma = mkSym({ name: 'gamma', file: 'src/x.ts', startLine: 1 });
+    const beta = mkSym({ name: 'beta', file: 'src/x.ts', startLine: 2 });
+    const alpha = mkSym({ name: 'alpha', file: 'src/x.ts', startLine: 3 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/x.ts'),
+      [gamma, beta, alpha],
+      [mkRef(beta, gamma), mkRef(alpha, beta)],
+      [],
+    );
+    expect(idx.getBlastRadius(gamma.id).callers).toBe(2);
+  });
+
+  it('dedupes a DAG diamond (3 distinct callers, not 4 emitted nodes)', () => {
+    const idx = new CodeIndex();
+    // D calls B and C; B and C both call A. A's blast radius = {B, C, D} = 3.
+    const a = mkSym({ name: 'a', file: 'src/x.ts', startLine: 1 });
+    const b = mkSym({ name: 'b', file: 'src/x.ts', startLine: 2 });
+    const c = mkSym({ name: 'c', file: 'src/x.ts', startLine: 3 });
+    const d = mkSym({ name: 'd', file: 'src/x.ts', startLine: 4 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/x.ts'),
+      [a, b, c, d],
+      [mkRef(b, a), mkRef(c, a), mkRef(d, b), mkRef(d, c)],
+      [],
+    );
+    const tree = idx.getCallerTree(a.id);
+    expect(tree.totalNodes).toBe(4); // B, C, D-via-B, D-via-C all emitted
+    expect(idx.getBlastRadius(a.id).callers).toBe(3); // but D counted once
+    expect(countDistinctCallers(tree.root).callers).toBe(3);
+  });
+
+  it('counts a module-level caller once and never crashes on a null symbolId', () => {
+    const idx = new CodeIndex();
+    const target = mkSym({ name: 'target', file: 'src/m.ts', startLine: 1 });
+    const foo = mkSym({ name: 'foo', file: 'src/m.ts', startLine: 2 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/m.ts'),
+      [target, foo],
+      [mkRef(foo, target), mkModuleRef(target, 5)],
+      [],
+    );
+    const blast = idx.getBlastRadius(target.id);
+    expect(blast.callers).toBe(2); // foo + the module-level call site
+  });
+
+  it('terminates on a cycle with a finite count', () => {
+    const idx = new CodeIndex();
+    const foo = mkSym({ name: 'foo', file: 'src/x.ts', startLine: 1 });
+    const bar = mkSym({ name: 'bar', file: 'src/x.ts', startLine: 2 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/x.ts'),
+      [foo, bar],
+      [mkRef(foo, bar), mkRef(bar, foo)],
+      [],
+    );
+    expect(idx.getBlastRadius(foo.id).callers).toBe(2); // bar + the foo cycle node
+  });
+
+  it('reports truncated when a breadth cap fires (so consumers can show "+")', () => {
+    const idx = new CodeIndex();
+    const tgt = mkSym({ name: 'target', file: 'src/t.ts', startLine: 1 });
+    const callers = Array.from({ length: 30 }, (_, i) =>
+      mkSym({ name: `caller${i}`, file: 'src/t.ts', startLine: 10 + i }),
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/t.ts'),
+      [tgt, ...callers],
+      callers.map((c) => mkRef(c, tgt)),
+      [],
+    );
+    const blast = idx.getBlastRadius(tgt.id, { maxBreadth: 25 });
+    expect(blast.truncated).toBe(true);
+    expect(blast.callers).toBe(25); // capped at maxBreadth
+    // A small, uncapped tree is not flagged truncated.
+    expect(idx.getBlastRadius(tgt.id, { maxBreadth: 100 }).truncated).toBe(false);
+  });
+
+  it('reports truncated when the DEPTH wall (not breadth) stops expansion', () => {
+    const idx = new CodeIndex();
+    // target ← a ← b ← c : a chain of resolved edges 3 hops deep.
+    const target = mkSym({ name: 'target', file: 'src/x.ts', startLine: 1 });
+    const a = mkSym({ name: 'a', file: 'src/x.ts', startLine: 2 });
+    const b = mkSym({ name: 'b', file: 'src/x.ts', startLine: 3 });
+    const c = mkSym({ name: 'c', file: 'src/x.ts', startLine: 4 });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/x.ts'),
+      [target, a, b, c],
+      [mkRef(a, target), mkRef(b, a), mkRef(c, b)],
+      [],
+    );
+    const shallow = idx.getBlastRadius(target.id, { maxDepth: 2 });
+    expect(shallow.callers).toBe(2); // a, b — c is beyond the depth-2 wall
+    expect(shallow.truncated).toBe(true); // depth wall → lower bound, render '+'
+    // Deep enough to reach c → exact, no '+'.
+    const deep = idx.getBlastRadius(target.id, { maxDepth: 5 });
+    expect(deep.callers).toBe(3);
+    expect(deep.truncated).toBe(false);
+  });
+});
+
+describe('CodeIndex.getRiskHotspots', () => {
+  // hub.ts: a hub with 5 callers, high churn. leaf.ts: a leaf with 0 callers,
+  // high churn. cold.ts: a hub with 5 callers, low churn. The product model
+  // ranks hub.ts first, drops decoupled leaf.ts entirely, and keeps coupled
+  // cold.ts but ranks it below hub.ts.
+  function seedRisk(): CodeIndex {
+    const idx = new CodeIndex();
+    const mkHub = (file: string, hubName: string) => {
+      const hub = mkSym({ name: hubName, file, startLine: 1 });
+      const callers = Array.from({ length: 5 }, (_, i) =>
+        mkSym({ name: `${hubName}_c${i}`, file, startLine: 10 + i }),
+      );
+      idx.addFile(
+        makeFileInfo('typescript', file),
+        [hub, ...callers],
+        callers.map((c) => mkRef(c, hub)),
+        [],
+      );
+      return hub;
+    };
+    mkHub('src/hub.ts', 'hub');
+    mkHub('src/cold.ts', 'coldhub');
+    const leaf = mkSym({ name: 'leaf', file: 'src/leaf.ts', startLine: 1 });
+    idx.addFile(makeFileInfo('typescript', 'src/leaf.ts'), [leaf], [], []);
+    return idx;
+  }
+
+  async function applyChurn(idx: CodeIndex): Promise<void> {
+    await idx.applyGitAnalysis({
+      counts: new Map([
+        ['src/hub.ts', 50],
+        ['src/leaf.ts', 50],
+        ['src/cold.ts', 1],
+      ]),
+      cochanges: new Map(),
+      hotspots: ['src/hub.ts', 'src/leaf.ts', 'src/cold.ts'],
+      meta: mkGitMeta(),
+    });
+  }
+
+  it('ranks churn × coupling, names the offender, and drops the decoupled file', async () => {
+    const idx = seedRisk();
+    await applyChurn(idx);
+    const rows = idx.getRiskHotspots();
+
+    expect(rows[0].file).toBe('src/hub.ts');
+    expect(rows[0].symbol).toBe('hub');
+    expect(rows[0].fanIn).toBe(5); // MAX symbol fan-in, not a file sum
+    expect(rows[0].blast.callers).toBe(5);
+
+    const files = rows.map((r) => r.file);
+    expect(files).not.toContain('src/leaf.ts'); // churny but decoupled → gone
+    expect(files).toContain('src/cold.ts'); // coupled but frozen → kept, lower
+    expect(files.indexOf('src/hub.ts')).toBeLessThan(files.indexOf('src/cold.ts'));
+  });
+
+  it('returns [] off-git (no churn signal)', () => {
+    const idx = seedRisk(); // no applyGitAnalysis → getGitMeta() === null
+    expect(idx.getGitMeta()).toBeNull();
+    expect(idx.getRiskHotspots()).toEqual([]);
   });
 });

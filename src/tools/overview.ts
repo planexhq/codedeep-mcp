@@ -4,6 +4,7 @@ import { basename, extname, join, resolve } from 'node:path';
 import {
   type CodeIndex,
   ENTRY_POINT_FILENAME_RE,
+  type RiskRow,
   isClassMember,
   zeroSymbolsByKind,
 } from '../indexer/code-index.js';
@@ -43,6 +44,7 @@ const MAX_KINDS_PER_GROUP = 3;
 const MAX_ENTRY_POINTS = 15;
 const MAX_OTHER_EXTENSIONS = 5;
 const MAX_HOTSPOTS = 10;
+const MAX_RISK_HOTSPOTS = 10;
 
 // Without this, monorepos with many packages/*/index.ts (or many
 // __init__.py) saturate MAX_ENTRY_POINTS alphabetically and hide the real
@@ -180,6 +182,7 @@ export async function runOverview(
 interface OverviewGitData {
   branch: BranchSummary | null;
   hotspots: Array<{ path: string; commits: number }>;
+  riskHotspots: RiskRow[];
   windowDays: number;
 }
 
@@ -195,6 +198,9 @@ async function collectGitData(deps: OverviewDeps): Promise<OverviewGitData> {
   return {
     branch,
     hotspots: deps.index.getHotspots(MAX_HOTSPOTS),
+    // Empty off-git (getRiskHotspots gates on getGitMeta) — the section is
+    // then omitted, matching the silent-omission contract below.
+    riskHotspots: deps.index.getRiskHotspots(MAX_RISK_HOTSPOTS),
     // Label with the window that PRODUCED the data (gitMeta provenance),
     // not the live config: after a gitWindow change, persisted counts
     // keep their true label until the re-analysis lands.
@@ -214,6 +220,22 @@ function appendGitSections(lines: string[], data: OverviewGitData): void {
     lines.push('', `### Hotspots (last ${data.windowDays} days) ${BEHAVIORAL_TAG}`);
     for (const h of data.hotspots) {
       lines.push(`- ${h.path} — ${h.commits} ${plural('commit', h.commits)}`);
+    }
+  }
+  // Churn × coupling: the file's most-coupled symbol crossed with its commit
+  // frequency. Empty (and so omitted) off-git, where the product has no churn
+  // factor — the same silent-omission contract as the sections above.
+  if (data.riskHotspots.length > 0) {
+    lines.push('', `### Risk Hotspots (churn × coupling) ${BEHAVIORAL_TAG}`);
+    for (const r of data.riskHotspots) {
+      // No `()` after the offender — it can be a class/variable, not a function.
+      // "references" (not "callers") because fanIn is reference-granular, unlike
+      // the distinct-caller blast count; a trailing `+` flags a capped walk.
+      lines.push(
+        `- ${r.file} — ${r.symbol} — ${r.churn} ${plural('commit', r.churn)} × ` +
+          `${r.fanIn} ${plural('reference', r.fanIn)} ` +
+          `(blast radius ${r.blast.callers}${r.blast.truncated ? '+' : ''} across ${r.blast.files} ${plural('file', r.blast.files)})`,
+      );
     }
   }
 }
