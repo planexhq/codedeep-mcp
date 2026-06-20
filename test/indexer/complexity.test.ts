@@ -47,6 +47,10 @@ const rustCog = (src: string, name = 'f') => bothCx(src, name, 'rust', 'src/test
 // cognitive whitepaper-aligned (no published Swift cognitive spec). `src` is one or more
 // top-level declarations (a function `f` unless noted).
 const swiftCog = (src: string, name = 'f') => bothCx(src, name, 'swift', 'src/test.swift');
+// Kotlin carries both metrics, BOTH pinned to sonar-kotlin. `src` is one or more
+// top-level declarations (a function `f` unless noted). MULTI-LINE is REQUIRED — the
+// tree-sitter-kotlin grammar errors on members/when-entries crammed on one line.
+const kotlinCog = (src: string, name = 'f') => bothCx(src, name, 'kotlin', 'src/test.kt');
 
 // Java carries BOTH metrics (Phase 3). `src` is one or more member declarations;
 // they're wrapped in `class T { … }`. Returns { cyc, cog } for the named member
@@ -1113,5 +1117,142 @@ describe('cognitive complexity — Swift (SonarSource whitepaper)', () => {
 
   it('a ternary surcharges (+1)', () => {
     expect(swiftCog('func f(a: Bool) -> Int { return a ? 1 : 2 }').cog).toBe(1);
+  });
+});
+
+describe('cyclomatic complexity — Kotlin (sonar-kotlin CyclomaticComplexityVisitor)', () => {
+  it('trivial functions are omitted', () => {
+    expect(kotlinCog('fun f() {\n  g()\n}').cyc).toBeUndefined();
+  });
+
+  it('counts if — incl. if-as-expression — and a braced/brace-less if/else-if/else', () => {
+    expect(kotlinCog('fun f(a: Int) {\n  if (a > 0) g()\n}').cyc).toBe(2);
+    // else is free; the consequence/else may be BRACE-LESS (a bare call_expression).
+    expect(kotlinCog('fun f(a: Int) {\n  if (a > 0) g() else h()\n}').cyc).toBe(2);
+    expect(kotlinCog('fun f(a: Int) {\n  if (a > 0) g() else if (a < 0) h() else k()\n}').cyc).toBe(3);
+    // an `if` USED AS AN EXPRESSION is the same `if_expression` node → counts the same.
+    expect(kotlinCog('fun f(a: Int): Int {\n  return if (a > 0) 1 else 2\n}').cyc).toBe(2);
+  });
+
+  it('counts EACH when-entry INCLUDING the else entry (a multi-condition entry is one)', () => {
+    // 3 entries (1->, 2,3->, else->) → 1 + 3 = 4. The else entry IS counted (sonar-kotlin
+    // visits every whenEntry — a deliberate divergence from default/else in TS/Go/Java/Swift).
+    expect(kotlinCog('fun f(x: Int) {\n  when (x) {\n    1 -> a()\n    2, 3 -> b()\n    else -> c()\n  }\n}').cyc).toBe(4);
+    // subjectless `when` counts each entry the same way.
+    expect(kotlinCog('fun f(a: Int, b: Int) {\n  when {\n    a > 0 -> g()\n    b > 0 -> h()\n    else -> k()\n  }\n}').cyc).toBe(4);
+    // a boolean in a (subjectless) when-entry condition ALSO counts: 2 entries + the && = 1+2+1.
+    expect(kotlinCog('fun f(a: Boolean, b: Boolean) {\n  when {\n    a && b -> g()\n    else -> h()\n  }\n}').cyc).toBe(4);
+  });
+
+  it('counts for / while / do-while loops', () => {
+    expect(kotlinCog('fun f(c: Boolean) {\n  for (x in 1..2) g()\n  while (c) h()\n  do { k() } while (c)\n}').cyc).toBe(4);
+  });
+
+  it('counts &&/|| but NOT the Elvis ?: operator', () => {
+    expect(kotlinCog('fun f(a: Boolean, b: Boolean, c: Boolean) {\n  if (a && b || c) g()\n}').cyc).toBe(4);
+    // Elvis `?:` is a binary_expression whose operator token cFamilyBooleanOperatorKind rejects.
+    expect(kotlinCog('fun f(a: Int?): Int {\n  return a ?: 0\n}').cyc).toBeUndefined();
+  });
+
+  it('does NOT count catch (sonar-kotlin omits try/catch cyclomatically)', () => {
+    expect(kotlinCog('fun f() {\n  try { g() } catch (e: Exception) { h() }\n}').cyc).toBeUndefined();
+  });
+
+  it('descends lambdas (their branches count) but prunes nested fun', () => {
+    // forEach lambda is descended → the inner if counts toward f.
+    expect(kotlinCog('fun f(xs: List<Int>) {\n  xs.forEach { x -> if (x > 0) g() }\n}').cyc).toBe(2);
+    // a nested `fun` is its own scope (pruned) → f stays trivial.
+    expect(kotlinCog('fun f(a: Boolean) {\n  fun g() {\n    if (a) h()\n  }\n  k()\n}').cyc).toBeUndefined();
+  });
+
+  it('measures methods and the synthesized constructor; excludes property getters', () => {
+    expect(kotlinCog('class C {\n  fun m(a: Int) {\n    if (a > 0) x()\n  }\n}', 'm').cyc).toBe(2);
+    // the init block attributes to the synthesized `constructor` (method-kind).
+    expect(kotlinCog('class C(val a: Int) {\n  init {\n    if (a > 0) x()\n  }\n}', 'constructor').cyc).toBe(2);
+    // a custom getter's `if` is dropped: the property is a `variable`-kind symbol,
+    // excluded by COMPLEXITY_KINDS (the Swift computed-property analog).
+    expect(kotlinCog('class C(val n: Int) {\n  val p: Int\n    get() {\n      if (n > 0) return 1\n      return 2\n    }\n}', 'p').cyc).toBeUndefined();
+    // an EXTENSION function (`fun Type.f()`, methods-apart) is measured like any method.
+    expect(kotlinCog('fun List<Int>.f(): Int {\n  if (isEmpty()) return 0\n  return 1\n}').cyc).toBe(2);
+  });
+});
+
+describe('cognitive complexity — Kotlin (sonar-kotlin CognitiveComplexity / whitepaper)', () => {
+  it('if surcharges; else +1 ONLY for a block/else-if body (sonar-kotlin ternary gate)', () => {
+    expect(kotlinCog('fun f(a: Int) {\n  if (a > 0) g()\n}').cog).toBe(1);
+    // BRACE-LESS `else h()` is the ternary form → NO else +1 (sonar-kotlin handleIfExpression
+    // charges the else only when the body is a KtBlockExpression or KtIfExpression). Head if → 1.
+    expect(kotlinCog('fun f(a: Int) {\n  if (a > 0) g() else h()\n}').cog).toBe(1);
+    // a BLOCK else body charges +1 → 2.
+    expect(kotlinCog('fun f(a: Int) {\n  if (a > 0) { g() } else { h() }\n}').cog).toBe(2);
+    // an EMPTY `{}` consequence still emits a block node → the block else still charges → 2.
+    expect(kotlinCog('fun f(a: Int) {\n  if (a > 0) {} else { k() }\n}').cog).toBe(2);
+    // braced if + else-if + (block) else = 3 flat (no double-count of the nested else-if).
+    expect(kotlinCog('fun f(a: Int) {\n  if (a > 0) { g() } else if (a < 0) { h() } else { k() }\n}').cog).toBe(3);
+    // brace-less if + else-if + brace-less else = 2: head + else-if keyword (the else-if body IS
+    // an if_expression, so it charges); the FINAL brace-less `else k()` gets NO +1.
+    expect(kotlinCog('fun f(a: Int) {\n  if (a > 0) g() else if (a < 0) h() else k()\n}').cog).toBe(2);
+    // a `;` empty consequence with a BLOCK else still charges (the engine splits on the anon
+    // `else` keyword, not a positional body slot — the empty-branch lesson) → 2.
+    expect(kotlinCog('fun f(x: Int) {\n  if (x > 0) ; else { b() }\n}').cog).toBe(2);
+  });
+
+  it('do-while NESTS its body but adds NO increment (sonar-kotlin omits KtDoWhileExpression)', () => {
+    // do-while nests its body (+0 itself), so the inner if is at nesting 1 → +2 = 2. CONTRAST an
+    // identically-shaped `for` (cog 3): sonar-kotlin's cognitive visit handles KtFor/KtWhile but
+    // not KtDoWhileExpression (a sibling), while KtLoopExpression still raises nesting.
+    expect(kotlinCog('fun f(c: Boolean) {\n  do {\n    if (c) g()\n  } while (c)\n}').cog).toBe(2);
+    expect(kotlinCog('fun f(xs: List<Int>) {\n  for (x in xs) {\n    if (x > 0) g()\n  }\n}').cog).toBe(3);
+    // cyclomatic STILL counts do-while (sonar-kotlin's visitLoopExpression covers all loops).
+    expect(kotlinCog('fun f(c: Boolean) {\n  do { g() } while (c)\n}').cyc).toBe(2);
+  });
+
+  it('nesting surcharges: a nested if costs 1 + its nesting level', () => {
+    expect(kotlinCog('fun f(a: Int, b: Int) {\n  if (a > 0) {\n    if (b > 0) { g() }\n  }\n}').cog).toBe(3); // 1 + 2
+  });
+
+  it('whole when is +1 (entries nest); an inner if nests', () => {
+    expect(kotlinCog('fun f(x: Int) {\n  when (x) {\n    1 -> a()\n    2 -> b()\n    else -> c()\n  }\n}').cog).toBe(1);
+    // when(+1) + inner if at nesting 1 (+2) = 3.
+    expect(kotlinCog('fun f(x: Int, b: Boolean) {\n  when (x) {\n    1 -> if (b) a()\n    else -> c()\n  }\n}').cog).toBe(3);
+    // a SUBJECTLESS when is also a single +1 (entries flat).
+    expect(kotlinCog('fun f(a: Int, b: Int) {\n  when {\n    a > 0 -> g()\n    b > 0 -> h()\n    else -> k()\n  }\n}').cog).toBe(1);
+  });
+
+  it('a loop surcharges and nests its body', () => {
+    expect(kotlinCog('fun f(xs: List<Int>) {\n  for (x in xs) {\n    if (x > 0) g()\n  }\n}').cog).toBe(3); // for 1 + if 2
+  });
+
+  it('each catch surcharges (try/finally pass through)', () => {
+    expect(kotlinCog('fun f() {\n  try { g() } catch (e: Exception) { h() }\n}').cog).toBe(1);
+  });
+
+  it('boolean runs: +1 per maximal same-kind run; parens are NOT unwrapped (sonar-kotlin)', () => {
+    expect(kotlinCog('fun f(a: Boolean, b: Boolean, c: Boolean) {\n  if (a && b && c) g()\n}').cog).toBe(2); // if + one && run
+    expect(kotlinCog('fun f(a: Boolean, b: Boolean, c: Boolean) {\n  if (a && b || c) g()\n}').cog).toBe(3); // if + && run + || run
+    // (a && b) && c: NO paren-unwrap — sonar-kotlin's flattenOperators recurses only into
+    // KtBinaryExpression operands, so the parenthesized && is its OWN run → if + 2 runs = 3
+    // (sonar-java WOULD unwrap to 2; this is a sonar-kotlin-specific divergence).
+    expect(kotlinCog('fun f(a: Boolean, b: Boolean, c: Boolean) {\n  if ((a && b) && c) g()\n}').cog).toBe(3);
+    // a `&&` inside a lambda argument is its OWN run, SEPARATE from the outer condition's
+    // run (each is a distinct nested expression) — if(+1) + outer && (+1) + lambda && (+1) = 3.
+    // This is whitepaper/sonar-kotlin-correct; detekt under-counts it as 2 (it merges all
+    // descendant binaries of the topmost into one run, crossing the lambda boundary).
+    expect(
+      kotlinCog('fun f(xs: List<Int>) {\n  if (xs.isNotEmpty() && xs.all { it > 0 && it < 10 }) {\n    g()\n  }\n}'),
+    ).toEqual({ cyc: 4, cog: 3 });
+  });
+
+  it('a LABELED break/continue is +1 flat; a plain one is +0', () => {
+    // for(1) + for nesting1(2) + if nesting2(3) + labeled break(1) = 7.
+    expect(kotlinCog('fun f(xs: List<Int>, ys: List<Int>) {\n  outer@ for (x in xs) {\n    for (y in ys) {\n      if (x > 0) break@outer\n    }\n  }\n}').cog).toBe(7);
+    // a plain break adds nothing: while(1) + if nesting1(2) = 3.
+    expect(kotlinCog('fun f(xs: List<Int>) {\n  while (true) {\n    if (xs.isEmpty()) break\n  }\n}').cog).toBe(3);
+    // a labeled CONTINUE is +1 flat too (kotlinHasJumpLabel's 'continue@' branch): 1+2+3+1 = 7.
+    expect(kotlinCog('fun f(xs: List<Int>, ys: List<Int>) {\n  outer@ for (x in xs) {\n    for (y in ys) {\n      if (x > 0) continue@outer\n    }\n  }\n}').cog).toBe(7);
+  });
+
+  it('nested fun is excluded (per-symbol model)', () => {
+    expect(kotlinCog('fun f(a: Boolean) {\n  fun g() {\n    if (a) {\n      if (a) h()\n    }\n  }\n  k()\n}').cog).toBeUndefined();
   });
 });

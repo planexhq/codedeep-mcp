@@ -80,8 +80,8 @@ export interface ComplexityOptions {
   // COGNITIVE complexity (proposal §1.2): when present, a second nesting-aware
   // walk runs alongside the cyclomatic one and writes `Symbol.cognitiveComplexity`.
   // Absent ⇒ cognitive stays undefined for that language (the not-yet-done
-  // Kotlin/Dart/C#/PHP).
-  // Populated for **Java + TS/JS + Go + Python + Rust + Swift**. The algorithm is the
+  // Dart/C#/PHP).
+  // Populated for **Java + TS/JS + Go + Python + Rust + Swift + Kotlin**. The algorithm is the
   // SonarSource whitepaper's, clean-room verified against `sonar-java`'s
   // `CognitiveComplexityVisitor` (Java), `eslint-plugin-sonarjs`'s S3776 (TS/JS),
   // `uudashr/gocognit` (Go), AND `sonar-python`'s `CognitiveComplexityVisitor`
@@ -103,15 +103,18 @@ export interface ComplexityOptions {
   // `parenthesized_expression` (whitepaper/sonar-rust), Swift sets `ifPositionalBlockType`
   // (its `if` has no consequence/alternative field) + `booleanLeftField`/`booleanRightField`
   // (`lhs`/`rhs` on its distinct conjunction/disjunction nodes) + `flatIncrement` (guard) +
-  // a sentinel `parenthesizedType` (no-unwrap). See computeCognitive below +
-  // CLAUDE.md "Cognitive Complexity Rules".
+  // a sentinel `parenthesizedType` (no-unwrap), and Kotlin sets `ifConsequenceFromNamedChildren`
+  // + `elseKeywordType` + `elseChargeBlockType` (anonymous-else / brace-less positional if with
+  // the sonar-kotlin else-body ternary gate) + a sentinel `parenthesizedType` (no-unwrap) and
+  // puts `do_while_statement` in `nestOnlyTypes` (sonar-kotlin omits the do-while increment).
+  // See computeCognitive below + CLAUDE.md "Cognitive Complexity Rules".
   cognitive?: CognitiveOptions;
 }
 
 // Per-construct node-type config for the cognitive walk. Each field is a
 // tree-sitter node TYPE name (or set of names) for one whitepaper construct
 // category; the SHARED algorithm in computeCognitive is language-agnostic, only
-// the names differ per grammar. Filled for Java, TS/JS, Go, Python, Rust, and Swift.
+// the names differ per grammar. Filled for Java, TS/JS, Go, Python, Rust, Swift, and Kotlin.
 export interface CognitiveOptions {
   // The `if` node + the field names used to walk its chain. `else if` is detected
   // structurally: the `alternative` field holding another `ifType` node is an
@@ -162,6 +165,26 @@ export interface CognitiveOptions {
   // else branch (an `ifType` else-if, or a block else body that MAY be absent) is
   // AFTER it. Required alongside ifPositionalBlockType. Other languages leave it unset.
   elseKeywordType?: string;
+  // POSITIONAL `if` variant for grammars whose `else` is ANONYMOUS and whose branches
+  // may be BRACE-LESS (Kotlin: `if(a) g() else h()` — the consequence is a bare
+  // `call_expression`, not a block, and the `else` token is absent from namedChildren,
+  // so neither the elseKeywordType split nor the ifPositionalBlockType filter works).
+  // When set, visitPositionalIfBody finds the consequence as the FIRST named child that
+  // is neither a `conditionField` child nor a comment, and the else/else-if body as the
+  // SECOND such child (a nested `ifType` = else-if, else a plain-else body that nests).
+  // This is sound for Kotlin because EVERY branch emits a node (an empty `{}` IS a
+  // `block`, UNLIKE Swift where it vanishes) — so positional detection never drops a
+  // branch. Routes into the positional handler alongside ifPositionalBlockType. Swift
+  // leaves it unset and keeps the keyword-split path. Kotlin: true.
+  ifConsequenceFromNamedChildren?: boolean;
+  // For the ifConsequenceFromNamedChildren path: the block node type whose presence as the
+  // ELSE BODY (alongside an else-if `ifType`) charges the else +1. sonar-kotlin's
+  // handleIfExpression charges the else keyword ONLY when the else body is a KtBlockExpression
+  // or a KtIfExpression — a BRACE-LESS `else expr` is the ternary form and is NOT charged. Set
+  // to the grammar's block node ('block' for Kotlin); the else body is descended/nested either
+  // way. The sole consumer of ifConsequenceFromNamedChildren (Kotlin) sets it, so it is
+  // effectively required on that path (unset ⇒ only an else-if would charge). Others unset.
+  elseChargeBlockType?: string;
   // Some grammars put an INITIALIZER statement on the `if` (C-family `if (init;
   // cond)` — Go's `if x := f(); cond {}`). When set, the if-case AND the else-if
   // branch of handleAlternative visit this field at the if's BASE nesting (the
@@ -541,8 +564,38 @@ function computeCognitive(
   // (a long else-if chain recurses here, not through `visit`).
   const visitPositionalIfBody = (ifNode: Node, nesting: number, depth: number): void => {
     if (depth > MAX_COGNITIVE_DEPTH) return;
+    // Conditions: base nesting, booleans flat (Swift allows several — `if a, let b = c`).
+    // condIds is built ONLY for the Kotlin path (it excludes the condition field-children —
+    // a field child is also a named child — when locating the consequence/else among
+    // namedChildren); Swift finds the consequence by block type and never reads it, so it
+    // stays null (no allocation on the Swift path).
+    const condIds = cog.ifConsequenceFromNamedChildren ? new Set<number>() : null;
     for (const cond of ifNode.childrenForFieldName(cog.conditionField)) {
+      condIds?.add(cond.id);
       visit(cond, nesting, depth + 1);
+    }
+    // Kotlin: the `else` keyword is ANONYMOUS and a branch may be BRACE-LESS, so SPLIT at
+    // the `else` keyword (always emitted for a real else, even when a branch is a `;` empty
+    // statement that emits no named child — the empty-branch lesson). The consequence is the
+    // first named non-condition non-comment child BEFORE `else`; the else body is the first
+    // such child AFTER it (each may be absent for a `;` branch).
+    if (cog.ifConsequenceFromNamedChildren) {
+      const isBody = (c: Node) =>
+        c.isNamed && !condIds!.has(c.id) && c.type !== 'line_comment' && c.type !== 'block_comment';
+      const kids = ifNode.children;
+      const elseIdx = cog.elseKeywordType ? kids.findIndex((c) => c.type === cog.elseKeywordType) : -1;
+      const consequence = (elseIdx === -1 ? kids : kids.slice(0, elseIdx)).find(isBody);
+      if (consequence) visit(consequence, nesting + 1, depth + 1);
+      if (elseIdx === -1) return; // no else clause
+      const elseBody = kids.slice(elseIdx + 1).find(isBody);
+      // sonar-kotlin charges the else +1 ONLY when the else body is a block (`{}`, the
+      // elseChargeBlockType) or an else-if (`ifType`) — a BRACE-LESS `else expr` is the
+      // ternary form and gets NO +1. The else body still NESTS regardless.
+      const isElseIf = elseBody?.type === cog.ifType;
+      if (isElseIf || elseBody?.type === cog.elseChargeBlockType) total += 1; // +1 FLAT, no surcharge
+      if (isElseIf) visitPositionalIfBody(elseBody!, nesting, depth + 1); // else-if chain, no head surcharge
+      else if (elseBody) visit(elseBody, nesting + 1, depth + 1); // plain else body nests
+      return;
     }
     const blockType = cog.ifPositionalBlockType!;
     const kids = ifNode.namedChildren;
@@ -584,8 +637,9 @@ function computeCognitive(
     // --- if / else-if / else chain (head if surcharges; chain links are flat) ---
     if (t === cog.ifType) {
       total += 1 + nesting;
-      if (cog.ifPositionalBlockType) {
-        // Swift: positional consequence/else (no fields). See visitPositionalIfBody.
+      if (cog.ifPositionalBlockType || cog.ifConsequenceFromNamedChildren) {
+        // Positional consequence/else (no fields): Swift (keyword-split) or Kotlin
+        // (anon `else` + brace-less branches). See visitPositionalIfBody.
         visitPositionalIfBody(node, nesting, depth);
       } else {
         if (cog.initField) visitField(node, cog.initField, nesting, depth);

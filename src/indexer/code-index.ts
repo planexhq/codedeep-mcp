@@ -23,6 +23,19 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v16: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for Kotlin
+// (`.kt`/`.kts`) — BOTH metrics in one slice (the Java/Rust/Swift pattern). BOTH are
+// pinned to sonar-kotlin (source-available, the "compare to SonarQube" north-star, the
+// Java/Python precedent — chosen over detekt, which counts Elvis/break/continue/catch
+// AND +1 per scope function). CYCLOMATIC: +1 per if, per EACH `when` entry INCLUDING the
+// `else` entry (a deliberate divergence from the `default`/`else`-excluded rule in the
+// C-family langs — sonar-kotlin visits every whenEntry), per loop, per `&&`/`||`; Elvis
+// `?:` is NOT counted. COGNITIVE is the SonarSource whitepaper (the engine default): NO
+// recursion, NO Elvis, paren-unwrap; Kotlin's `if` is positional with an anonymous
+// `else` and possibly brace-less branches (a new engine path,
+// ifConsequenceFromNamedChildren). Adding the fields to Kotlin symbols is an
+// extraction-logic change `isUnchanged` (mtime/size/language) can't detect, so the bump
+// force-invalidates warm caches.
 // v15: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for Swift
 // (`.swift`) — BOTH metrics in one slice (the Java/Rust pattern). CYCLOMATIC is
 // pinned to SwiftLint's `cyclomatic_complexity` (the open, runnable oracle — the
@@ -97,7 +110,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 15;
+export const SCHEMA_VERSION = 16;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both

@@ -17,6 +17,12 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
+import {
+  cFamilyBooleanOperatorKind,
+  computeComplexity,
+  isCFamilyBooleanOperator,
+} from '../complexity.js';
+import type { CognitiveOptions } from '../complexity.js';
 
 // Nested `fun` declarations create their own scope — their calls must NOT
 // attribute to an enclosing body, so they're pruned from the body walk (and
@@ -183,6 +189,65 @@ const KOTLIN_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
   'apply', 'also', 'takeIf', 'takeUnless',
 ]);
 
+// ── complexity (cyclomatic + cognitive, BOTH pinned to sonar-kotlin) ─────────
+// CYCLOMATIC (sonar-kotlin CyclomaticComplexityVisitor): `1 + decision points`, +1 per
+// `if` (incl. an if-used-as-EXPRESSION — every Kotlin `if` is one `if_expression`), per
+// EACH `when_entry` INCLUDING the `else` entry (sonar-kotlin visits every whenEntry — a
+// deliberate divergence from the `default`/`else`-EXCLUDED rule in TS/Go/Java/Swift), per
+// loop, and per `&&`/`||`. NOT counted: Elvis `?:` (a `binary_expression` whose operator
+// token `?:` isCFamilyBooleanOperator rejects), break/continue, catch, scope functions.
+// Lambdas are DESCENDED (lambda_literal ∉ KOTLIN_SKIP_TYPES) so their branches count
+// toward the enclosing function.
+const KOTLIN_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'if_expression', 'for_statement', 'while_statement', 'do_while_statement', 'when_entry',
+]);
+
+// A labeled break/continue is a `labeled_expression` whose `label` child text is the jump
+// keyword + `@` (`break@`/`continue@`); the target label name follows as an identifier.
+// Labeled LOOPS attach `label` directly to the loop (not via labeled_expression), and a
+// labeled non-jump (`tag@ run {}`) carries a different label text — so this gate fires
+// only for labeled jumps (+1 flat cognitive, the whitepaper rule). Plain break/continue
+// parse as bare `identifier`s (no labeled_expression) → +0.
+function kotlinHasJumpLabel(node: Node): boolean {
+  const label = childOfType(node, 'label')?.text;
+  return label === 'break@' || label === 'continue@';
+}
+
+// COGNITIVE — pinned EXACTLY to sonar-kotlin's CognitiveComplexity (verbatim source read,
+// NOT plain whitepaper: it diverges in three sonar-kotlin-specific ways, all replicated for
+// SonarQube-parity). (1) Kotlin's `if` is POSITIONAL with an anonymous `else` and possibly
+// brace-less branches → ifConsequenceFromNamedChildren (see complexity.ts), and the else +1 is
+// charged ONLY when the else BODY is a `block` or an else-if (elseChargeBlockType) — a
+// brace-less `else expr` is the ternary form, NO +1 (sonar-kotlin handleIfExpression's
+// `it is KtBlockExpression || it is KtIfExpression` gate). (2) `when` is the switch analog
+// (whole +1, entries nest). (3) Booleans are C-family with NO paren-unwrap (sonar-kotlin's
+// flattenOperators recurses only into KtBinaryExpression operands, so `(a&&b)&&c` = 2 runs —
+// unlike sonar-java). do-while NESTS its body but adds NO increment (sonar-kotlin's cognitive
+// visit handles KtFor/KtWhile but NOT KtDoWhileExpression — a sibling, not a subclass — while
+// KtLoopExpression still raises nesting); so do_while_statement is nestOnly, not a loopType.
+// Cyclomatic still counts do-while (its visitLoopExpression covers all loops). NO recursion /
+// Elvis (sonar-kotlin omits both).
+const KOTLIN_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if_expression',
+  conditionField: 'condition',
+  // Positional path (no consequence/alternative field): unused placeholders.
+  consequenceField: '__kotlin_unused__',
+  alternativeField: '__kotlin_unused__',
+  ifConsequenceFromNamedChildren: true,
+  elseKeywordType: 'else', // anon `else` token splits consequence/else (handles `;` empty branches)
+  elseChargeBlockType: 'block', // else +1 ONLY for a block or else-if body (sonar-kotlin ternary gate)
+  loopTypes: new Set(['for_statement', 'while_statement']), // NOT do_while (sonar-kotlin omits its increment)
+  switchTypes: new Set(['when_expression']), // whole when +1, entries nest
+  ternaryType: '__kotlin_no_ternary__', // the if-expression IS the ternary (handled by ifType)
+  catchType: 'catch_block', // each catch surcharges; try/finally pass through
+  // closures nest +0; do_while nests its body but adds NO increment (sonar-kotlin omits it).
+  nestOnlyTypes: new Set(['lambda_literal', 'do_while_statement']),
+  labeledJumpTypes: new Set(['labeled_expression']),
+  hasLabel: kotlinHasJumpLabel,
+  booleanOperatorKind: cFamilyBooleanOperatorKind, // &&/|| (Elvis ?: → null); default left/right
+  parenthesizedType: '__kotlin_no_paren__', // NO unwrap: (a&&b)&&c = 2 runs (sonar-kotlin)
+};
+
 // Per-file duplicate-id disambiguation. An extension method duplicating a type
 // method, or two same-signature constructors, can be byte-identical in
 // (name, kind, signature, qualifier). Repeats get an ordinal qualifier.
@@ -241,6 +306,14 @@ export function extractKotlin(
       ignoredMemberCallees: KOTLIN_IGNORED_MEMBER_CALLEES,
     },
   );
+  // Per-symbol cyclomatic + cognitive complexity, computed while the tree is alive
+  // (same boundary as resolveCalls: nested funcs skipped, lambdas descended).
+  computeComplexity(ctx.bodies, ctx.symbols, {
+    decisionNodeTypes: KOTLIN_DECISION_NODE_TYPES,
+    extraDecisionPredicate: isCFamilyBooleanOperator, // &&/|| (+1 each); Elvis excluded
+    skipTypes: KOTLIN_SKIP_TYPES,
+    cognitive: KOTLIN_COGNITIVE_OPTIONS,
+  });
   return { symbols: ctx.symbols, references, imports: ctx.imports };
 }
 
