@@ -16,6 +16,7 @@ import type {
   PendingBody,
 } from '../extractor.js';
 import { computeComplexity } from '../complexity.js';
+import type { CognitiveOptions } from '../complexity.js';
 
 // Function-like nodes whose bodies contain calls that shouldn't attribute
 // to an enclosing body. walkDecorators uses this subset so it still
@@ -134,6 +135,56 @@ const PY_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
   'boolean_operator',
 ]);
 
+// Python's logical operator is a distinct `boolean_operator` node (NOT the C-family
+// `binary_expression`), so the shared `cFamilyBooleanOperatorKind` reader won't match
+// it. The `operator` field token is `and`/`or` — returned as the run-collapse KIND so
+// `a and b or c` = 2 (per-operator-kind-change, the engine default + sonar-python).
+function pyBooleanOperatorKind(node: Node): string | null {
+  return node.type === 'boolean_operator'
+    ? (node.childForFieldName('operator')?.type ?? null)
+    : null;
+}
+
+// Never-matching sentinel: sonar-python's `flattenOperators` does NOT unwrap
+// parentheses while linearizing a boolean run (it stops at a parenthesized
+// expression), so `(a and b) and c` = 2 — the parenthesized `and` is its own run when
+// the DFS later descends into it. The sentinel makes the engine's skipParens a no-op,
+// the Go/gocognit treatment (NOT TS/Java/complexipy's unwrap). VERIFIED on the oracle.
+const PY_NO_PAREN_SENTINEL = '__py_no_paren__';
+
+// Cognitive-complexity config (SonarSource whitepaper §1.2), VERIFIED-EXACT against
+// sonar-python's `CognitiveComplexityVisitor` (clean-room source read + an oracle diff
+// on flask/django: 0 mismatches on all 5034 functions WITHOUT a nested scope). The pin
+// is sonar-python — SonarQube's own number, and the clean engine fit (vs complexipy's
+// quirks). Key choices, all oracle-confirmed: the `if`/`elif`/`else` chain is a flat
+// sibling list (elifClauseType — the one genuinely-new engine path); `except` SURCHARGES
+// (catchType, like Java); booleans count EVERYWHERE per-operator-kind run with NO paren
+// unwrap; `for`/`while`/`try`-`else` is +1 flat with its body nested (the else_clause
+// dispatch); `match` is 0 STRUCTURAL with case bodies nested (nestOnlyTypes); `with` and
+// the `try` body are NOT nested (pass-through — the divergence from complexipy);
+// loopBodyField nests only the loop body (resolving the loop-header overbump). Nested
+// functions/lambdas/classes are EXCLUDED (PY_SKIP_TYPES is the cognitive boundary) — the
+// per-symbol-model under-count, like the Java anon-class / TS-arrow callback divergence;
+// see CLAUDE.md "Cognitive Complexity Rules".
+const PY_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if_statement',
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  elifClauseType: 'elif_clause',
+  elseClauseType: 'else_clause',
+  loopTypes: new Set(['while_statement', 'for_statement']),
+  loopBodyField: 'body',
+  switchTypes: new Set(),
+  ternaryType: 'conditional_expression',
+  catchType: 'except_clause',
+  nestOnlyTypes: new Set(['match_statement']),
+  labeledJumpTypes: new Set(),
+  hasLabel: () => false,
+  booleanOperatorKind: pyBooleanOperatorKind,
+  parenthesizedType: PY_NO_PAREN_SENTINEL,
+};
+
 export function extractPython(
   tree: Tree,
   content: string,
@@ -163,6 +214,7 @@ export function extractPython(
   computeComplexity(bodies, symbols, {
     decisionNodeTypes: PY_DECISION_NODE_TYPES,
     skipTypes: PY_SKIP_TYPES,
+    cognitive: PY_COGNITIVE_OPTIONS,
   });
   return { symbols, references, imports };
 }

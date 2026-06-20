@@ -38,6 +38,8 @@ const tsxCog = (src: string, name = 'f') => bothCx(src, name, 'tsx', 'src/test.t
 // Go carries both metrics (cognitive added this slice). Wraps `src` in `package p`.
 const goCog = (src: string, name = 'f') =>
   bothCx(`package p\n${src}`, name, 'go', 'src/test.go');
+// Python carries both metrics (cognitive added this slice). sonar-python-aligned.
+const pyCog = (src: string, name = 'f') => bothCx(src, name, 'python', 'src/test.py');
 
 // Java carries BOTH metrics (Phase 3). `src` is one or more member declarations;
 // they're wrapped in `class T { … }`. Returns { cyc, cog } for the named member
@@ -637,5 +639,151 @@ describe('cognitive complexity — Go (gocognit-faithful)', () => {
 
   it('a top-level var func-literal carries its own cognitive number', () => {
     expect(goCog('var f = func(a, b bool) { if a { if b {} } }').cog).toBe(3);
+  });
+});
+
+// Python cognitive is sonar-python-aligned (SonarQube's own number), DELIBERATELY
+// divergent from complexipy (the standalone tool — booleans only in some statement
+// slots, except flat, try/with bodies nested). Every value below is ORACLE-CONFIRMED
+// EXACT against sonar-python 5.5's CognitiveComplexityVisitor (the prototype matched
+// it on all ~5034 functions WITHOUT a nested scope across flask + django; the real
+// extractor matched the prototype 5122/5122). The one divergence — nested
+// functions/lambdas/classes are EXCLUDED (the per-symbol model) — gets its own block.
+describe('cognitive complexity — Python (sonar-python-faithful)', () => {
+  it('omits the trivial value (=0)', () => {
+    expect(pyCog('def f():\n  return 1').cog).toBeUndefined();
+  });
+
+  // --- the if/elif/else chain: head surcharges, each elif/else +1 FLAT, bodies +1.
+  // Python's `alternative` is a flat sibling LIST (elif_clause/else_clause), not a
+  // nested-if chain — the one genuinely-new engine path (elifClauseType). ---
+  it('if/elif/else: head 1+nesting, each elif/else +1 flat', () => {
+    expect(pyCog('def f(a,b):\n  if a:\n    g()\n  elif b:\n    h()\n  else:\n    k()').cog).toBe(3);
+    // head if only → 1.
+    expect(pyCog('def f(a):\n  if a:\n    g()').cog).toBe(1);
+    // two elifs + else: 1 + 1 + 1 + 1 → 4.
+    expect(
+      pyCog('def f(a,b,c):\n  if a:\n    pass\n  elif b:\n    pass\n  elif c:\n    pass\n  else:\n    pass').cog,
+    ).toBe(4);
+  });
+
+  it('nesting surcharge: a 3-deep if is 1+2+3 = 6', () => {
+    expect(pyCog('def f(a,b,c):\n  if a:\n    if b:\n      if c:\n        g()').cog).toBe(6);
+  });
+
+  // --- elif/else bodies nest +1; a control structure inside them surcharges there ---
+  it('elif/else bodies are one level deeper', () => {
+    // if(1) + elif(1) + for in the elif body @ nesting 1 (1+1=2) → 4.
+    expect(pyCog('def f(a,b,xs):\n  if a:\n    pass\n  elif b:\n    for x in xs:\n      g()').cog).toBe(4);
+  });
+
+  it('for/while loops surcharge; body nests', () => {
+    // for(1) + if in the body @1 (2) → 3.
+    expect(pyCog('def f(xs):\n  for x in xs:\n    if x:\n      g()').cog).toBe(3);
+    // while-test booleans count flat: while(1) + a and b(1) → 2.
+    expect(pyCog('def f(a,b):\n  while a and b:\n    g()').cog).toBe(2);
+  });
+
+  // --- except SURCHARGES (1+nesting) like Java — NOT complexipy's flat +1 ---
+  it('except surcharges at the try nesting; try body is not nested', () => {
+    // two except at nesting 0 → 1 + 1 = 2.
+    expect(pyCog('def f():\n  try:\n    g()\n  except A:\n    h()\n  except B:\n    k()').cog).toBe(2);
+    // if(1) + except nested in the if body @1 (1+1=2) → 3. complexipy gives 2 (flat except).
+    expect(pyCog('def f(a):\n  if a:\n    try:\n      g()\n    except E:\n      h()').cog).toBe(3);
+  });
+
+  it('ternary surcharges (1+nesting)', () => {
+    expect(pyCog('def f(a,c,b):\n  return a if c else b').cog).toBe(1);
+  });
+
+  // --- booleans: per-operator-kind run, NO paren unwrap (sonar flattenOperators
+  // stops at parens — like gocognit, unlike complexipy/TS/Java) ---
+  it('boolean runs: +1 per source-order kind change, parens NOT unwrapped', () => {
+    expect(pyCog('def f(a,b):\n  return a and b').cog).toBe(1);
+    expect(pyCog('def f(a,b,c):\n  return a and b and c').cog).toBe(1);
+    expect(pyCog('def f(a,b,c):\n  return a and b or c').cog).toBe(2);
+    // (a and b) is its own run + the outer `and` → 2; sonar does NOT unwrap parens.
+    expect(pyCog('def f(a,b,c):\n  return (a and b) and c').cog).toBe(2);
+    // a&&b&&(c||d)&&(e||f)-style: the &&-spine run once + each parenthesized or → 3.
+    expect(pyCog('def f(a,b,c,d,e,g):\n  return a and b and (c or d) and (e or g)').cog).toBe(3);
+  });
+
+  it('booleans count EVERYWHERE (bare-call statement, comprehension filter)', () => {
+    // bare expression statement — complexipy skips this; sonar-python (and Probe) count it.
+    expect(pyCog('def f(a,b):\n  foo(a and b)').cog).toBe(1);
+    // comprehension filter — complexipy skips; sonar-python counts.
+    expect(pyCog('def f(xs):\n  return [x for x in xs if x and ok(x)]').cog).toBe(1);
+  });
+
+  // --- match: 0 STRUCTURAL (neither match nor case adds +1); case bodies nest +1 ---
+  it('match is 0 structural; case bodies nest', () => {
+    // plain match with trivial case bodies → 0 (omitted).
+    expect(pyCog('def f(x):\n  match x:\n    case 1:\n      g()\n    case _:\n      h()').cog).toBeUndefined();
+    // an if inside a case body is at nesting 1 → 1+1 = 2 (the match contributes 0).
+    expect(pyCog('def f(x,a):\n  match x:\n    case 1:\n      if a:\n        g()').cog).toBe(2);
+  });
+
+  // --- with: NOT nested (sonar-python excludes WITH_STMT) — diverges from complexipy ---
+  it('with body is NOT nested (diverges from complexipy)', () => {
+    // if inside a `with` is at nesting 0 → 1. complexipy nests the with body → 2.
+    expect(pyCog('def f(a):\n  with open("x") as fh:\n    if a:\n      g()').cog).toBe(1);
+  });
+
+  // --- for/while/try `else` clause: +1 flat, body nested (the else_clause dispatch) ---
+  it('for-else / while-else / try-else are +1 flat with their body nested', () => {
+    // for(1) + for-else(1) → 2.
+    expect(pyCog('def f(xs):\n  for x in xs:\n    g()\n  else:\n    h()').cog).toBe(2);
+    // while(1) + while-else(1) → 2 (same else_clause dispatch path as for-else).
+    expect(pyCog('def f(a):\n  while a:\n    g()\n  else:\n    h()').cog).toBe(2);
+    // except @0 (1) + try-else(1) + an if in the else body @1 (2) → 4. try body not nested.
+    expect(pyCog('def f(a):\n  try:\n    g()\n  except E:\n    pass\n  else:\n    if a:\n      h()').cog).toBe(4);
+  });
+
+  // --- loopBodyField resolves the loop-header overbump for Python: a ternary in a
+  // `for` iterable is at the loop's AMBIENT nesting, not bumped. ---
+  it('a structural construct in a loop header is not over-nested (loopBodyField)', () => {
+    // for(1) + the ternary in the iterable @ nesting 0 (1) → 2. (bump-all would give 3.)
+    expect(pyCog('def f(a,xs,ys):\n  for x in (xs if a else ys):\n    g()').cog).toBe(2);
+  });
+
+  // Comment-robustness: comments are NAMED children, so a comment around the else
+  // keyword / in the chain must not change the cognitive value (mirrors the TS block).
+  it('comments in the if/elif/else chain do not change the value', () => {
+    // if(1) + elif(1) + else(1) → 3, with comments interleaved throughout.
+    expect(
+      pyCog('def f(a,b):\n  if a:  # c\n    g()\n  elif b:  # c\n    h()\n  else:  # c\n    k()').cog,
+    ).toBe(3);
+  });
+
+  it('carries both metrics (cyc counts each boolean_operator, cog collapses runs)', () => {
+    // a and b or c: cyclomatic counts each boolean_operator (2 ops → 1+2=3),
+    // cognitive collapses to 2 source-order runs.
+    expect(pyCog('def f(a,b,c):\n  return a and b or c')).toEqual({ cyc: 3, cog: 2 });
+  });
+});
+
+// DOCUMENTED DIVERGENCE (the only one vs sonar-python): nested functions, lambdas,
+// and nested classes are EXCLUDED from the enclosing symbol's cognitive number,
+// because PY_SKIP_TYPES is the cognitive boundary and Probe does not extract them as
+// symbols. sonar-python ROLLS them into the encloser (+1 nesting, with a decorator-
+// wrapper exception). This is the per-symbol model — identical to the Java anon-class
+// and TS-arrow callback under-counts. Magnitude on flask/django: ~2% of functions.
+describe('cognitive complexity — Python nested-scope exclusion (documented divergence)', () => {
+  it('a nested function`s control flow counts toward NOBODY', () => {
+    // outer if(1); inner fn`s if is EXCLUDED. sonar-python would roll it in → 3.
+    expect(pyCog('def f(a):\n  def inner(b):\n    if b:\n      pass\n  if a:\n    pass').cog).toBe(1);
+  });
+
+  it('a lambda body is excluded', () => {
+    // the if(1) counts; the lambda`s booleans do not. sonar-python counts them.
+    expect(pyCog('def f(a):\n  g = lambda x: x and a and a\n  if a:\n    pass').cog).toBe(1);
+  });
+
+  it('a nested class`s method control flow is excluded from the enclosing function', () => {
+    // outer if(1); the nested class method`s if is EXCLUDED (the method isn`t even a
+    // Probe symbol — Probe extracts top-level-class methods only).
+    expect(
+      pyCog('def f(a):\n  class C:\n    def m(self, b):\n      if b:\n        pass\n  if a:\n    pass').cog,
+    ).toBe(1);
   });
 });

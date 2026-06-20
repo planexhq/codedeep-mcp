@@ -62,23 +62,25 @@ export interface ComplexityOptions {
   cyclomaticSkipTypes?: ReadonlySet<string>;
   // COGNITIVE complexity (proposal §1.2): when present, a second nesting-aware
   // walk runs alongside the cyclomatic one and writes `Symbol.cognitiveComplexity`.
-  // Absent ⇒ cognitive stays undefined for that language (the cyclomatic-only
-  // language Python, and the not-yet-done Rust/Swift/Kotlin/Dart/C#/PHP).
-  // Populated for **Java + TS/JS + Go**. The algorithm is the SonarSource
+  // Absent ⇒ cognitive stays undefined for that language (the not-yet-done
+  // Rust/Swift/Kotlin/Dart/C#/PHP).
+  // Populated for **Java + TS/JS + Go + Python**. The algorithm is the SonarSource
   // whitepaper's, clean-room verified against `sonar-java`'s
   // `CognitiveComplexityVisitor` (Java), `eslint-plugin-sonarjs`'s S3776 (TS/JS),
-  // AND `uudashr/gocognit` (Go) — the three analyzers DIVERGE, so the per-language
-  // config differs: a +1 STRUCTURAL increment per break in linear flow, plus a
-  // +1-per-nesting-level SURCHARGE when the flow-breaker is nested. It is NOT
-  // expressible as the flat node-type sets cyclomatic uses (the if/else-if chain,
-  // the catch-at-unbumped-nesting rule, boolean-run collapse, and labeled jumps
-  // need structured handlers), so CognitiveOptions names each construct
-  // explicitly. The OPTIONAL fields below (`elseClauseType`, `initField`,
-  // `nestElseBody`, `booleanRunStarts`, `excludeBooleanRun`, `recursion`) default
-  // to the Java/sonar-java behavior; TS sets `elseClauseType`/`booleanRunStarts`/
-  // `excludeBooleanRun` (SonarJS S3776), Go sets `initField`/`nestElseBody`/
-  // `recursion` + sentinel `parenthesizedType` (gocognit). See computeCognitive
-  // below + CLAUDE.md "Cognitive Complexity Rules".
+  // `uudashr/gocognit` (Go), AND `sonar-python`'s `CognitiveComplexityVisitor`
+  // (Python) — the analyzers DIVERGE, so the per-language config differs: a +1
+  // STRUCTURAL increment per break in linear flow, plus a +1-per-nesting-level
+  // SURCHARGE when the flow-breaker is nested. It is NOT expressible as the flat
+  // node-type sets cyclomatic uses (the if/else-if chain, the catch-at-unbumped-
+  // nesting rule, boolean-run collapse, and labeled jumps need structured handlers),
+  // so CognitiveOptions names each construct explicitly. The OPTIONAL fields below
+  // (`elseClauseType`, `elifClauseType`, `initField`, `nestElseBody`, `loopBodyField`,
+  // `booleanRunStarts`, `excludeBooleanRun`, `recursion`) default to the Java/
+  // sonar-java behavior; TS sets `elseClauseType`/`booleanRunStarts`/`excludeBooleanRun`
+  // (SonarJS S3776), Go sets `initField`/`nestElseBody`/`recursion` + sentinel
+  // `parenthesizedType` (gocognit), Python sets `elifClauseType`/`loopBodyField` +
+  // sentinel `parenthesizedType` (sonar-python). See computeCognitive below +
+  // CLAUDE.md "Cognitive Complexity Rules".
   cognitive?: CognitiveOptions;
 }
 
@@ -101,8 +103,21 @@ export interface CognitiveOptions {
   // UNLIKE tree-sitter-java where `alternative` is the if/block itself). When
   // set, handleAlternative unwraps it (first named child = the real else-if /
   // else body) before the else-if-vs-else test; without it an `else if` would be
-  // mis-read as a nested (surcharged) if. Java/Go/Py leave it unset.
+  // mis-read as a nested (surcharged) if. Java/Go leave it unset. Python sets it
+  // too — but used differently (see elifClauseType): it identifies the terminal
+  // `else_clause` both inside the multi-alternative chain AND as a for/while/try
+  // `else` reached via general descent (the else_clause dispatch in visit).
   elseClauseType?: string;
+  // Python's `if_statement` holds a flat LIST of `elif_clause`/`else_clause`
+  // SIBLINGS under a REPEATED `alternative` field — NOT a nested-if chain (Java),
+  // NOR a single `else_clause` wrapper (TS). When set, handleAlternative iterates
+  // `childrenForFieldName(alternativeField)`, charging +1 FLAT per `elifClauseType`
+  // (its `conditionField` at base nesting for booleans, `consequenceField` body at
+  // nesting+1) and +1 FLAT per `elseClauseType` (body at nesting+1). It ALSO gates
+  // the for/while/try `else_clause` dispatch in visit (a loop/try `else` reached via
+  // general descent — the `if`'s own else is consumed here and the if-case returns).
+  // Java/TS/Go leave it unset (the single-child C-family recursion). Python: 'elif_clause'.
+  elifClauseType?: string;
   // Some grammars put an INITIALIZER statement on the `if` (C-family `if (init;
   // cond)` — Go's `if x := f(); cond {}`). When set, the if-case AND the else-if
   // branch of handleAlternative visit this field at the if's BASE nesting (the
@@ -125,6 +140,17 @@ export interface CognitiveOptions {
   // of case count (the cognitive/cyclomatic divergence) — its case labels add
   // nothing, so only the container type goes here.
   loopTypes: ReadonlySet<string>;
+  // When set, a loop surcharges and nests ONLY this field's child (the body),
+  // visiting all OTHER children (iterable/condition/target, and a for/while-`else`)
+  // at the loop's AMBIENT nesting — matching sonar-python, which nests only the loop
+  // body StatementList. This RESOLVES the loop-header overbump (a nested structural
+  // construct in a loop header — e.g. a ternary in a `for` iterable — would otherwise
+  // be over-surcharged by the bump-all-children default) for the language that sets
+  // it. Unset (Java/TS/Go) keeps the bump-ALL-children behavior (the documented
+  // COG-loopheader-overbump, deferred for those grammars). Python: 'body' (both
+  // `for_statement` and `while_statement` use the `body` field). switch/ternary are
+  // unaffected — sonar-python nests the WHOLE ternary subtree, so they keep bump-all.
+  loopBodyField?: string;
   switchTypes: ReadonlySet<string>;
   ternaryType: string;
   // The catch clause: EACH `catchType` surcharges (+1 + nesting) at its current
@@ -135,9 +161,10 @@ export interface CognitiveOptions {
   // and `finally` add nothing and don't raise nesting, so no parent node needs
   // naming).
   catchType: string;
-  // Raise nesting for the subtree but add NOTHING (lambdas; later: nested fns).
-  // The whitepaper-derived "hybrid +1 flat" hypothesis was WRONG — sonar-java's
-  // visitLambdaExpression does `nesting++; super.visit; nesting--` with no
+  // Raise nesting for the subtree but add NOTHING (lambdas; Go's func_literal;
+  // Python's match_statement — 0 structural with its case bodies nested; later:
+  // nested fns). The whitepaper-derived "hybrid +1 flat" hypothesis was WRONG —
+  // sonar-java's visitLambdaExpression does `nesting++; super.visit; nesting--` with no
   // increment. So a lambda is nesting-only, +0.
   nestOnlyTypes: ReadonlySet<string>;
   // break/continue that count +1 FLAT (no nesting) IFF they jump to a label.
@@ -371,6 +398,15 @@ function computeCognitive(
     if (child) visit(child, nesting, depth + 1);
   };
 
+  // Python's `else_clause` (+1 FLAT, body one level deeper). Shared by BOTH the
+  // handleAlternative path (an `if`'s own terminal else, consumed there so it isn't
+  // re-dispatched) and the visit() dispatch (a for/while/try `else` reached via
+  // general descent) — one helper so the two mutually-exclusive paths can't drift.
+  const visitElseClauseBody = (clause: Node, nesting: number, depth: number): void => {
+    total += 1;
+    for (const child of clause.namedChildren) visit(child, nesting + 1, depth + 1);
+  };
+
   // Walks an `if`'s else/else-if chain. The head `if` is handled by the caller
   // (it surcharges); each link here is +1 FLAT. An `else if` (alternative is
   // another `if`) keeps the chain's base nesting for its own condition and
@@ -381,6 +417,22 @@ function computeCognitive(
     // native stack despite MAX_COGNITIVE_DEPTH (the chain recurses here, not
     // through `visit`).
     if (depth > MAX_COGNITIVE_DEPTH) return;
+    // Python: the `alternative` field is a flat LIST of elif_clause / else_clause
+    // SIBLINGS (not a nested-if chain). Each elif/else is +1 FLAT; the elif
+    // condition stays at base nesting (its booleans are flat anyway), every clause
+    // BODY is one level deeper. No recursion — the clauses are siblings, not nested.
+    if (cog.elifClauseType) {
+      for (const alt of ifNode.childrenForFieldName(cog.alternativeField)) {
+        if (alt.type === cog.elifClauseType) {
+          total += 1;
+          visitField(alt, cog.conditionField, nesting, depth);
+          visitField(alt, cog.consequenceField, nesting + 1, depth);
+        } else if (cog.elseClauseType && alt.type === cog.elseClauseType) {
+          visitElseClauseBody(alt, nesting, depth);
+        }
+      }
+      return;
+    }
     const rawAlt = ifNode.childForFieldName(cog.alternativeField);
     if (!rawAlt) return;
     // Unwrap an else-wrapper node (TS `else_clause`) to the real else-if / else
@@ -435,16 +487,43 @@ function computeCognitive(
       return;
     }
 
-    // --- loops / switch / ternary: surcharge, then ALL children one level deeper ---
-    // KNOWN DIVERGENCE (shared by Java + TS, pre-dates this slice, accepted): sonar
-    // nests ONLY the body/consequent/alternate, NOT the loop header / switch
-    // discriminant / ternary TEST, whereas this bumps every child. So a nested
-    // STRUCTURAL construct in those positions (`switch(a?b:c)`, `(a?b:c)?d:e`,
-    // `for(;cond?a:b;)`) over-counts by the bump. Booleans are flat (unaffected),
-    // and these positions rarely hold control flow — 0 cases in the 800-fn TS oracle
-    // (ky/zod/recharts/express) or gson. A precise fix needs per-construct body
-    // fields + re-oracling Java; deferred to a dedicated engine pass.
-    if (cog.loopTypes.has(t) || cog.switchTypes.has(t) || t === cog.ternaryType) {
+    // --- for/while/try `else` clause (Python): +1 flat, body one level deeper.
+    // Gated on elifClauseType (Python mode). The `if`'s OWN else is consumed by
+    // handleAlternative (the if-case returns), so this fires only for a loop/try
+    // `else_clause` reached via general descent — matching sonar-python's
+    // `visitElseClause` (+1 flat) with the else body StatementList nesting one level. ---
+    if (cog.elifClauseType && cog.elseClauseType && t === cog.elseClauseType) {
+      visitElseClauseBody(node, nesting, depth);
+      return;
+    }
+
+    // --- loops: surcharge, then nest the body. With loopBodyField set (Python),
+    // ONLY the body child nests and the iterable/condition/target/`else` stay at the
+    // loop's ambient nesting (sonar-python). Without it, ALL children nest — the
+    // KNOWN DIVERGENCE (Java/TS/Go, accepted): sonar nests ONLY the body, not the
+    // loop header, so a nested STRUCTURAL construct in the header (`for(;cond?a:b;)`)
+    // over-counts; booleans are flat (unaffected) and headers rarely hold control
+    // flow (0 cases in the TS/gson/gocognit oracles). The precise per-construct-body
+    // fix landed for Python (loopBodyField); generalizing it needs re-oracling the
+    // other grammars, deferred. ---
+    if (cog.loopTypes.has(t)) {
+      total += 1 + nesting;
+      const bodyChild = cog.loopBodyField ? node.childForFieldName(cog.loopBodyField) : null;
+      for (const child of node.namedChildren) {
+        const inner = cog.loopBodyField
+          ? bodyChild && child.id === bodyChild.id
+            ? nesting + 1
+            : nesting
+          : nesting + 1;
+        visit(child, inner, depth + 1);
+      }
+      return;
+    }
+
+    // --- switch / ternary: surcharge, then ALL children one level deeper. (sonar
+    // nests the WHOLE ternary subtree — incl. its test — so bump-all is correct for
+    // a ternary; the header-overbump caveat above applies to switch discriminants.) ---
+    if (cog.switchTypes.has(t) || t === cog.ternaryType) {
       total += 1 + nesting;
       for (const child of node.namedChildren) visit(child, nesting + 1, depth + 1);
       return;
@@ -494,8 +573,8 @@ function computeCognitive(
             // namedChild(0)/(1): a comment interleaved around the operator
             // (`a && /*c*/ b`) is a named child, so positional access would
             // read the comment as the right operand and drop a parenthesized
-            // sub-run. Every logical node in the cognitive grammars (Java/TS
-            // `binary_expression`) exposes `left`/`right`.
+            // sub-run. Every logical node in the cognitive grammars (Java/TS/Go
+            // `binary_expression`, Python `boolean_operator`) exposes `left`/`right`.
             flatten(inner.childForFieldName('left'), d + 1);
             run.push(inner);
             flatten(inner.childForFieldName('right'), d + 1);

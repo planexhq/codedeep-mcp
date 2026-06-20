@@ -23,6 +23,15 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v13: per-symbol COGNITIVE complexity now also computed for Python (`.py`),
+// VERIFIED-EXACT against sonar-python's CognitiveComplexityVisitor (0 mismatches on
+// all ~5034 functions WITHOUT a nested scope across flask + django; differs from
+// complexipy — sonar-python-aligned: `except` surcharges, booleans count everywhere
+// with no paren-unwrap, `with`/`try` bodies are not nested, `match` is 0 structural,
+// loop bodies nest via loopBodyField). Nested fns/lambdas/classes are excluded (the
+// per-symbol model). Adding the field to Python symbols is an extraction-logic change
+// `isUnchanged` (mtime/size/language) can't detect, so the bump force-invalidates
+// warm caches.
 // v12: per-symbol COGNITIVE complexity now also computed for Go (`.go`),
 // VERIFIED-EXACT against uudashr/gocognit (376/376 functions: cobra 157 + gin 213
 // + a synthetic edge-case fixture 6; differs
@@ -60,7 +69,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both
