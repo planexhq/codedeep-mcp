@@ -18,6 +18,8 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
+import { computeComplexity } from '../complexity.js';
+import type { CognitiveOptions } from '../complexity.js';
 
 // Nested `func` declarations create their own scope — their calls must NOT
 // attribute to an enclosing body, so they're pruned from the body walk (and
@@ -180,6 +182,115 @@ const SWIFT_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
   'removeValue', 'sink', 'store', 'receive', 'assign',
 ]);
 
+// === Complexity (cyclomatic + cognitive) ===
+// CYCLOMATIC pins SwiftLint's `cyclomatic_complexity` (the exact runnable oracle;
+// counts guard/catch — Swift's dominant constructs — the gocyclo/rust-code-analysis
+// precedent of pinning the community tool rather than a closed analyzer). Each
+// node here adds +1: `if`/`else if` (if_statement), the three loops, `guard`, each
+// `catch_block`, and EVERY switch case INCL. `default` (switch_entry covers both).
+// SwiftLint does NOT count `&&`/`||`, ternary, or `??` — so Swift is the only Probe
+// language without cyclomatic booleans (cognitive still counts them). A `fallthrough`
+// subtracts 1 (cancelling the case it falls through from) via `cyclomaticDecrement`
+// at the call site. Nested funcs are skipped (SWIFT_SKIP_TYPES); closures
+// (lambda_literal) are descended, so their branches count toward the enclosing
+// function (the gocyclo / Go func_literal closure model).
+const SWIFT_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'if_statement', 'for_statement', 'while_statement', 'repeat_while_statement',
+  'guard_statement', 'catch_block', 'switch_entry',
+]);
+
+// `&&`/`||` are DISTINCT node types in tree-sitter-swift (not a C-family
+// binary_expression with an operator field), so the shared cFamilyBooleanOperatorKind
+// can't read them — Swift needs its own reader. `??` (nil_coalescing_expression) is
+// NOT a logical operator → null (uncounted, like the whitepaper's &&/|| scope).
+function swiftBooleanOperatorKind(node: Node): string | null {
+  if (node.type === 'conjunction_expression') return '&&';
+  if (node.type === 'disjunction_expression') return '||';
+  return null;
+}
+
+// COGNITIVE pins the SonarSource whitepaper (no published cognitive spec for Swift
+// exists, so there is no tool oracle; validated
+// against hand-computed whitepaper fixtures, NOT a tool diff).
+const SWIFT_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if_statement',
+  conditionField: 'condition',
+  // Swift's if_statement is POSITIONAL (no consequence/alternative field) — the
+  // engine routes to its positional handler when ifPositionalBlockType is set, and
+  // consequenceField/alternativeField are unused there (placeholders).
+  consequenceField: '__swift_unused__',
+  alternativeField: '__swift_unused__',
+  ifPositionalBlockType: 'statements',
+  // The `else` KEYWORD (a named token) — splits the consequence from the else branch so
+  // an EMPTY `{}` consequence/else body doesn't drop the else's +1 (an empty block emits
+  // no `statements` node, so the else must be detected by the keyword, not a 2nd block).
+  elseKeywordType: 'else',
+  loopTypes: new Set(['for_statement', 'while_statement', 'repeat_while_statement']),
+  // loopBodyField UNSET → bump-all (Swift loop headers hold only expressions, so the
+  // accepted loop-header overbump never bites — booleans there are flat anyway).
+  switchTypes: new Set(['switch_statement']), // whole switch +1, cases nest
+  ternaryType: 'ternary_expression',
+  catchType: 'catch_block', // each catch surcharges; do_statement is pass-through
+  // Closures raise nesting +0 and are descended (Go func_literal rule; matches the
+  // extractor, which also descends lambda_literal for call resolution).
+  nestOnlyTypes: new Set(['lambda_literal']),
+  // break/continue/return/fallthrough are ALL `control_transfer_statement`; only a
+  // labeled break/continue (the keyword + a simple_identifier `result`) is +1 flat.
+  // `return x` also has a `result`, so the keyword gate is required.
+  labeledJumpTypes: new Set(['control_transfer_statement']),
+  hasLabel: (n) => {
+    const kw = n.child(0)?.text;
+    if (kw !== 'break' && kw !== 'continue') return false;
+    return n.childForFieldName('result')?.type === 'simple_identifier';
+  },
+  booleanOperatorKind: swiftBooleanOperatorKind,
+  // conjunction/disjunction nodes use lhs/rhs operand fields (not left/right).
+  booleanLeftField: 'lhs',
+  booleanRightField: 'rhs',
+  // No-unwrap SENTINEL: a parenthesized boolean is its own run (`(a&&b)&&c`=2, the
+  // gocognit/sonar-python convention). tree-sitter-swift wraps parens in a
+  // `tuple_expression`, which the engine's skipParens would mis-unwrap (it takes
+  // namedChild(0) with no single-element guard, so a real 2-tuple `(a,b)` or a
+  // leading comment would be misread) — and there is NO oracle to pin unwrap-vs-not,
+  // so the safe choice is no unwrap.
+  parenthesizedType: '__swift_no_paren__',
+  // `guard` = +1 FLAT (descend at same nesting): the irrefutable-binding analog of
+  // Rust's let-else, and Swift's nesting-REDUCING idiom (guard exists to AVOID the
+  // nesting an `if let` would add), so no surcharge. Its condition's `&&`/`||` are
+  // still counted (flatIncrement descends children). A whitepaper-PRINCIPLE pin — no
+  // Swift cognitive oracle exists, so this is documented and fixture-pinned.
+  flatIncrement: (n) => n.type === 'guard_statement',
+};
+
+// A `fallthrough` STATEMENT triggers SwiftLint's `complexity -= 1` (it cancels the +1
+// of the switch case it falls through from — the two cases are one path).
+// tree-sitter-swift parses `fallthrough` in TWO shapes depending on context, and the
+// cyclomatic DFS only walks NAMED children, so both must be detected at a VISITED node:
+//   (A) ALONE in a block — a case whose ONLY statement is `fallthrough`, or a
+//       `fallthrough` nested inside an if/loop/do (even alongside siblings THERE): a
+//       NAMED `simple_identifier` text `fallthrough` whose parent is `statements`.
+//       The parent gate is REQUIRED: `fallthrough` is reserved ONLY as a statement, so
+//       a member/property/enum-case name or labeled arg (`o.fallthrough()`,
+//       `E.fallthrough`, `f(fallthrough:)`) is ALSO a `simple_identifier` text
+//       `fallthrough` but sits under `navigation_suffix`/`value_argument_label`, not
+//       `statements` — without the gate those spuriously decrement (oracle-confirmed).
+//   (B) a case body's TOP-LEVEL statement alongside siblings (`case 1: work();
+//       fallthrough`): an ANONYMOUS `fallthrough` node, a DIRECT child of
+//       `switch_entry`, which is NOT a `simple_identifier` AND not a NAMED child (so the
+//       DFS never visits it). Detected on the `switch_entry` itself (a visited decision
+//       node, +1): a switch_entry with a direct `fallthrough` child nets to 0.
+// Both shapes decrement exactly once per fallthrough (a case falls through at most once;
+// shape A is under `statements`, shape B is a direct switch_entry child — never both).
+function swiftFallthroughDecrement(n: Node): boolean {
+  if (n.type === 'simple_identifier') {
+    return n.text === 'fallthrough' && n.parent?.type === 'statements';
+  }
+  if (n.type === 'switch_entry') {
+    return n.children.some((c) => c?.type === 'fallthrough');
+  }
+  return false;
+}
+
 // Per-file duplicate-id disambiguation. Two trait-conformance methods, or an
 // extension method duplicating a type method, can be byte-identical in
 // (name, kind, signature, qualifier). Repeats get an ordinal qualifier; ids
@@ -239,6 +350,15 @@ export function extractSwift(
       ignoredMemberCallees: SWIFT_IGNORED_MEMBER_CALLEES,
     },
   );
+  // Per-symbol cyclomatic + cognitive complexity, computed while the tree is alive
+  // (the same boundary as resolveCalls: nested funcs skipped, closures descended).
+  computeComplexity(ctx.bodies, ctx.symbols, {
+    decisionNodeTypes: SWIFT_DECISION_NODE_TYPES,
+    skipTypes: SWIFT_SKIP_TYPES,
+    // SwiftLint's `fallthrough` −1 — see swiftFallthroughDecrement (two parse shapes).
+    cyclomaticDecrement: swiftFallthroughDecrement,
+    cognitive: SWIFT_COGNITIVE_OPTIONS,
+  });
   return { symbols: ctx.symbols, references, imports: ctx.imports };
 }
 

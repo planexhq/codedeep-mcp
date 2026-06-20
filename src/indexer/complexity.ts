@@ -67,15 +67,27 @@ export interface ComplexityOptions {
   // itself (SonarJS-aligned) and Go intentionally descends closures
   // (gocyclo-aligned), so neither sets this.
   cyclomaticSkipTypes?: ReadonlySet<string>;
+  // Optional per-node −1 cyclomatic adjustment. A node it returns true for
+  // SUBTRACTS 1 from the count (the only decrement path). It exists for
+  // SwiftLint's `fallthrough` rule: each `fallthrough` does `complexity -= 1`,
+  // cancelling the +1 of the `case` it falls through from (the two cases form one
+  // path). Swift sets it to a `simple_identifier` whose text is `fallthrough` (a
+  // reserved keyword, so it can't be a real identifier). The running count is
+  // floored at 0 before `1 + count`, so a stray decrement (a `fallthrough` in a
+  // broken parse) can't drive complexity below 1. The 6 other languages leave it
+  // unset (their count never decrements).
+  cyclomaticDecrement?: (node: Node) => boolean;
   // COGNITIVE complexity (proposal §1.2): when present, a second nesting-aware
   // walk runs alongside the cyclomatic one and writes `Symbol.cognitiveComplexity`.
   // Absent ⇒ cognitive stays undefined for that language (the not-yet-done
-  // Swift/Kotlin/Dart/C#/PHP).
-  // Populated for **Java + TS/JS + Go + Python + Rust**. The algorithm is the SonarSource
-  // whitepaper's, clean-room verified against `sonar-java`'s
+  // Kotlin/Dart/C#/PHP).
+  // Populated for **Java + TS/JS + Go + Python + Rust + Swift**. The algorithm is the
+  // SonarSource whitepaper's, clean-room verified against `sonar-java`'s
   // `CognitiveComplexityVisitor` (Java), `eslint-plugin-sonarjs`'s S3776 (TS/JS),
   // `uudashr/gocognit` (Go), AND `sonar-python`'s `CognitiveComplexityVisitor`
-  // (Python) — the analyzers DIVERGE, so the per-language config differs: a +1
+  // (Python) — the analyzers DIVERGE, so the per-language config differs (Swift has NO
+  // open cognitive analyzer to oracle against, so it is hand-pinned to the
+  // whitepaper). The algorithm: a +1
   // STRUCTURAL increment per break in linear flow, plus a +1-per-nesting-level
   // SURCHARGE when the flow-breaker is nested. It is NOT expressible as the flat
   // node-type sets cyclomatic uses (the if/else-if chain, the catch-at-unbumped-
@@ -88,7 +100,10 @@ export interface ComplexityOptions {
   // + sentinel `parenthesizedType` (gocognit), Python sets `elifClauseType`/
   // `loopBodyField` + sentinel `parenthesizedType` (sonar-python), Rust sets
   // `elseClauseType` (the TS unwrap) + `flatIncrement` (let-else) and unwraps
-  // `parenthesized_expression` (whitepaper/sonar-rust). See computeCognitive below +
+  // `parenthesized_expression` (whitepaper/sonar-rust), Swift sets `ifPositionalBlockType`
+  // (its `if` has no consequence/alternative field) + `booleanLeftField`/`booleanRightField`
+  // (`lhs`/`rhs` on its distinct conjunction/disjunction nodes) + `flatIncrement` (guard) +
+  // a sentinel `parenthesizedType` (no-unwrap). See computeCognitive below +
   // CLAUDE.md "Cognitive Complexity Rules".
   cognitive?: CognitiveOptions;
 }
@@ -96,7 +111,7 @@ export interface ComplexityOptions {
 // Per-construct node-type config for the cognitive walk. Each field is a
 // tree-sitter node TYPE name (or set of names) for one whitepaper construct
 // category; the SHARED algorithm in computeCognitive is language-agnostic, only
-// the names differ per grammar. Currently filled for Java, TS/JS, and Go.
+// the names differ per grammar. Filled for Java, TS/JS, Go, Python, Rust, and Swift.
 export interface CognitiveOptions {
   // The `if` node + the field names used to walk its chain. `else if` is detected
   // structurally: the `alternative` field holding another `ifType` node is an
@@ -127,6 +142,26 @@ export interface CognitiveOptions {
   // general descent — the `if`'s own else is consumed here and the if-case returns).
   // Java/TS/Go leave it unset (the single-child C-family recursion). Python: 'elif_clause'.
   elifClauseType?: string;
+  // POSITIONAL `if` shape (Swift): the grammar's `if_statement` has NO
+  // consequence/alternative field — the consequence is a positional block child of
+  // this type, an `else if` is a sibling `ifType` child, and a plain `else` body is a
+  // block child of this type AFTER the `else` keyword (see elseKeywordType). When set,
+  // the if-case routes to a positional handler: surcharge the head if, visit ALL
+  // `childrenForFieldName(conditionField)` (plural — Swift allows `if a, let b = c`)
+  // at base nesting, visit the consequence block (before `else`) at nesting+1, then the
+  // flat else/else-if chain (each +1, no surcharge; bodies nest).
+  // `consequenceField`/`alternativeField` are unused in this mode. The other languages
+  // leave it unset (field-based if). Swift: 'statements'.
+  ifPositionalBlockType?: string;
+  // The `else` KEYWORD node type for the positional-if handler (Swift: 'else', a
+  // NAMED token). It is the ONLY reliable signal that an else clause EXISTS: an empty
+  // `{}` block emits NO `ifPositionalBlockType` node, so inferring the else from a
+  // second block child silently drops the `+1 FLAT` whenever the consequence OR the
+  // else body is empty (`if c {} else {x}`, `if c {x} else {}`). The handler splits the
+  // namedChildren at this keyword: the consequence is the block child BEFORE it, the
+  // else branch (an `ifType` else-if, or a block else body that MAY be absent) is
+  // AFTER it. Required alongside ifPositionalBlockType. Other languages leave it unset.
+  elseKeywordType?: string;
   // Some grammars put an INITIALIZER statement on the `if` (C-family `if (init;
   // cond)` — Go's `if x := f(); cond {}`). When set, the if-case AND the else-if
   // branch of handleAlternative visit this field at the if's BASE nesting (the
@@ -186,6 +221,15 @@ export interface CognitiveOptions {
   // run — `a&&b&&c`=1, `a&&b||c`=2, and crucially `a&&b&&(c||d)&&(e||f)`=4 (the
   // operator sequence &&,&&,||,&&,|| has 4 runs). Only kind EQUALITY is compared.
   booleanOperatorKind: (node: Node) => string | null;
+  // The FIELD names of a logical node's two operands, read while linearizing a
+  // boolean run. DEFAULT `'left'`/`'right'` (Java/TS/Go `binary_expression` and
+  // Python `boolean_operator` all use those). Swift's `conjunction_expression`/
+  // `disjunction_expression` use `'lhs'`/`'rhs'`, so it sets these — without them
+  // the run-collapse reads null operands and mis-counts (`a && b && c` would not
+  // collapse to one run). Read by FIELD (not positionally) so an interleaved
+  // comment can't shift the operands.
+  booleanLeftField?: string;
+  booleanRightField?: string;
   // Decides whether a flattened boolean-run node STARTS a counted +1, given its
   // operator `kind` and the previous flattened node's `prevKind` (null at the run
   // start). DEFAULT (sonar-java / current behavior) = `prevKind === null ||
@@ -331,6 +375,7 @@ export function computeComplexity(
       const node = stack.pop()!;
       if (opts.decisionNodeTypes.has(node.type)) count++;
       else if (opts.extraDecisionPredicate?.(node)) count++;
+      if (opts.cyclomaticDecrement?.(node)) count--; // SwiftLint fallthrough −1
       for (const child of node.namedChildren) {
         if (!cycSkip.has(child.type)) stack.push(child);
       }
@@ -347,8 +392,9 @@ export function computeComplexity(
   }
 
   for (const [id, count] of decisionPoints) {
-    if (count === 0) continue; // complexity 1 → omit (kept clean in JSON)
-    byId.get(id)!.complexity = Math.min(1 + count, COMPLEXITY_CAP);
+    const dp = Math.max(0, count); // floor: a SwiftLint `fallthrough` −1 in a broken
+    if (dp === 0) continue; // parse can't drive complexity below 1; trivial omitted
+    byId.get(id)!.complexity = Math.min(1 + dp, COMPLEXITY_CAP);
   }
   if (cognitivePoints) {
     for (const [id, points] of cognitivePoints) {
@@ -410,6 +456,10 @@ function computeCognitive(
   // (sonar-java). TS overrides to count only `&&`-run-starts (SonarJS S3776).
   const runStarts =
     cog.booleanRunStarts ?? ((kind: string, prev: string | null) => prev === null || prev !== kind);
+  // Logical-operand field names: default left/right; Swift's conjunction/disjunction
+  // nodes use lhs/rhs.
+  const leftField = cog.booleanLeftField ?? 'left';
+  const rightField = cog.booleanRightField ?? 'right';
 
   const visitField = (node: Node, field: string, nesting: number, depth: number): void => {
     const child = node.childForFieldName(field);
@@ -478,6 +528,42 @@ function computeCognitive(
     }
   };
 
+  // Swift's POSITIONAL `if` (cog.ifPositionalBlockType set): no consequence/
+  // alternative field. Conditions are `conditionField` children (possibly several:
+  // `if a, let b = c`); the consequence is the block child BEFORE the `else` keyword;
+  // the else branch (an `ifType` else-if, or a plain-else block AFTER `else`) is split
+  // off at the `else` keyword (elseKeywordType) — NOT inferred from a second block
+  // child, because an empty `{}` body emits NO block node, which would otherwise drop
+  // the `+1 FLAT` for an empty-consequence or empty-else branch. The head if's surcharge
+  // is added by the caller; this walks the conditions (base nesting, booleans flat), the
+  // consequence (nesting+1), and the FLAT else/else-if chain (each +1, no surcharge —
+  // recurses for else-if WITHOUT a head surcharge). Depth-guarded like handleAlternative
+  // (a long else-if chain recurses here, not through `visit`).
+  const visitPositionalIfBody = (ifNode: Node, nesting: number, depth: number): void => {
+    if (depth > MAX_COGNITIVE_DEPTH) return;
+    for (const cond of ifNode.childrenForFieldName(cog.conditionField)) {
+      visit(cond, nesting, depth + 1);
+    }
+    const blockType = cog.ifPositionalBlockType!;
+    const kids = ifNode.namedChildren;
+    // The `else` keyword (a named token) signals the else clause and splits the body
+    // from it — even when either block is the empty `{}` that emits no block node.
+    const elseIdx = cog.elseKeywordType ? kids.findIndex((c) => c.type === cog.elseKeywordType) : -1;
+    const beforeElse = elseIdx === -1 ? kids : kids.slice(0, elseIdx);
+    const consequence = beforeElse.find((c) => c.type === blockType);
+    if (consequence) visit(consequence, nesting + 1, depth + 1);
+    if (elseIdx === -1) return; // no else clause
+    total += 1; // else / else-if: +1 FLAT, no surcharge
+    const afterElse = kids.slice(elseIdx + 1);
+    const elseIf = afterElse.find((c) => c.type === cog.ifType);
+    if (elseIf) {
+      visitPositionalIfBody(elseIf, nesting, depth + 1); // recurse the chain
+    } else {
+      const elseBody = afterElse.find((c) => c.type === blockType);
+      if (elseBody) visit(elseBody, nesting + 1, depth + 1); // may be absent (empty else)
+    }
+  };
+
   function visit(node: Node, nesting: number, depth: number): void {
     if (depth > MAX_COGNITIVE_DEPTH) return;
     const t = node.type;
@@ -498,10 +584,15 @@ function computeCognitive(
     // --- if / else-if / else chain (head if surcharges; chain links are flat) ---
     if (t === cog.ifType) {
       total += 1 + nesting;
-      if (cog.initField) visitField(node, cog.initField, nesting, depth);
-      visitField(node, cog.conditionField, nesting, depth);
-      visitField(node, cog.consequenceField, nesting + 1, depth);
-      handleAlternative(node, nesting, depth);
+      if (cog.ifPositionalBlockType) {
+        // Swift: positional consequence/else (no fields). See visitPositionalIfBody.
+        visitPositionalIfBody(node, nesting, depth);
+      } else {
+        if (cog.initField) visitField(node, cog.initField, nesting, depth);
+        visitField(node, cog.conditionField, nesting, depth);
+        visitField(node, cog.consequenceField, nesting + 1, depth);
+        handleAlternative(node, nesting, depth);
+      }
       return;
     }
 
@@ -593,15 +684,17 @@ function computeCognitive(
           const inner = skipParens(n, cog.parenthesizedType);
           if (inner && cog.booleanOperatorKind(inner) !== null) {
             counted.add(inner.id);
-            // Operands via the `left`/`right` FIELDS, not positional
+            // Operands via the operand FIELDS (default `left`/`right`, Swift
+            // `lhs`/`rhs` via booleanLeftField/booleanRightField), not positional
             // namedChild(0)/(1): a comment interleaved around the operator
-            // (`a && /*c*/ b`) is a named child, so positional access would
-            // read the comment as the right operand and drop a parenthesized
-            // sub-run. Every logical node in the cognitive grammars (Java/TS/Go
-            // `binary_expression`, Python `boolean_operator`) exposes `left`/`right`.
-            flatten(inner.childForFieldName('left'), d + 1);
+            // (`a && /*c*/ b`) is a named child, so positional access would read
+            // the comment as the right operand and drop a parenthesized sub-run.
+            // Every logical node so far (Java/TS/Go/Rust `binary_expression`,
+            // Python `boolean_operator`, Swift `conjunction_expression`/
+            // `disjunction_expression`) exposes a left/right operand field pair.
+            flatten(inner.childForFieldName(leftField), d + 1);
             run.push(inner);
-            flatten(inner.childForFieldName('right'), d + 1);
+            flatten(inner.childForFieldName(rightField), d + 1);
           }
         };
         flatten(node, depth); // marks the whole subtree `counted`

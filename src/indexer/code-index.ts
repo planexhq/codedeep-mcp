@@ -23,6 +23,21 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v15: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for Swift
+// (`.swift`) — BOTH metrics in one slice (the Java/Rust pattern). CYCLOMATIC is
+// pinned to SwiftLint's `cyclomatic_complexity` (the open, runnable oracle — the
+// gocyclo/rust-code-analysis precedent of pinning the community tool; SwiftLint counts `guard`/`catch`/the 3
+// loops/every switch case incl. `default`, `fallthrough` −1, and skips nested
+// func/init; it does NOT count `&&`/`||`/ternary/`??`, so Swift is the only Probe
+// language without cyclomatic booleans). COGNITIVE is SonarSource-whitepaper-aligned
+// (no published cognitive spec for Swift exists, so there is no
+// tool oracle; validated against
+// hand-computed whitepaper fixtures). `guard` is +1 FLAT (the Rust let-else analog /
+// Swift's nesting-reducing idiom). Swift's `if` is positional (no consequence/
+// alternative field — a new engine path) and its booleans are distinct
+// conjunction/disjunction nodes with lhs/rhs operands. Adding the fields to Swift
+// symbols is an extraction-logic change `isUnchanged` (mtime/size/language) can't
+// detect, so the bump force-invalidates warm caches.
 // v14: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for Rust
 // (`.rs`) — the first of the remaining 6 languages to get BOTH metrics at once.
 // CYCLOMATIC is pinned to Mozilla's `rust-code-analysis` (the `rust-code-analysis-cli`
@@ -82,7 +97,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both

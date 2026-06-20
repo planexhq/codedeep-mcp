@@ -43,6 +43,10 @@ const pyCog = (src: string, name = 'f') => bothCx(src, name, 'python', 'src/test
 // Rust carries both metrics: cyclomatic pinned to rust-code-analysis, cognitive
 // whitepaper/sonar-rust-aligned. `src` is one or more top-level items.
 const rustCog = (src: string, name = 'f') => bothCx(src, name, 'rust', 'src/test.rs');
+// Swift carries both metrics: cyclomatic pinned to SwiftLint cyclomatic_complexity,
+// cognitive whitepaper-aligned (no published Swift cognitive spec). `src` is one or more
+// top-level declarations (a function `f` unless noted).
+const swiftCog = (src: string, name = 'f') => bothCx(src, name, 'swift', 'src/test.swift');
 
 // Java carries BOTH metrics (Phase 3). `src` is one or more member declarations;
 // they're wrapped in `class T { … }`. Returns { cyc, cog } for the named member
@@ -922,5 +926,192 @@ describe('complexity — Rust (rust-code-analysis cyclomatic / whitepaper cognit
   it('a closure raises nesting (+0 itself) and rolls its control flow in', () => {
     // closure nests its body: if-a at nesting 1(+2) + if-b at nesting 2(+3) = 5.
     expect(rustCog('fn f(a: bool) { let g = || if a { if b() { x(); } }; }').cog).toBe(5);
+  });
+});
+
+// Swift — CYCLOMATIC pinned to SwiftLint's `cyclomatic_complexity` (the only EXACT
+// runnable oracle; its ComplexityVisitor counts if/else-if, the 3 loops, guard, each
+// catch, every switch case incl. default, `fallthrough` −1; it does NOT count
+// `&&`/`||`/ternary/`??`). Every cyc value below is what SwiftLint reports + 1 (Probe's
+// base; SwiftLint's visitor starts at 0). COGNITIVE is SonarSource-whitepaper-aligned
+// (no published cognitive spec for Swift — no tool oracle; values hand-computed from the
+// whitepaper). Each `it` notes the derivation.
+describe('cyclomatic complexity — Swift (SwiftLint cyclomatic_complexity)', () => {
+  it('a trivial function omits complexity (decisions 0 → complexity 1)', () => {
+    expect(swiftCog('func f() { g() }').cyc).toBeUndefined();
+  });
+
+  it('`if` + each `else if` count; plain `else` does not', () => {
+    expect(swiftCog('func f(a: Int) { if a > 0 { g() } }').cyc).toBe(2);
+    // if + else-if = 2 decisions (the plain else adds nothing) → cyc 3.
+    expect(swiftCog('func f(a: Int) { if a > 0 { g() } else if a < 0 { h() } else { k() } }').cyc).toBe(3);
+  });
+
+  it('`guard` counts +1 (SwiftLint; some cyclomatic rules would NOT)', () => {
+    expect(swiftCog('func f(x: Int?) { guard let y = x else { return }; use(y) }').cyc).toBe(2);
+  });
+
+  it('for / while / repeat each count +1', () => {
+    expect(swiftCog('func f(xs: [Int]) { for x in xs { g() }; while c { h() }; repeat { k() } while c }').cyc).toBe(4);
+  });
+
+  it('every switch case counts +1 INCLUDING default; a multi-pattern case is ONE', () => {
+    // case 1 + case 2 + default = 3 entries → cyc 4.
+    expect(swiftCog('func f(x: Int) { switch x { case 1: a(); case 2: b(); default: c() } }').cyc).toBe(4);
+    // case 1,2,3 (ONE entry) + default = 2 entries → cyc 3.
+    expect(swiftCog('func f(x: Int) { switch x { case 1, 2, 3: a(); default: b() } }').cyc).toBe(3);
+  });
+
+  it('`fallthrough` subtracts 1 — BOTH parse shapes (oracle-confirmed vs SwiftLint)', () => {
+    // case 1 nets 0 (+1 case, −1 fallthrough), case 2 (+1) = 1 decision → cyc 2.
+    // Shape A — `fallthrough` ALONE in the case: a named simple_identifier under
+    // `statements` (SwiftLint raw 1).
+    expect(swiftCog('func f(x: Int) { switch x { case 1: fallthrough; case 2: g() } }').cyc).toBe(2);
+    // Shape B — work THEN `fallthrough` (the common real pattern): `fallthrough` is an
+    // ANONYMOUS node, a DIRECT child of switch_entry, never visited by the namedChildren
+    // DFS — so it's detected on the switch_entry itself (SwiftLint raw 1, cyc 2).
+    expect(swiftCog('func f(x: Int) { switch x { case 1: a(); fallthrough; case 2: g() } }').cyc).toBe(2);
+  });
+
+  it('the `fallthrough` −1 fires ONLY for the statement, not a member/arg named fallthrough', () => {
+    // `fallthrough` is reserved only AS A STATEMENT (parent `statements`); as a method/
+    // property/enum-case name or labeled arg it is a plain identifier and must NOT
+    // decrement. Each body below has exactly one `if` → SwiftLint complexity 1 → cyc 2.
+    expect(swiftCog('func f(o: O) { if c { o.fallthrough() } }').cyc).toBe(2); // method call
+    expect(swiftCog('func f(o: O) { if c { let v = o.fallthrough; use(v) } }').cyc).toBe(2); // property
+    expect(swiftCog('func f() { if c { let v = E.fallthrough; use(v) } }').cyc).toBe(2); // enum case
+    expect(swiftCog('func f(o: O) { if c { o.g(fallthrough: 1) } }').cyc).toBe(2); // labeled arg
+    // …while a genuine statement-position fallthrough inside a nested `if` in a case
+    // STILL decrements: case(+1) + if(+1) − fallthrough(−1) + default(+1) = 2 → cyc 3.
+    expect(swiftCog('func f(x: Int) { switch x { case 1: if c { fallthrough }; default: g() } }').cyc).toBe(3);
+  });
+
+  it('each `catch` clause counts +1 (the `do` itself does not)', () => {
+    expect(swiftCog('func f() { do { try g() } catch let e { h(e) } catch { k() } }').cyc).toBe(3);
+  });
+
+  it('`&&`/`||`, ternary, and `??` are NOT counted cyclomatically (SwiftLint)', () => {
+    // The `if` is the only decision; the && / || inside its condition add nothing.
+    expect(swiftCog('func f(a: Bool, b: Bool, c: Bool) { if a && b || c { g() } }').cyc).toBe(2);
+    // A ternary + nil-coalescing with no branch statement is trivial.
+    expect(swiftCog('func f(a: Bool, b: Int?) -> Int { return a ? 1 : (b ?? 0) }').cyc).toBeUndefined();
+  });
+
+  it('closures are DESCENDED (their branches count toward the enclosing function)', () => {
+    expect(swiftCog('func f(xs: [Int]) { xs.forEach { x in if x > 0 { g() } } }').cyc).toBe(2);
+  });
+
+  it('a nested `func` is its own scope (its branches do NOT count toward the parent)', () => {
+    expect(swiftCog('func f() { func g() { if a { h() } }; k() }').cyc).toBeUndefined();
+  });
+
+  it('all method-kind decls (func/method/init/deinit/subscript) ARE measured; computed properties are NOT', () => {
+    // init + method + subscript + deinit are all 'method'-kind → measured by the
+    // {function,method} gate. NOTE: only func+init match SwiftLint's rule scope; Probe
+    // ADDITIONALLY measures subscripts/deinit (same algorithm, extra coverage beyond
+    // SwiftLint — NOT an oracle divergence on the NUMBER, just on which decls report).
+    expect(swiftCog('struct S { init(a: Int) { if a > 0 { x() } } }', 'init').cyc).toBe(2);
+    expect(swiftCog('class C { func m(a: Int) { if a > 0 { x() } } }', 'm').cyc).toBe(2);
+    expect(swiftCog('struct S { subscript(i: Int) -> Int { if i > 0 { return 1 }; return 2 } }', 'subscript').cyc).toBe(2);
+    expect(swiftCog('class C { deinit { if a { x() } } }', 'deinit').cyc).toBe(2);
+    // A computed property is a 'variable' symbol → excluded by the {function,method}
+    // gate. This exclusion IS oracle-aligned (SwiftLint's rule does not measure
+    // accessors either) — distinct from the subscript/deinit EXTRA coverage above.
+    const x = swiftCog('struct S { var p: Int { if a { return 1 }; return 2 } }', 'p');
+    expect(x.cyc).toBeUndefined();
+    expect(x.cog).toBeUndefined();
+  });
+
+  it('the `Math.max(0, count)` floor: a net-negative decision count omits complexity (never < 1)', () => {
+    // A stray `fallthrough` outside a switch (only in a broken/odd parse) drives the
+    // decision count to −1 via swiftFallthroughDecrement; the floor clamps it to 0 so
+    // the symbol is omitted (trivial), never emitting an invalid complexity 0.
+    expect(swiftCog('func f() { fallthrough }').cyc).toBeUndefined();
+  });
+});
+
+describe('cognitive complexity — Swift (SonarSource whitepaper)', () => {
+  it('if / else-if / else: head if surcharges, chain links are +1 FLAT', () => {
+    expect(swiftCog('func f(a: Int) { if a > 0 { g() } }').cog).toBe(1);
+    expect(swiftCog('func f(a: Int) { if a > 0 { g() } else { h() } }').cog).toBe(2);
+    // if(+1) + else-if(+1 flat) + else(+1 flat) = 3 (NOT a surcharged nested if).
+    expect(swiftCog('func f(a: Int) { if a > 0 { g() } else if a < 0 { h() } else { k() } }').cog).toBe(3);
+  });
+
+  it('a nested `if` surcharges by nesting (the positional-if handler)', () => {
+    // outer if(+1) + inner if at nesting 1(+2) = 3.
+    expect(swiftCog('func f(a: Int, b: Int) { if a > 0 { if b > 0 { g() } } }').cog).toBe(3);
+  });
+
+  it('an EMPTY `{}` consequence or else still counts the else (detected by the `else` keyword)', () => {
+    // An empty block emits NO `statements` node, so the else must be detected by the
+    // `else` keyword, not by a second block child. Each = head if(+1) + else(+1 flat) = 2.
+    expect(swiftCog('func f(a: Int) { if a > 0 {} else { k() } }').cog).toBe(2); // empty consequence
+    expect(swiftCog('func f(a: Int) { if a > 0 { g() } else {} }').cog).toBe(2); // empty else
+    expect(swiftCog('func f(a: Int) { if a > 0 {} else {} }').cog).toBe(2); // both empty
+    // Compounds in chains: if(+1) + else-if(+1) + else(+1) = 3 even with empty bodies.
+    expect(swiftCog('func f(a: Int, b: Int) { if a > 0 { g() } else if b > 0 {} else { k() } }').cog).toBe(3);
+    // A nested if inside an empty-consequence else body still nests: if(+1) + else(+1) +
+    // nested if at nesting 1(+2) = 4.
+    expect(swiftCog('func f(a: Int, b: Int) { if a > 0 {} else { if b > 0 { x() } } }').cog).toBe(4);
+  });
+
+  it('booleans: one +1 per maximal same-kind run in SOURCE order', () => {
+    expect(swiftCog('func f(a: Bool, b: Bool) { if a && b { g() } }').cog).toBe(2); // if + 1 run
+    expect(swiftCog('func f(a: Bool, b: Bool, c: Bool) { if a && b && c { g() } }').cog).toBe(2); // one && run
+    expect(swiftCog('func f(a: Bool, b: Bool, c: Bool) { if a && b || c { g() } }').cog).toBe(3); // && run + || run
+  });
+
+  it('a parenthesized boolean is its OWN run (no-unwrap sentinel)', () => {
+    // (a && b) && c → the inner && and outer && are separate runs (tree-sitter wraps
+    // the parens in a tuple_expression the engine does NOT unwrap) → if(1) + 2 = 3.
+    expect(swiftCog('func f(a: Bool, b: Bool, c: Bool) { if (a && b) && c { g() } }').cog).toBe(3);
+  });
+
+  it('`guard` is +1 FLAT (the let-else analog; no surcharge, condition booleans count)', () => {
+    expect(swiftCog('func f(x: Int?) { guard let y = x else { return }; use(y) }').cog).toBe(1);
+    expect(swiftCog('func f(a: Bool, b: Bool) { guard a && b else { return } }').cog).toBe(2);
+    // The guard's else body is descended at the SAME nesting (flat), so its `if y` is
+    // at base nesting: guard(+1) + if(+1) = 2 (NOT 3 — guard does not nest its else).
+    expect(swiftCog('func f(a: Bool, y: Bool) { guard a else { if y { log() }; return } }').cog).toBe(2);
+  });
+
+  it('loops surcharge and nest their body', () => {
+    // for(+1) + if at nesting 1(+2) = 3.
+    expect(swiftCog('func f(xs: [Int]) { for x in xs { if x > 0 { g() } } }').cog).toBe(3);
+  });
+
+  it('a `switch` is +1 for the WHOLE switch; case bodies nest', () => {
+    expect(swiftCog('func f(x: Int) { switch x { case 1: a(); default: b() } }').cog).toBe(1);
+    // switch(+1) + if in a case body at nesting 1(+2) = 3.
+    expect(swiftCog('func f(x: Int, b: Bool) { switch x { case 1: if b { a() }; default: b() } }').cog).toBe(3);
+  });
+
+  it('each `catch` surcharges (+1); the `do` body adds nothing', () => {
+    expect(swiftCog('func f() { do { try g() } catch let e { h(e) } catch { k() } }').cog).toBe(2);
+  });
+
+  it('a closure raises nesting (+0 itself) and rolls its control flow in', () => {
+    // lambda nests its body (+0); the inner `if` at nesting 1 → +2.
+    expect(swiftCog('func f(xs: [Int]) { xs.forEach { x in if x > 0 { g() } } }').cog).toBe(2);
+  });
+
+  it('a labeled break is +1 FLAT; a plain break and `return x` are not', () => {
+    // for(+1) + for nesting1(+2) + if nesting2(+3) + labeled break(+1 flat) = 7.
+    expect(
+      swiftCog('func f(xs: [Int], ys: [Int]) { outer: for x in xs { for y in ys { if a { break outer } } } }').cog,
+    ).toBe(7);
+    // plain break adds nothing: while(+1) + if nesting1(+2) = 3.
+    expect(swiftCog('func f() { while c { if a { break } } }').cog).toBe(3);
+    // `return x` is ALSO a control_transfer_statement with a `result` simple_identifier,
+    // but the hasLabel keyword gate (kw ∈ {break,continue}) excludes it — so a bare
+    // `return v` adds NOTHING (cog 0/undefined), proving the gate, not just the result field.
+    expect(swiftCog('func f(v: Int) -> Int { return v }').cog).toBeUndefined();
+    // …and a labeled `continue` IS +1 flat: for(+1) + if nesting1(+2) + continue(+1) = 4.
+    expect(swiftCog('func f(xs: [Int]) { outer: for x in xs { if a { continue outer } } }').cog).toBe(4);
+  });
+
+  it('a ternary surcharges (+1)', () => {
+    expect(swiftCog('func f(a: Bool) -> Int { return a ? 1 : 2 }').cog).toBe(1);
   });
 });
