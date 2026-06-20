@@ -16,6 +16,8 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
+import { cFamilyBooleanOperatorKind, computeComplexity, isCFamilyBooleanOperator } from '../complexity.js';
+import type { CognitiveOptions } from '../complexity.js';
 
 // Type-declaration node types → the SymbolKind they map to. Doubles as the
 // "is this a type declaration" test during body iteration. struct/record →
@@ -155,6 +157,168 @@ const CSHARP_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
   'Append', 'Remove', 'Clear', 'TryGetValue', 'ConfigureAwait', 'GetEnumerator',
 ]);
 
+// ── complexity (cyclomatic + cognitive) — pinned EXACT to SonarC# ───────────
+// (SonarAnalyzer.CSharp's CSharpCyclomaticComplexityMetric / CSharpCognitive-
+// ComplexityMetric, run as a per-method oracle; see CLAUDE.md "C# Complexity
+// Rules"). Both metrics MEASURED against the real analyzer.
+
+// Cyclomatic decision nodes (each +1). Booleans/`??`, `??=`, and the constant-
+// `case` discriminator route through csharpCyclomaticExtra (shared node types).
+// MEASURED: a `switch_expression_arm` counts for EVERY arm (incl `_`/pattern arms),
+// `conditional_access_expression` (`?.` AND `?[`) ALWAYS counts (no Dart property-
+// vs-call split), pattern combinators `and`/`or` count per-operator, `not` does not.
+const CSHARP_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'if_statement',
+  'for_statement', 'foreach_statement', 'while_statement', 'do_statement',
+  'conditional_expression', // ternary
+  'switch_expression_arm', // every arm (incl `_`/pattern arms)
+  'and_pattern', 'or_pattern', // pattern combinators (NOT negated_pattern)
+  'conditional_access_expression', // `?.` / `?[` — always +1
+]);
+
+// A switch-STATEMENT `switch_section` that SonarC# cyclomatic counts (Roslyn's
+// CaseSwitchLabel): a plain constant `case <const>:` OR a bare discard `case _:`
+// (both measured +1). The discriminant is a direct `constant_pattern` or `discard`
+// child with NO `when_clause` (a `when` guard promotes the label to a
+// CasePatternSwitchLabel → NOT counted). EXCLUDED: a `constant_pattern` that wraps a
+// `tuple_expression` (`case (1,2):` is a positional pattern, NOT a compile-time
+// constant — a tuple literal can never be const, so SonarC# does not count it);
+// pattern cases (`declaration_pattern`/`relational_pattern`/`or_pattern`/…) and
+// `default`. (`case 1 or 2:` is an or_pattern section → not a constant case here,
+// but its `or` counts via CSHARP_DECISION_NODE_TYPES.) Switch EXPRESSIONS differ —
+// every `switch_expression_arm` counts (in the node set above).
+function csharpIsConstantCase(node: Node): boolean {
+  let hasConstant = false;
+  for (const c of node.namedChildren) {
+    if (c.type === 'when_clause') return false; // a guard → CasePatternSwitchLabel
+    if (c.type === 'discard') hasConstant = true; // bare `case _:`
+    // a `constant_pattern` wrapping a tuple is a positional pattern, not a constant.
+    if (c.type === 'constant_pattern' && c.namedChild(0)?.type !== 'tuple_expression') hasConstant = true;
+  }
+  return hasConstant;
+}
+
+// Extra cyclomatic +1s beyond the node set: `&&`/`||`/`??` (one binary_expression,
+// read via the shared C-family token helper — SonarC# counts all three), the
+// null-coalescing assignment `??=` (shares assignment_expression with `=`/`+=`),
+// and a constant switch `case`.
+function csharpCyclomaticExtra(node: Node): boolean {
+  if (isCFamilyBooleanOperator(node)) return true; // && || ??
+  if (node.type === 'assignment_expression')
+    return node.childForFieldName('operator')?.type === '??='; // `.type` (= the token), like the other readers
+  if (node.type === 'switch_section') return csharpIsConstantCase(node);
+  return false;
+}
+
+// COGNITIVE boolean-run kind: `&&`/`||` (binary_expression, via the shared C-family
+// reader — but NOT `??`, which is cyclomatic-only, the expected cyc/cog divergence)
+// AND the pattern combinators `and`/`or` (and_pattern/or_pattern, their own nodes),
+// so both fold into the SAME TREE-SCOPED run (booleanByTreeParent). `not`
+// (negated_pattern) → null (uncounted).
+function csharpCognitiveBooleanKind(node: Node): string | null {
+  const op = cFamilyBooleanOperatorKind(node); // '&&' / '||' / '??' (binary_expression) or null
+  if (op !== null) return op === '??' ? null : op; // `??` is cog-free
+  if (node.type === 'and_pattern') return 'and';
+  if (node.type === 'or_pattern') return 'or';
+  return null;
+}
+
+// Direct-recursion self-call (SonarC# counts it +1 cognitive, like gocognit) —
+// but ONLY when the bare-IDENTIFIER callee name AND the ARGUMENT COUNT both match
+// the enclosing method. SonarC#'s CSharpCognitiveComplexityMetric checks
+// IdentifierName + arg-count == the method's parameter count; a `Foo(2 args)` call
+// inside `Foo(3 params)` is OVERLOAD FORWARDING (ubiquitous in C#), NOT recursion —
+// a name-only check over-counts it heavily (measured: ~150 false +1s on Polly). So
+// match the call's `argument` count against the enclosing declaration's `parameter`
+// count. `this.Foo()` (member_access) and `Foo<T>()` (generic_name) are not bare
+// identifiers → not self-calls. The declaration is the body's owner: for a method
+// the body (block / arrow_expression_clause) is a child of method_declaration; a
+// constructor's body IS the declaration (it carries `parameters` itself), so check
+// the body first, then its parent.
+function csharpCountChildren(node: Node | null, type: string): number {
+  if (!node) return 0;
+  let n = 0;
+  for (const c of node.namedChildren) if (c.type === type) n++;
+  return n;
+}
+function csharpIsSelfCall(callNode: Node, body: Node, sym: Symbol): boolean {
+  const fn = callNode.childForFieldName('function');
+  if (fn?.type !== 'identifier' || fn.text !== sym.name) return false;
+  // Recursion only applies to a REAL method body — a `block` or an arrow
+  // `arrow_expression_clause`. A constructor's synthesized body is the whole
+  // `constructor_declaration`, or (primary ctor) a `parameter_list` / `base_list`;
+  // those have no resolvable owning-method parameter list (the type decl's params
+  // are a POSITIONAL child, not a `parameters` field → paramCount would mis-resolve
+  // to 0 and match any 0-arg call), and a constructor can't bare-self-recurse anyway.
+  if (body.type !== 'block' && body.type !== 'arrow_expression_clause') return false;
+  const decl = body.childForFieldName('parameters') ? body : body.parent;
+  const params = decl?.childForFieldName('parameters') ?? null;
+  // A `params T[] x` parameter is NOT wrapped in a `parameter` node (a grammar
+  // quirk) — it flattens to a trailing `array_type` + `identifier` directly under
+  // the parameter_list, so add the bare `identifier` (only a params param leaks one).
+  const paramCount =
+    csharpCountChildren(params, 'parameter') + csharpCountChildren(params, 'identifier');
+  const argCount = csharpCountChildren(callNode.childForFieldName('arguments'), 'argument');
+  return paramCount === argCount;
+}
+
+// Complexity body boundary: skip ONLY `attribute_list`. Probe measures each member's
+// BODY (its PendingBody), not the declaration's attribute_lists (which sit OUTSIDE
+// the body for top-level members anyway); SonarC# walks the whole declaration and
+// DOES count control flow in attribute arguments — but that is a degenerate case
+// (valid C# attribute args are compile-time constants, so a ternary/`&&`/switch
+// there is near-zero in real code: 0 cases across Newtonsoft.Json+Polly), a SAFE
+// documented under-count from the body boundary. The skip keeps a body-INTERNAL
+// attribute (on a local fn / lambda) consistent with that boundary. (A SEPARATE set
+// from CSHARP_SKIP_TYPES, the resolveCalls boundary, which DOES prune local functions
+// from call attribution.) local_function_statement and lambda_expression are
+// DELIBERATELY ABSENT (descended) so they ROLL INTO the enclosing member with a
+// nesting bump — SonarC#'s per-member model for a NON-static local fn / lambda. A
+// STATIC local function is scored separately by SonarC# but rolled in here (no Probe
+// symbol exists for it) — the documented per-symbol-model divergence.
+const CSHARP_COMPLEXITY_SKIP_TYPES: ReadonlySet<string> = new Set(['attribute_list']);
+
+// Cognitive config (SonarC# S3776 — sonar-java-shaped: field-based `if`, contained
+// `catch`). MEASURED EXACT. Two non-default shapes the oracle forced: booleans are
+// TREE-SCOPED (booleanByTreeParent, like the SonarQube Dart model — NOT sonar-java's source-order),
+// and `goto`/`goto case` is a SURCHARGE (+1+nesting) → surchargeTypes.
+const CSHARP_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if_statement',
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative', // Java-style: else/else-if held directly (no else_clause wrapper)
+  loopTypes: new Set(['for_statement', 'foreach_statement', 'while_statement', 'do_statement']),
+  switchTypes: new Set(['switch_statement', 'switch_expression']), // whole-switch +1 (stmt + expr)
+  ternaryType: 'conditional_expression',
+  catchType: 'catch_clause', // contains its `body:` block → the generic catch branch
+  surchargeTypes: new Set(['goto_statement']), // `goto`/`goto case`: +1+nesting
+  nestOnlyTypes: new Set(['lambda_expression', 'local_function_statement']), // roll in, nest +0
+  labeledJumpTypes: new Set(), // C# break/continue are unlabeled; goto is a surcharge (above)
+  hasLabel: () => false,
+  booleanOperatorKind: csharpCognitiveBooleanKind,
+  // TREE-SCOPED boolean runs (like the SonarQube Dart model, NOT sonar-java's source-order) — a
+  // `&&`/`||` (or pattern `and`/`or`) counts iff its operator kind differs from its
+  // nearest logical ancestor (skipping parens). MEASURED EXACT: `a && b && (c||d) &&
+  // (e||f)` = cog 3 (one &&-spine + two ||s), NOT source-order's 4 — the slice's
+  // surprise. The `parenthesizedType` SET below skips BOTH a parenthesized EXPRESSION
+  // (`(c||d)`) and a parenthesized PATTERN (`(int and >0)`) so a same-kind combinator
+  // grouped by parens stays ONE run (`is (A and B) and C` = cog 2). See CLAUDE.md "C# Complexity Rules".
+  booleanByTreeParent: true,
+  // A SET (not a single string) so the tree-scoped ancestor walk treats BOTH a
+  // parenthesized EXPRESSION (`(c||d)`) and a parenthesized PATTERN (`(int and >0)`)
+  // as transparent — a same-kind combinator grouped by parens stays one run.
+  parenthesizedType: new Set(['parenthesized_expression', 'parenthesized_pattern']),
+  recursion: {
+    callType: 'invocation_expression',
+    isSelfCall: csharpIsSelfCall,
+    eligibleKinds: new Set(['method']),
+    oncePerSymbol: true, // SonarC# adds +1 once per recursive method, not per call-site
+  },
+  // NO: elseClauseType / conditionFromNamedChildren / collectionIfType / tryType /
+  //     initField / nestElseBody / loopBodyField / flatIncrement / positional-if knobs —
+  //     C# is field-based and sonar-java-shaped.
+};
+
 // Per-file duplicate-id disambiguation (the Kotlin/Dart OccurrenceCounter): two
 // same-(name,kind,signature,qualifier) symbols — e.g. same-file partial-class
 // decls, or an overload byte-identical past nothing — get an ordinal qualifier.
@@ -231,6 +395,17 @@ export function extractCSharp(
       ignoredMemberCallees: CSHARP_IGNORED_MEMBER_CALLEES,
     },
   );
+  // Cyclomatic + cognitive complexity (SonarC#-pinned), computed while the tree
+  // is alive (the Dart/Kotlin call-site pattern). Uses its OWN skip set (local fns
+  // + lambdas roll into the enclosing member — SonarC#'s per-member model), not
+  // CSHARP_SKIP_TYPES.
+  computeComplexity(ctx.bodies, ctx.symbols, {
+    decisionNodeTypes: CSHARP_DECISION_NODE_TYPES,
+    extraDecisionPredicate: csharpCyclomaticExtra,
+    skipTypes: CSHARP_COMPLEXITY_SKIP_TYPES,
+    cognitive: CSHARP_COGNITIVE_OPTIONS,
+  });
+
   return { symbols: ctx.symbols, references, imports: ctx.imports };
 }
 

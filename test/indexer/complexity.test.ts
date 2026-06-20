@@ -56,6 +56,16 @@ const kotlinCog = (src: string, name = 'f') => bothCx(src, name, 'kotlin', 'src/
 // top-level declarations (a function `f` unless noted).
 const dartCog = (src: string, name = 'f') => bothCx(src, name, 'dart', 'src/test.dart');
 
+// C# carries BOTH metrics, pinned EXACT to SonarC# (SonarAnalyzer.CSharp's
+// CSharpCyclomaticComplexityMetric / CSharpCognitiveComplexityMetric, run as a
+// per-method oracle). `src` is one or more member declarations wrapped in
+// `class T { … }`; returns { cyc, cog } for the named member (default `m`).
+function csharpCog(src: string, name = 'm'): { cyc: number | undefined; cog: number | undefined } {
+  const sym = syms(`class T {\n${src}\n}`, 'csharp', 'src/T.cs').find((s) => s.name === name);
+  if (!sym) throw new Error(`no symbol named ${name}`);
+  return { cyc: sym.complexity, cog: sym.cognitiveComplexity };
+}
+
 // Java carries BOTH metrics (Phase 3). `src` is one or more member declarations;
 // they're wrapped in `class T { … }`. Returns { cyc, cog } for the named member
 // (default `m`), each undefined when trivial (cyc 1 / cog 0).
@@ -1403,5 +1413,115 @@ describe('complexity — Dart cognitive (SonarQube S3776)', () => {
   it('lambda + local-fn raise nesting and roll in (+0 themselves)', () => {
     expect(dartCog('void f(List l){ l.forEach((x){ if(x!=null){g(x);} }); }').cog).toBe(2); // lambda nests the if
     expect(dartCog('void f(int a){ void g(){ if(a>0){h(a);} } g(); }').cog).toBe(2); // local fn rolls in
+  });
+});
+
+// ── C# (SonarC#-pinned, BOTH metrics) — every value MEASURED against the real
+// SonarAnalyzer.CSharp CSharpCyclomaticComplexityMetric / CSharpCognitiveComplexityMetric.
+describe('cyclomatic + cognitive — C# (SonarC# S1541 / S3776)', () => {
+  it('trivial is omitted', () => {
+    expect(csharpCog('void m(){ M(); } void M(){}').cyc).toBeUndefined();
+    expect(csharpCog('void m(){ M(); } void M(){}').cog).toBeUndefined();
+  });
+  it('if / else / else-if are cyc+1 each; cog else+else-if are flat', () => {
+    expect(csharpCog('void m(bool p){ if(p) M(); } void M(){}')).toEqual({ cyc: 2, cog: 1 });
+    expect(csharpCog('void m(bool p){ if(p) M(); else N(); } void M(){} void N(){}')).toEqual({ cyc: 2, cog: 2 });
+    expect(csharpCog('void m(bool p,bool q){ if(p) M(); else if(q) N(); else O(); } void M(){} void N(){} void O(){}')).toEqual({ cyc: 3, cog: 3 });
+  });
+  it('cognitive nesting surcharge (1+nesting per level)', () => {
+    expect(csharpCog('void m(bool p,bool q,bool r){ if(p){ if(q){ if(r) M(); } } } void M(){}')).toEqual({ cyc: 4, cog: 6 });
+    expect(csharpCog('void m(bool p){ if(p) M(); else { if(p) N(); } } void M(){} void N(){}').cog).toBe(4); // else body nests
+  });
+  it('all four loops are cyc+1 / cog surcharge', () => {
+    expect(csharpCog('void m(bool p){ for(int i=0;i<2;i++) M(); } void M(){}')).toEqual({ cyc: 2, cog: 1 });
+    expect(csharpCog('void m(int[] a){ foreach(var x in a) M(); } void M(){}')).toEqual({ cyc: 2, cog: 1 });
+    expect(csharpCog('void m(bool p){ while(p) M(); } void M(){}')).toEqual({ cyc: 2, cog: 1 });
+    expect(csharpCog('void m(bool p){ do { M(); } while(p); } void M(){}')).toEqual({ cyc: 2, cog: 1 });
+  });
+  it('ternary is cyc+1 / cog surcharge', () => {
+    expect(csharpCog('int m(bool p,int a,int b)=> p?a:b;')).toEqual({ cyc: 2, cog: 1 });
+  });
+  it('switch STATEMENT counts only constant cases (not pattern/default)', () => {
+    // constant `case 1:`/`case 2:` count (+2); `default` does not. cog: whole switch +1.
+    expect(csharpCog('void m(int a){ switch(a){ case 1: M(); break; case 2: N(); break; default: O(); break; } } void M(){} void N(){} void O(){}')).toEqual({ cyc: 3, cog: 1 });
+    // pattern cases (declaration/relational) do NOT count cyclomatically (cyc 1 → omitted).
+    expect(csharpCog('void m(object o){ switch(o){ case int n: M(); break; case string t: N(); break; default: O(); break; } } void M(){} void N(){} void O(){}')).toEqual({ cyc: undefined, cog: 1 });
+    // a constant case WITH a `when` guard is promoted to a pattern label → not counted.
+    expect(csharpCog('void m(int a,bool p){ switch(a){ case 1 when p: M(); break; default: break; } } void M(){}').cyc).toBeUndefined();
+  });
+  it('switch EXPRESSION counts EVERY arm (incl `_` and pattern arms)', () => {
+    expect(csharpCog('int m(int a)=> a switch { 1 => 10, 2 => 20, _ => 30 };')).toEqual({ cyc: 4, cog: 1 });
+    expect(csharpCog('int m(object o)=> o switch { int n => 1, string t => 2, _ => 0 };')).toEqual({ cyc: 4, cog: 1 });
+  });
+  it('switch-STATEMENT discard `case _:` counts (CaseSwitchLabel); tuple `case (1,2):` does NOT', () => {
+    // bare `case _:` is a CaseSwitchLabel-equivalent and counts; `default` does not.
+    expect(csharpCog('int m(int x){ switch(x){ case _: return 1; default: return 0; } }', 'm').cyc).toBe(2);
+    expect(csharpCog('int m(int x){ switch(x){ case 1: return 1; case _: return 2; } }', 'm').cyc).toBe(3);
+    // `case (1,2):` is a positional pattern (tuple), NOT a compile-time constant → not counted.
+    expect(csharpCog('int m(int a,int b){ switch((a,b)){ case (1,2): return 1; default: return 0; } }', 'm').cyc).toBeUndefined();
+    // a genuine parenthesized constant `case (1):` still counts.
+    expect(csharpCog('int m(int a){ switch(a){ case (1): return 1; default: return 0; } }', 'm').cyc).toBe(2);
+  });
+  it('pattern combinators and/or count (both metrics); not does not', () => {
+    expect(csharpCog('void m(object o){ if(o is int and >0) M(); } void M(){}')).toEqual({ cyc: 3, cog: 2 });
+    expect(csharpCog('void m(int a){ if(a is 1 or 2 or 3) M(); } void M(){}')).toEqual({ cyc: 4, cog: 2 }); // 2 ors cyc; one or-run cog
+    expect(csharpCog('void m(object o){ if(o is not null) M(); } void M(){}')).toEqual({ cyc: 2, cog: 1 }); // not: free
+    // tree-scoped runs skip a parenthesized PATTERN too — a same-kind combinator
+    // grouped by parens stays ONE run (cog 2, not 3).
+    expect(csharpCog('void m(object o){ if(o is (int and >0) and <100) M(); } void M(){}').cog).toBe(2);
+    expect(csharpCog('void m(int a){ if(a is ((>0 and <100) and not 50) and not 60) M(); } void M(){}').cog).toBe(2);
+  });
+  it('null-aware cyclomatic: ?. / ?[ / ?? / ??= count (+1 each); all cog-free', () => {
+    expect(csharpCog('int m(object o)=> o?.GetHashCode() ?? 0;')).toEqual({ cyc: 3, cog: undefined }); // ?. (even a call) + ??
+    expect(csharpCog('int m(int[] a)=> a?[0] ?? 0;')).toEqual({ cyc: 3, cog: undefined }); // ?[ + ??
+    expect(csharpCog('int m(int a,int b)=> a + (b as int? ?? 0);')).toEqual({ cyc: 2, cog: undefined }); // ??
+    expect(csharpCog('void m(){ int? x = null; x ??= 5; }')).toEqual({ cyc: 2, cog: undefined }); // ??=
+  });
+  it('booleans are TREE-SCOPED runs (NOT source-order), `??` cog-free', () => {
+    expect(csharpCog('void m(bool p,bool q){ if(p && q) M(); } void M(){}')).toEqual({ cyc: 3, cog: 2 }); // 1 && run
+    expect(csharpCog('void m(bool p,bool q,bool r){ if(p && q || r) M(); } void M(){}')).toEqual({ cyc: 4, cog: 3 }); // && + || = 2 runs
+    // THE tree-scoped pin: `a&&b&&(c||d)&&(e||f)` = cog 4 (if(1) + one &&-spine + two
+    // ||s = 3), NOT source-order's 5 nor SonarJS's 3. (cyc counts every operator: 3
+    // && + 2 || = 5, → +if +base = 7.)
+    expect(csharpCog('void m(int a,int b,int c,int d,int e,int f){ if(a>0 && b>0 && (c>0||d>0) && (e>0||f>0)) M(); } void M(){}')).toEqual({ cyc: 7, cog: 4 });
+  });
+  it('catch surcharges cognitively, costs no cyclomatic; finally free', () => {
+    expect(csharpCog('void m(){ try { M(); } catch (System.Exception) { N(); } } void M(){} void N(){}')).toEqual({ cyc: undefined, cog: 1 });
+    expect(csharpCog('void m(){ try { M(); } catch (System.ArgumentException) { N(); } catch (System.Exception) { O(); } finally { P(); } } void M(){} void N(){} void O(){} void P(){}')).toEqual({ cyc: undefined, cog: 2 });
+  });
+  it('goto / goto case are a SURCHARGE (+1+nesting), not flat', () => {
+    expect(csharpCog('void m(bool p){ s: M(); if(p) goto s; } void M(){}')).toEqual({ cyc: 2, cog: 3 }); // if(1)+goto@nesting1(2)
+    expect(csharpCog('void m(int a){ switch(a){ case 1: M(); goto case 2; case 2: N(); break; default: break; } } void M(){} void N(){}')).toEqual({ cyc: 3, cog: 3 }); // switch(1)+goto case@n1(2)
+    // a structural construct in a `goto case` LABEL is counted at the goto's OWN
+    // nesting, NOT one level deeper — goto surcharges but descends children flat.
+    expect(csharpCog('void m(int x,bool p){ switch(x){ case 0: goto case (p?1:2); case 1: break; case 2: break; } }', 'm').cog).toBe(5); // switch(1)+goto@n1(2)+ternary@n1(2)
+  });
+  it('direct recursion is cog+1 ONCE per method, gated on matching arg count', () => {
+    expect(csharpCog('void m(bool p){ if(p) m(p); }')).toEqual({ cyc: 2, cog: 2 }); // 1 self-call (1 arg == 1 param): +1
+    expect(csharpCog('int m(int n)=> n<=1 ? 1 : n * m(n-1);')).toEqual({ cyc: 2, cog: 2 }); // ternary + recursion
+    // overload forwarding (different arg count) is NOT recursion (the dominant false +).
+    expect(csharpCog('void m(int a){ m(a, 0); } void m(int a,int b){}', 'm').cog).toBeUndefined();
+    // once-per-method: 3 self-calls add +1 TOTAL (not per-site) → if(1)+recursion(1)=2.
+    expect(csharpCog('void m(int a){ if(a>0){ m(a-1); m(a-2); m(a-3); } }').cog).toBe(2);
+  });
+  it('lambda + (non-static) local function roll into the enclosing member', () => {
+    expect(csharpCog('void m(bool p){ System.Action g = () => { if(p) M(); }; g(); } void M(){}')).toEqual({ cyc: 2, cog: 2 }); // lambda nests the if
+    expect(csharpCog('void m(bool p){ void Helper(){ if(p) M(); } Helper(); } void M(){}')).toEqual({ cyc: 2, cog: 2 }); // local fn rolls in
+  });
+  it('primary-constructor base-init/default-arg control flow IS measured (SonarC# omits the row — extra coverage, McCabe-correct)', () => {
+    const ctor = syms(
+      'class D(int x, bool p) : Base(p ? Make(x) : 0) { static int Make(int y) => y; } class Base { public Base(int v){} }',
+      'csharp', 'src/D.cs',
+    ).find((s) => s.name === 'constructor');
+    expect(ctor?.complexity).toBe(2); // base-init ternary `p ? Make(x) : 0`
+    expect(ctor?.cognitiveComplexity).toBe(1);
+    // a method literally named `constructor` called 0-arg in a primary-ctor's base-init
+    // must NOT spuriously count as recursion (csharpIsSelfCall bails on the param/base body),
+    // so no `constructor` symbol gets a cognitive increment.
+    const all = syms(
+      'class E(int x = 0) : Base(constructor()) { static int constructor() => 1; } class Base { public Base(int v){} }',
+      'csharp', 'src/E.cs',
+    );
+    expect(all.filter((s) => s.name === 'constructor').every((s) => s.cognitiveComplexity === undefined)).toBe(true);
   });
 });

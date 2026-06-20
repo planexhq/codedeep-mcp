@@ -101,7 +101,8 @@ export interface Symbol {
   // re-key symbols on body-only edits and fracture the persisted call graph).
   // Populated for TS/JS, Python, Go (Phase 2 MVP), Java (Phase 3), Rust
   // (rust-code-analysis-pinned), Swift (SwiftLint-pinned), Kotlin
-  // (sonar-kotlin-pinned), and Dart (SonarQube-S1541-pinned). C#/PHP are a follow-up.
+  // (sonar-kotlin-pinned), Dart (SonarQube-S1541-pinned), and C# (SonarC#-pinned).
+  // PHP is a follow-up.
   complexity?: number;
   // Cognitive complexity (SonarSource whitepaper §1.2: a nesting-aware sum of
   // increments measuring how hard the control flow is to FOLLOW, vs cyclomatic's
@@ -111,8 +112,9 @@ export interface Symbol {
   // Rust (SonarSource-whitepaper/sonar-rust-aligned — deliberately NOT matching
   // rust-code-analysis's loop-omission + boolean-carry cognitive bugs), Swift
   // (whitepaper-aligned — no published cognitive spec for Swift to pin), Kotlin
-  // (pinned EXACTLY to sonar-kotlin's CognitiveComplexity), and Dart (pinned EXACT
-  // to SonarQube's Dart Cognitive Complexity rule S3776); C#/PHP follow.
+  // (pinned EXACTLY to sonar-kotlin's CognitiveComplexity), Dart (pinned EXACT
+  // to SonarQube's Dart Cognitive Complexity rule S3776), and C# (pinned
+  // EXACT to SonarC#'s CSharpCognitiveComplexityMetric); PHP follows.
   cognitiveComplexity?: number;
 }
 

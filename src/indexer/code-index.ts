@@ -23,6 +23,25 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v18: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for C#
+// (`.cs`) — BOTH metrics in one slice (the Java/Rust/Swift/Kotlin/Dart pattern).
+// BOTH are pinned EXACT to SonarC# (`SonarAnalyzer.CSharp`, the Roslyn-based
+// open-source analyzer), run as a per-method oracle via its public
+// CSharpCyclomaticComplexityMetric / CSharpCognitiveComplexityMetric — so every
+// value is MEASURED against the real analyzer (the best oracle case after Dart).
+// CYCLOMATIC (S1541): +1 per if/each loop (for/foreach/while/do)/ternary/each
+// switch-EXPRESSION arm (incl `_`)/plain-constant switch-STATEMENT case (pattern
+// + `default` cases excluded)/pattern combinator `and`/`or` (not `not`)/`&&`/`||`/
+// `??`/`??=`/`?.`/`?[`; LINQ clauses and `catch`/`when`/`goto` don't. COGNITIVE
+// (S3776, sonar-java-shaped): structural+1 + nesting surcharge per if/ternary/
+// switch/loop/catch/`goto`(+goto case); else/else-if +1 flat; `&&`/`||` + pattern
+// `and`/`or` count as SOURCE-ORDER runs (paren-unwrap) but `??` is FREE; recursion
+// is +1 flat (like Go). C# is sonar-java-shaped (field-based `if`, contained
+// `catch`, source-order booleans) so it reuses the existing engine fields + the Go
+// `recursion` field; the ONE new optional engine knob is `surchargeTypes`
+// (`goto`/`goto case` surcharge +1+nesting). Adding the fields to C# symbols is an
+// extraction-logic change `isUnchanged` (mtime/size/language) can't detect, so the
+// bump force-invalidates warm caches.
 // v17: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for Dart
 // (`.dart`) — BOTH metrics in one slice. BOTH are pinned for behavioral compatibility
 // with SonarQube's Dart cyclomatic (S1541) and cognitive (S3776) rules, per the
@@ -128,7 +147,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 17;
+export const SCHEMA_VERSION = 18;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both

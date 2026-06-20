@@ -79,9 +79,8 @@ export interface ComplexityOptions {
   cyclomaticDecrement?: (node: Node) => boolean;
   // COGNITIVE complexity (proposal §1.2): when present, a second nesting-aware
   // walk runs alongside the cyclomatic one and writes `Symbol.cognitiveComplexity`.
-  // Absent ⇒ cognitive stays undefined for that language (the not-yet-done
-  // Dart/C#/PHP).
-  // Populated for **Java + TS/JS + Go + Python + Rust + Swift + Kotlin**. The algorithm is the
+  // Absent ⇒ cognitive stays undefined for that language (the not-yet-done PHP).
+  // Populated for **Java + TS/JS + Go + Python + Rust + Swift + Kotlin + Dart + C#**. The algorithm is the
   // SonarSource whitepaper's, clean-room verified against `sonar-java`'s
   // `CognitiveComplexityVisitor` (Java), `eslint-plugin-sonarjs`'s S3776 (TS/JS),
   // `uudashr/gocognit` (Go), AND `sonar-python`'s `CognitiveComplexityVisitor`
@@ -237,6 +236,15 @@ export interface CognitiveOptions {
   loopBodyField?: string;
   switchTypes: ReadonlySet<string>;
   ternaryType: string;
+  // Extra node types that surcharge (+1 + nesting) but descend their children at the
+  // SAME nesting — a flow-breaker with the full nesting surcharge that does NOT nest
+  // its operand. C#'s `goto`/`goto case`: SonarC# scores it at +1+nesting (a `goto`
+  // 3 levels deep adds 4), unlike a labeled jump's flat +1; and a structural construct
+  // in its case-label expression (`goto case (p ? 1 : 2)`) is counted at the goto's
+  // OWN nesting, NOT one level deeper — so this routes through a DEDICATED branch
+  // (surcharge, descend children flat), distinct from the switch/ternary branch which
+  // nests its children. Only C# sets it (Java/TS/Go/… have no goto-like surcharged jump).
+  surchargeTypes?: ReadonlySet<string>;
   // The catch clause: EACH `catchType` surcharges (+1 + nesting) at its current
   // (the try's) nesting, with its body scanned one level deeper. Handled as its
   // OWN node-type case (NOT gated on recognizing the try parent), so it works
@@ -314,14 +322,18 @@ export interface CognitiveOptions {
   // whose immediate parent is a `jsx_expression` (`{cond && <X/>}`, attribute
   // values) scores 0. Java/Go/Py leave it unset.
   excludeBooleanRun?: (root: Node) => boolean;
-  // The parenthesized-expression node type, unwrapped while linearizing a boolean
-  // sequence so `a && (b || c)` reads the inner `||` as part of the same source-
-  // order run rather than a detached one (sonar's ExpressionUtils.skipParentheses).
-  // Go sets this to a NEVER-MATCHING sentinel so skipParens is a no-op: gocognit's
-  // boolean collection (`collectBinaryOps`) stops at a parenthesized expression
-  // rather than unwrapping it, so a parenthesized boolean is counted as its OWN
-  // separate run when the DFS later descends into it (`(a&&b)&&c` = 2, not 1).
-  parenthesizedType: string;
+  // The parenthesis-like wrapper(s) treated as transparent while linearizing a
+  // boolean sequence, so `a && (b || c)` reads the inner `||` as part of the same
+  // source-order run rather than a detached one (sonar's ExpressionUtils.skip-
+  // Parentheses). Usually a single node type; Go sets a NEVER-MATCHING sentinel so
+  // skipParens is a no-op (gocognit's `collectBinaryOps` stops at a parenthesized
+  // expression rather than unwrapping it, so `(a&&b)&&c` = 2, not 1). A grammar with
+  // MORE THAN ONE wrapper passes a SET (matched by membership): C# needs both
+  // `parenthesized_expression` (`(c||d)`) AND `parenthesized_pattern` (`(int and >0)`)
+  // transparent, so a same-kind pattern combinator grouped by parens stays ONE run
+  // (`is (A and B) and C` = cog 2, not 3) — a single string would skip only the
+  // expression paren and over-count the pattern one.
+  parenthesizedType: string | ReadonlySet<string>;
   // Direct-recursion increment (whitepaper's recursion rule; gocognit implements
   // it, sonar-java/SonarJS do not). When set AND `eligibleKinds` contains the
   // enclosing symbol's kind, a node of type `callType` whose `bareCalleeName`
@@ -330,15 +342,29 @@ export interface CognitiveOptions {
   // identifier callee matching the enclosing FuncDecl name, so member self-calls
   // (`s.m()`, a selector) never match and methods are excluded via eligibleKinds.
   // Java/TS leave it unset (their analyzers omit recursion → matches the oracle).
-  // ACCEPTED DIVERGENCE: gocognit also checks the callee's resolved OBJECT
+  // ACCEPTED DIVERGENCE (Go): gocognit also checks the callee's resolved OBJECT
   // identity (`obj == fn.Name.Obj`), so a LOCAL that shadows the function name
   // (`func f(g func()){ f := g; f() }`) is not recursion there but is +1 here.
   // bareCalleeName is name-only (no resolver at extract time), the same accepted
   // class as Go self-call receiver shadowing — rare, 0 cases in the oracle corpus.
+  // A language supplies EITHER `bareCalleeName` (name-only, Go) OR `isSelfCall`
+  // (a full predicate, C#): SonarC# counts a self-call only when the callee NAME
+  // AND the ARGUMENT COUNT match the enclosing method (a `Foo(2 args)` call inside
+  // `Foo(3 params)` is overload forwarding, NOT recursion — name-only over-counts
+  // it, the dominant C# false positive). `isSelfCall` gets the call node, the
+  // symbol's body (whose enclosing declaration carries the parameter list), and the
+  // symbol, so the language can compare arity. The engine prefers `isSelfCall` when
+  // present, else falls back to `bareCalleeName(node) === sym.name`.
+  // `oncePerSymbol`: gocognit (Go) adds +1 PER self-call SITE (`mapping` ×2 → +2);
+  // SonarC# adds +1 ONCE per method that recurses at all (its visitor records a
+  // boolean and adds the increment once at the end), so a method with 4 self-calls
+  // gets +1, not +4. Set it for C#; unset (per-site) for Go.
   recursion?: {
     callType: string;
-    bareCalleeName: (node: Node) => string | null;
+    bareCalleeName?: (node: Node) => string | null;
+    isSelfCall?: (callNode: Node, body: Node, sym: Symbol) => boolean;
     eligibleKinds: ReadonlySet<string>;
+    oncePerSymbol?: boolean;
   };
   // Optional FLAT-increment predicate: a node it returns true for adds +1 FLAT
   // (no nesting surcharge, no nesting bump) and is then descended normally. For a
@@ -415,6 +441,10 @@ export function computeComplexity(
   // Cognitive points accrue the same way (sum across bodies, omit at 0). Null
   // until a language opts in via `opts.cognitive`.
   const cognitivePoints = opts.cognitive ? new Map<string, number>() : null;
+  // symbolIds that have already taken the direct-recursion +1 (for `recursion.
+  // oncePerSymbol`). Owned here, across ALL of a symbol's bodies — a C# primary
+  // constructor pushes >1 body for one symbolId, so a per-body flag would re-count.
+  const recursedSymbols = new Set<string>();
   // The cyclomatic DFS may skip a wider set than the cognitive walk (Java
   // excludes lambdas from cyclomatic but descends them for cognitive).
   const cycSkip = opts.cyclomaticSkipTypes ?? opts.skipTypes;
@@ -449,7 +479,7 @@ export function computeComplexity(
       const prev = cognitivePoints.get(symbolId) ?? 0;
       cognitivePoints.set(
         symbolId,
-        prev + computeCognitive(body, opts.cognitive!, opts.skipTypes, sym),
+        prev + computeCognitive(body, opts.cognitive!, opts.skipTypes, sym, recursedSymbols),
       );
     }
   }
@@ -467,23 +497,17 @@ export function computeComplexity(
   }
 }
 
-// Computes the cognitive complexity of ONE body subtree (whitepaper §1.2,
-// clean-room verified against sonar-java's CognitiveComplexityVisitor). Returns
-// the increment total (0 when trivial). Reuses the SAME skipTypes boundary as
-// the cyclomatic walk so "this symbol's body" means the same thing for both
-// metrics — methods containing anon/local classes therefore UNDER-COUNT vs
-// sonar-java (which rolls those bodies into the enclosing method); a deliberate
-// per-symbol-model divergence, like the TS/Py arrow-callback gap.
-//
-// Nesting starts at 0; a SURCHARGE node adds `1 + nesting` (the whitepaper
-// "+1 plus one per level of nesting"; sonar-java's base-1 + `+= nesting` is
-// algebraically identical). Booleans, labeled jumps, and `else`/`else if` are
-// FLAT (+1, no surcharge). Lambdas raise nesting but add nothing.
+// True when `t` is one of the language's parenthesis-like wrappers. `spec` is a
+// single `parenthesizedType` string for most languages, or a SET (C# — expression
+// AND pattern parens) matched by membership.
+function matchesParen(t: string, spec: string | ReadonlySet<string>): boolean {
+  return typeof spec === 'string' ? t === spec : spec.has(t);
+}
 // Unwraps nested parenthesized expressions to the inner expression (sonar's
 // ExpressionUtils.skipParentheses), used while linearizing a boolean sequence.
-function skipParens(node: Node | null, parenthesizedType: string): Node | null {
+function skipParens(node: Node | null, parenSpec: string | ReadonlySet<string>): Node | null {
   let n = node;
-  while (n && n.type === parenthesizedType) n = n.namedChild(0);
+  while (n && matchesParen(n.type, parenSpec)) n = n.namedChild(0);
   return n;
 }
 
@@ -497,11 +521,28 @@ function firstNonComment(node: Node): Node | null {
   return child;
 }
 
+// Computes the cognitive complexity of ONE body subtree (whitepaper §1.2,
+// clean-room verified against sonar-java's CognitiveComplexityVisitor). Returns
+// the increment total (0 when trivial). Reuses the SAME skipTypes boundary as
+// the cyclomatic walk so "this symbol's body" means the same thing for both
+// metrics — methods containing anon/local classes therefore UNDER-COUNT vs
+// sonar-java (which rolls those bodies into the enclosing method); a deliberate
+// per-symbol-model divergence, like the TS/Py arrow-callback gap.
+//
+// Nesting starts at 0; a SURCHARGE node adds `1 + nesting` (the whitepaper
+// "+1 plus one per level of nesting"; sonar-java's base-1 + `+= nesting` is
+// algebraically identical). Booleans, labeled jumps, and `else`/`else if` are
+// FLAT (+1, no surcharge). Lambdas raise nesting but add nothing.
 function computeCognitive(
   body: Node,
   cog: CognitiveOptions,
   skipTypes: ReadonlySet<string>,
   sym: Symbol,
+  // symbolIds that already took the recursion +1 (for `recursion.oncePerSymbol`).
+  // Owned by computeComplexity and SHARED across all of a symbol's bodies, so a
+  // C# primary constructor (which pushes >1 body for one symbolId) counts recursion
+  // ONCE per method, not once per body.
+  recursedSymbols: Set<string>,
 ): number {
   let total = 0;
   // Direct recursion (gocognit): +1 per bare self-call, but only for symbol
@@ -523,6 +564,10 @@ function computeCognitive(
   // nodes use lhs/rhs.
   const leftField = cog.booleanLeftField ?? 'left';
   const rightField = cog.booleanRightField ?? 'right';
+  // Parenthesis-like wrapper(s) to treat as transparent — a single type, or C#'s set
+  // of expression+pattern parens. Used by the source-order flatten AND the tree-scoped
+  // ancestor walk (both via `matchesParen`, which handles string or set).
+  const parenSpec = cog.parenthesizedType;
   // A second if-like node type (Dart's collection `if_element`) is treated as `ifType`.
   const isIfLike = (t: string): boolean =>
     t === cog.ifType || (cog.collectionIfType !== undefined && t === cog.collectionIfType);
@@ -693,8 +738,16 @@ function computeCognitive(
     // function — matching gocognit, whose FuncDecl-rooted walk doesn't reset the
     // target across closures. ---
     if (recEligible && rec && t === rec.callType) {
-      const callee = rec.bareCalleeName(node);
-      if (callee !== null && callee === sym.name) total += 1;
+      // null/undefined callee never equals the (always-non-empty) symbol name.
+      const isSelf = rec.isSelfCall
+        ? rec.isSelfCall(node, body, sym)
+        : rec.bareCalleeName?.(node) === sym.name;
+      if (isSelf) {
+        // oncePerSymbol (C#): +1 only the FIRST time across the symbol's bodies.
+        // Per-site (Go, oncePerSymbol unset): +1 every time, `recursedSymbols` untouched.
+        if (!rec.oncePerSymbol || !recursedSymbols.has(sym.id)) total += 1;
+        if (rec.oncePerSymbol) recursedSymbols.add(sym.id);
+      }
     }
 
     // --- if / else-if / else chain (head if surcharges; chain links are flat).
@@ -744,6 +797,17 @@ function computeCognitive(
           : nesting + 1;
         visit(child, inner, depth + 1);
       }
+      return;
+    }
+
+    // --- surcharge-FLAT (C# `goto`/`goto case`): surcharge (+1 + nesting) but
+    // descend children at the SAME nesting — the construct itself is a flow-breaker,
+    // but a structural construct in its operand (`goto case (p ? 1 : 2)`) is NOT
+    // nested by SonarC# (it's counted at the goto's own nesting). Kept separate from
+    // the switch/ternary branch, which DOES nest its children. ---
+    if (cog.surchargeTypes?.has(t)) {
+      total += 1 + nesting;
+      for (const child of node.namedChildren) visit(child, nesting, depth + 1);
       return;
     }
 
@@ -818,7 +882,7 @@ function computeCognitive(
       const kind = cog.booleanOperatorKind(node);
       if (kind !== null) {
         let anc = node.parent;
-        while (anc && anc.type === cog.parenthesizedType) anc = anc.parent;
+        while (anc && matchesParen(anc.type, parenSpec)) anc = anc.parent;
         const ancKind = anc ? cog.booleanOperatorKind(anc) : null;
         if (ancKind !== kind) total += 1; // new run (different or no logical parent)
         for (const child of node.namedChildren) visit(child, nesting, depth + 1);
@@ -840,7 +904,7 @@ function computeCognitive(
         // can't overflow the native stack — bounded by the same guard as `visit`.
         const flatten = (n: Node | null, d: number): void => {
           if (d > MAX_COGNITIVE_DEPTH) return;
-          const inner = skipParens(n, cog.parenthesizedType);
+          const inner = skipParens(n, parenSpec);
           if (inner && cog.booleanOperatorKind(inner) !== null) {
             counted.add(inner.id);
             // Operands via the operand FIELDS (default `left`/`right`, Swift
