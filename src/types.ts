@@ -99,14 +99,17 @@ export interface Symbol {
   // function/method symbols. OMITTED when trivial (=1) — the `receiver?`-omit
   // hygiene — and kept OUT of the symbolId hash (body-volatile: hashing it would
   // re-key symbols on body-only edits and fracture the persisted call graph).
-  // Populated for TS/JS, Python, Go (Phase 2 MVP) and Java (Phase 3).
+  // Populated for TS/JS, Python, Go (Phase 2 MVP), Java (Phase 3), and Rust
+  // (rust-code-analysis-pinned: `?`, every match arm + arm guards, closures, 3 loops).
   complexity?: number;
   // Cognitive complexity (SonarSource whitepaper §1.2: a nesting-aware sum of
   // increments measuring how hard the control flow is to FOLLOW, vs cyclomatic's
   // count of independent paths). OMITTED when trivial (=0) and likewise kept OUT
-  // of the symbolId hash. Populated for Java, TS/JS, Go, and Python (each verified-
-  // exact against sonar-java / SonarJS S3776 / gocognit / sonar-python respectively);
-  // the remaining languages (Rust/Swift/Kotlin/Dart/C#/PHP) get cognitive in a follow-up.
+  // of the symbolId hash. Populated for Java, TS/JS, Go, Python (each verified-exact
+  // against sonar-java / SonarJS S3776 / gocognit / sonar-python respectively), and
+  // Rust (SonarSource-whitepaper/sonar-rust-aligned — deliberately NOT matching
+  // rust-code-analysis's loop-omission + boolean-carry cognitive bugs); the remaining
+  // 5 languages (Swift/Kotlin/Dart/C#/PHP) get cognitive in a follow-up.
   cognitiveComplexity?: number;
 }
 

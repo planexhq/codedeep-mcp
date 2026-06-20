@@ -16,6 +16,12 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
+import {
+  cFamilyBooleanOperatorKind,
+  computeComplexity,
+  isCFamilyBooleanOperator,
+} from '../complexity.js';
+import type { CognitiveOptions } from '../complexity.js';
 
 // Nested `fn` items create their own scope — their calls must NOT attribute to
 // an enclosing function, so they're pruned from the body walk (and aren't
@@ -28,7 +34,136 @@ const RUST_FUNCTION_BODY_SKIP_TYPES: ReadonlySet<string> = new Set(['function_it
 // Same set — Rust impl/trait/struct/enum/mod bodies are descended on the
 // module-root walk (their methods are already PendingBodies, dropped by the
 // seen-set; their const/static initializers attribute as module-level calls).
+// ALSO the complexity boundary (cyclomatic DFS + cognitive walk): nested
+// `function_item` is pruned (its control flow counts toward no symbol — the
+// per-symbol model, like Java anon-classes / Python nested fns), while
+// `closure_expression` is DESCENDED (absent here), so a closure's branches roll
+// into the enclosing fn (matching rust-code-analysis, which merges the closure
+// func-space upward).
 const RUST_SKIP_TYPES: ReadonlySet<string> = RUST_FUNCTION_BODY_SKIP_TYPES;
+
+// Cyclomatic decision set — pinned to Mozilla's `rust-code-analysis` (the
+// empirical `rust-code-analysis-cli` oracle), DELIBERATELY divergent from
+// SonarSource's sonar-rust on two points the two analyzers disagree on: (1) the
+// `?` try operator (`try_expression`) COUNTS — rust-code-analysis treats each `?`
+// as a decision point (an implicit early-return-on-`Err`), sonar-rust does NOT;
+// pinned to count it (it's the dominant control construct in Result-heavy Rust,
+// and a McCabe-faithful branch — the Go precedent, where Probe pinned gocyclo
+// over sonar-go for counting select-cases sonar-go dropped). (2) EVERY `match_arm`
+// counts (incl. the wildcard `_`; an or-pattern `A | B =>` is ONE arm), where
+// sonar-rust filters empty-bodied arms. `if let`/`while let` are plain
+// `if_expression`/`while_expression` (the `let` lives in a `let_condition`/
+// `let_chain` in the `condition` field) so they're counted automatically;
+// `else if` is a nested `if_expression`. `closure_expression` counts +1 (the
+// func-space base rust-code-analysis merges upward) and is descended (its inner
+// branches also count). `match_expression` is NOT here (only its arms count);
+// `let … else` (`let_declaration` + `alternative` block) is NOT counted (neither
+// analyzer does). `&&`/`||` count via the shared isCFamilyBooleanOperator (Rust
+// has no `??`, so that branch is inert, as in Go). VERIFIED against
+// rust-code-analysis-cli on ripgrep + serde.
+const RUST_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'if_expression',
+  'while_expression',
+  'for_expression',
+  'loop_expression',
+  'match_arm',
+  'try_expression',
+  'closure_expression',
+]);
+
+// Cognitive-complexity config. The CYCLOMATIC side pins to rust-code-analysis;
+// the COGNITIVE side is whitepaper/sonar-rust-aligned and DELIBERATELY does NOT
+// replicate two rust-code-analysis BUGS the empirical oracle surfaced (both make
+// rca's cognitive number indefensible, so Probe stays whitepaper-correct — the
+// SonarJS-ternary-bug precedent): (1) rca's Rust cognitive visitor OMITS
+// `loop_expression` entirely (it counts `while`/`for` but a bare `loop {}` adds
+// nothing and doesn't nest its body — an obvious omission, inconsistent with rca's
+// own cyclomatic which DOES count `Loop`); Probe counts all three loops. (2) rca's
+// boolean handling carries its run-state across the whole function (reset only on a
+// nesting bump, unlike rca's own Python impl which resets per clause), so it both
+// under-counts (merged else-if conditions: `if (c||d){} else if (e||f){}` scores 3
+// vs Probe's 4) and over-counts (`a && b && c || d || e` scores 3 vs Probe's 2,
+// worse with `!`/longer chains);
+// Probe counts per maximal same-kind run per expression = 2 (the whitepaper rule).
+// Where rca is NOT buggy the two agree. Also: `?` is NOT counted
+// cognitively (both analyzers agree — unlike cyclomatic), recursion is NOT counted,
+// a whole `match` is +1 with arms nesting (the cyc/cog divergence), closures raise
+// nesting (+0, the lambda rule) and roll into the enclosing fn (descended), and the
+// plain-`else` body NESTS (the whitepaper/sonar default — rca agrees: its `Else`
+// node inherits the if's bumped nesting via the nesting_map). VERIFIED against
+// rust-code-analysis-cli on ripgrep + serde: every divergence decomposes into the
+// two rca bugs above, `let … else` (rca's grammar parses its `else` as a counted
+// node, Probe's as a plain block — documented gap), macro-internal control flow
+// (Probe's grammar treats macro token-trees as opaque — documented), and nested
+// fn/impl bodies (the per-symbol model, like Java anon-classes).
+const RUST_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if_expression',
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  // tree-sitter-rust wraps else/else-if in an `else_clause` (the TS shape, NOT
+  // Java's direct alternative) — unwrap it to the inner if_expression/block.
+  // nestElseBody is left unset (true): the plain-`else` body nests one level (the
+  // sonar/whitepaper default; rca matches via its Else-inherits-bumped-nesting).
+  elseClauseType: 'else_clause',
+  loopTypes: new Set(['loop_expression', 'while_expression', 'for_expression']),
+  // loopBodyField UNSET → bump-ALL children (matches rust-code-analysis, which
+  // raises nesting for the whole loop subtree; keeps the accepted loop-header
+  // overbump shared with Java/TS/Go, not Python's body-only nesting).
+  switchTypes: new Set(['match_expression']),
+  // Rust has no ternary (`if` is an expression) nor try/catch (`?` is separate
+  // and uncounted cognitively) — sentinels that never match a real node.
+  ternaryType: '__rust_no_ternary__',
+  catchType: '__rust_no_catch__',
+  // Closures raise nesting and roll their control flow into the enclosing fn
+  // (+0 themselves; the cyclomatic side counts them +1 and descends them too).
+  nestOnlyTypes: new Set(['closure_expression']),
+  // `break 'outer` / `continue 'outer` carry a `label` NAMED CHILD (Rust break/
+  // continue are expressions); unlabeled ones add nothing.
+  labeledJumpTypes: new Set(['break_expression', 'continue_expression']),
+  hasLabel: (n) => n.namedChildren.some((c) => c?.type === 'label'),
+  // `&&`/`||` via the shared C-family reader (Rust has no `??`). booleanRunStarts
+  // unset → the default (+1 at every operator-kind change) matches both analyzers.
+  booleanOperatorKind: cFamilyBooleanOperatorKind,
+  // Unwrap parens while linearizing a boolean run — rust-code-analysis does NOT
+  // stop a run at a parenthesized expression (unlike Go's sentinel).
+  parenthesizedType: 'parenthesized_expression',
+  // `let … else` (`let_declaration` with an `alternative` block) adds +1 FLAT —
+  // the irrefutable-binding analog of `if let … else` (which IS counted), so
+  // counting it is the whitepaper-correct choice (and matches rust-code-analysis,
+  // whose grammar parses the `else` as a counted node — one of the places rca's
+  // cognitive is NOT buggy). CYCLOMATIC does not count it (neither analyzer does;
+  // a let-else introduces no If/loop/&&/|| node of its own).
+  flatIncrement: (n) => n.type === 'let_declaration' && n.childForFieldName('alternative') !== null,
+  // No initField (Rust's `if` has no init clause — the let-chain is in `condition`)
+  // and no recursion (rust-code-analysis does not count direct recursion).
+};
+
+// Cyclomatic extra-decision predicate (the engine's `extraDecisionPredicate` slot,
+// as Java reuses it for switch labels). Counts `&&`/`||` via the
+// shared C-family reader, PLUS a MATCH-ARM GUARD (`pat if cond => …`). The guard
+// is a decision point rust-code-analysis counts (its grammar yields an `If` for
+// the guard), but it has no dedicated node type here — it's a `condition` field
+// on `match_pattern` (`match_arm → match_pattern{pattern, condition: <expr>}`), so
+// a flat node-type set can't catch it without also counting every unguarded arm.
+// CYCLOMATIC ONLY: rust-code-analysis does NOT count the guard cognitively (only
+// its inner booleans, which the cognitive walk already descends). The guard's own
+// `&&`/`||` are still counted separately by the C-family reader (so `A if c && d`
+// is +2: the guard +1 and the `&&` +1 — matching rca).
+//
+// KNOWN RECALL GAP (safe under-count, grammar-driven, like macro-opacity): the
+// `&&`/`||` that join an `if let`/`while let` LET-CHAIN (`if let Some(x) = o && x > 0`)
+// are ANONYMOUS tokens inside the `let_chain` node, NOT `binary_expression` nodes, so
+// neither this predicate nor the DFS (which walks named children) sees them — Probe
+// under-counts such a chain by its `&&`/`||` count where rust-code-analysis (whose
+// grammar exposes them) counts each. The `if`/`while` itself is still counted, and
+// the cognitive side agrees (rca's cognitive boolean reader also misses let-chain
+// `&&`). Never an over-count; counting them would need anonymous-token machinery for
+// a low-frequency pattern.
+function rustCyclomaticExtra(node: Node): boolean {
+  if (isCFamilyBooleanOperator(node)) return true;
+  return node.type === 'match_pattern' && node.childForFieldName('condition') !== null;
+}
 
 // `struct_expression`'s callee is a type_identifier (`Point { .. }`), never a
 // plain identifier — without this, every brace-construction ref is dropped.
@@ -238,6 +373,12 @@ export function extractRust(
       ignoredMemberCallees: RUST_IGNORED_MEMBER_CALLEES,
     },
   );
+  computeComplexity(bodies, symbols, {
+    decisionNodeTypes: RUST_DECISION_NODE_TYPES,
+    extraDecisionPredicate: rustCyclomaticExtra,
+    skipTypes: RUST_SKIP_TYPES,
+    cognitive: RUST_COGNITIVE_OPTIONS,
+  });
   return { symbols, references, imports };
 }
 

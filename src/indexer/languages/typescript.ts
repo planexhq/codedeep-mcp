@@ -258,7 +258,7 @@ export function extractTypeScript(
   );
   computeComplexity(bodies, symbols, {
     decisionNodeTypes: TS_DECISION_NODE_TYPES,
-    isBooleanOperator: isCFamilyBooleanOperator,
+    extraDecisionPredicate: isCFamilyBooleanOperator,
     skipTypes: TS_SKIP_TYPES,
     cognitive: TS_COGNITIVE_OPTIONS,
   });

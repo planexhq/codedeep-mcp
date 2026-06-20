@@ -23,6 +23,19 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v14: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for Rust
+// (`.rs`) — the first of the remaining 6 languages to get BOTH metrics at once.
+// CYCLOMATIC is pinned to Mozilla's `rust-code-analysis` (the `rust-code-analysis-cli`
+// oracle): the `?` try operator, every match arm, match-arm guards, closures, and
+// the 3 loops all count (McCabe-complete; verified exact on ripgrep + serde modulo
+// macro-internal control flow, which Probe's grammar treats as opaque token-trees,
+// and nested fn/impl bodies, the per-symbol model). COGNITIVE is SonarSource-
+// whitepaper/sonar-rust-aligned and DELIBERATELY does NOT replicate two
+// rust-code-analysis cognitive bugs the oracle surfaced (it omits `loop` entirely,
+// and carries boolean-run state across the whole function) — Probe counts all 3
+// loops and per-expression boolean runs, the defensible number. Adding the fields to
+// Rust symbols is an extraction-logic change `isUnchanged` (mtime/size/language)
+// can't detect, so the bump force-invalidates warm caches.
 // v13: per-symbol COGNITIVE complexity now also computed for Python (`.py`),
 // VERIFIED-EXACT against sonar-python's CognitiveComplexityVisitor (0 mismatches on
 // all ~5034 functions WITHOUT a nested scope across flask + django; differs from
@@ -69,7 +82,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both

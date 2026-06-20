@@ -40,6 +40,9 @@ const goCog = (src: string, name = 'f') =>
   bothCx(`package p\n${src}`, name, 'go', 'src/test.go');
 // Python carries both metrics (cognitive added this slice). sonar-python-aligned.
 const pyCog = (src: string, name = 'f') => bothCx(src, name, 'python', 'src/test.py');
+// Rust carries both metrics: cyclomatic pinned to rust-code-analysis, cognitive
+// whitepaper/sonar-rust-aligned. `src` is one or more top-level items.
+const rustCog = (src: string, name = 'f') => bothCx(src, name, 'rust', 'src/test.rs');
 
 // Java carries BOTH metrics (Phase 3). `src` is one or more member declarations;
 // they're wrapped in `class T { … }`. Returns { cyc, cog } for the named member
@@ -785,5 +788,139 @@ describe('cognitive complexity — Python nested-scope exclusion (documented div
     expect(
       pyCog('def f(a):\n  class C:\n    def m(self, b):\n      if b:\n        pass\n  if a:\n    pass').cog,
     ).toBe(1);
+  });
+});
+
+// Rust — CYCLOMATIC pinned to Mozilla's rust-code-analysis (the rust-code-analysis-cli
+// oracle), COGNITIVE whitepaper/sonar-rust-aligned. Every value below is
+// oracle-confirmed against rust-code-analysis-cli on the same snippet EXCEPT the
+// loop-cognitive cases, where Probe is whitepaper-correct and rust-code-analysis is
+// buggy (its cognitive visitor omits `loop` — those rca values are noted inline).
+describe('complexity — Rust (rust-code-analysis cyclomatic / whitepaper cognitive)', () => {
+  // --- cyclomatic ---
+  it('if / else-if / else chain: only the `if`s count', () => {
+    // base + if + else-if(an if) = 3; `else` adds nothing.
+    expect(rustCog('fn f(a: bool, b: bool) { if a { x(); } else if b { y(); } else { z(); } }').cyc).toBe(3);
+  });
+
+  it('each match arm counts (+1); a whole match does not', () => {
+    expect(rustCog('fn f(x: i32) -> i32 { match x { 1 => a(), 2 => b(), _ => c() } }').cyc).toBe(4);
+  });
+
+  it('an or-pattern arm (A | B | C =>) is ONE arm, not N', () => {
+    // 2 arms (+2), not 4 — the `|` alternatives are part of one match_pattern.
+    expect(rustCog('fn f(x: i32) { match x { 1 | 2 | 3 => a(), _ => c() } }').cyc).toBe(3);
+  });
+
+  it('a match-arm GUARD adds +1 (the rust-code-analysis convention)', () => {
+    // 2 arms (+2) + the `if c` guard (+1) = base+3 = 4.
+    expect(rustCog('fn f(x: i32) -> i32 { match x { A if c => 1, _ => 2 } }').cyc).toBe(4);
+  });
+
+  it('a guard`s own &&/|| count on top of the guard +1', () => {
+    // 2 arms + guard(+1) + the `&&` inside it(+1) = base+4 = 5.
+    expect(rustCog('fn f(x: i32) -> i32 { match x { A if c && d => 1, _ => 2 } }').cyc).toBe(5);
+  });
+
+  it('all three loops count (loop / while / for)', () => {
+    expect(rustCog('fn f() { loop { a(); } while b() { c(); } for i in r() { d(); } }').cyc).toBe(4);
+  });
+
+  it('&& and || each count (C-family; Rust has no ??)', () => {
+    expect(rustCog('fn f(a: bool) { if a && b || c { x(); } }').cyc).toBe(4);
+  });
+
+  it('the `?` try operator counts (+1 each) — the rust-code-analysis pin', () => {
+    expect(rustCog('fn f() -> Result<(), E> { foo()?; bar()?; Ok(()) }').cyc).toBe(3);
+  });
+
+  it('if-let / while-let count as if / while', () => {
+    expect(rustCog('fn f(o: Option<i32>) { if let Some(x) = o { a(); } while let Some(y) = n() { b(); } }').cyc).toBe(3);
+  });
+
+  it('`let … else` is NOT counted cyclomatically (trivial → omitted)', () => {
+    // neither analyzer counts let-else cyclomatically; cyc 1 is omitted as undefined.
+    expect(rustCog('fn f(o: Option<i32>) { let Some(x) = o else { return; }; }').cyc).toBeUndefined();
+  });
+
+  it('a closure counts (+1) and its body is descended', () => {
+    // closure(+1) + the if inside it(+1) = base+2 = 3.
+    expect(rustCog('fn f() { let g = |n: i32| if n > 0 { 1 } else { 2 }; }').cyc).toBe(3);
+  });
+
+  it('a nested `fn` is excluded (the per-symbol model)', () => {
+    // the inner fn`s `if` counts toward nobody → outer f is trivial (both omitted).
+    const r = rustCog('fn f() { fn inner() { if a { b(); } } }');
+    expect(r.cyc).toBeUndefined();
+    expect(r.cog).toBeUndefined();
+  });
+
+  // --- cognitive ---
+  it('if / else-if / else: head surcharges, else-if & else are +1 flat', () => {
+    expect(rustCog('fn f(a: bool, b: bool) { if a { x(); } else if b { y(); } else { z(); } }').cog).toBe(3);
+  });
+
+  it('nesting surcharges: a nested if is +1+nesting', () => {
+    // if(+1) + inner if(+1+1) = 3.
+    expect(rustCog('fn f(a: bool, b: bool) { if a { if b { x(); } } }').cog).toBe(3);
+  });
+
+  it('`loop` IS counted cognitively (whitepaper-correct; rust-code-analysis omits it → would give 1)', () => {
+    // loop(+1) + if at nesting 1(+2) = 3. rca bug: loop=0, if at nesting 0 → cog 1.
+    expect(rustCog('fn f(a: bool) { loop { if a { x(); } } }').cog).toBe(3);
+  });
+
+  it('`while` surcharges and nests its body', () => {
+    expect(rustCog('fn f(a: bool) { while a { if b() { x(); } } }').cog).toBe(3);
+  });
+
+  it('a whole match is +1 with its arms nesting', () => {
+    // if(+1) + match at nesting 1(+2) = 3.
+    expect(rustCog('fn f(a: bool, x: i32) { if a { match x { 1 => b(), _ => c() } } }').cog).toBe(3);
+  });
+
+  it('booleans: +1 per maximal same-kind run, per expression', () => {
+    // a&&b&&c || d||e = one && run + one || run = 2 (whitepaper). This is a
+    // DIVERGING shape: rust-code-analysis over-counts it to 3 via its cross-expression
+    // boolean carry (a `&&`-run followed by a `||`-run). A `(a&&b)||c||d` shape, by
+    // contrast, happens to score 2 on both — so it would be a vacuous guard.
+    expect(rustCog('fn f(a: bool) -> bool { a && b && c || d || e }').cog).toBe(2);
+  });
+
+  it('a labeled break is +1 flat (and `loop` is counted)', () => {
+    // loop(+1) + while at nesting 1(+2) + labeled break(+1 flat) = 4. rca (loop
+    // omitted): while at nesting 0(+1) + break(+1) = 2.
+    expect(rustCog("fn f() { 'outer: loop { while a() { break 'outer; } } }").cog).toBe(4);
+  });
+
+  it('a break/continue carrying a VALUE descends that value`s control flow', () => {
+    // Rust break/continue are expressions. loop(+1) + the break value `if a {} else {}`
+    // at nesting 1: if(+2) + else(+1 flat) = 4. (A bare/early-return guard here would
+    // wrongly score 1.)
+    expect(rustCog('fn f(a: bool) -> i32 { loop { break if a { 1 } else { 2 }; } }').cog).toBe(4);
+  });
+
+  it('`let … else` is +1 flat cognitively (the if-let-else analog)', () => {
+    expect(rustCog('fn f(o: Option<i32>) { let Some(x) = o else { return; }; }').cog).toBe(1);
+  });
+
+  it('a let-else`s else-block control flow is descended at the binding`s nesting', () => {
+    // let-else(+1 flat) + the else block `if a() { return } else { panic!() }` at the
+    // binding`s (base) nesting: if(+1) + else(+1 flat) = 3. Cyclomatically only the
+    // inner if counts (the let-else itself does not) → cyc 2.
+    const r = rustCog('fn f(o: Option<i32>) { let Some(x) = o else { if a() { return; } else { panic!() } }; }');
+    expect(r.cyc).toBe(2);
+    expect(r.cog).toBe(3);
+  });
+
+  it('the plain-else body nests one level (whitepaper / sonar default)', () => {
+    // if(+1) + else(+1 flat) + if-in-else at nesting 1(+2) = 4. If the else body
+    // did NOT nest this would be 3 — guards the nestElseBody-unset (true) choice.
+    expect(rustCog('fn f(a: bool, b: bool) { if a { x(); } else { if b { y(); } } }').cog).toBe(4);
+  });
+
+  it('a closure raises nesting (+0 itself) and rolls its control flow in', () => {
+    // closure nests its body: if-a at nesting 1(+2) + if-b at nesting 2(+3) = 5.
+    expect(rustCog('fn f(a: bool) { let g = || if a { if b() { x(); } }; }').cog).toBe(5);
   });
 });

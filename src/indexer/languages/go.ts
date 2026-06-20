@@ -318,7 +318,7 @@ export function extractGo(
   );
   computeComplexity(bodies, symbols, {
     decisionNodeTypes: GO_DECISION_NODE_TYPES,
-    isBooleanOperator: isCFamilyBooleanOperator,
+    extraDecisionPredicate: isCFamilyBooleanOperator,
     skipTypes: GO_SKIP_TYPES,
     cognitive: GO_COGNITIVE_OPTIONS,
   });

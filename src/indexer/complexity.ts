@@ -21,15 +21,22 @@ export interface ComplexityOptions {
   // The `switch`/`select` CONTAINER and `default`/`else`/`finally` are
   // deliberately absent.
   decisionNodeTypes: ReadonlySet<string>;
-  // The C-family boolean-operator trap (proposal §6 #2): TS and Go use ONE
-  // `binary_expression` node for ALL binary ops, so a flat node-type set would
-  // miscount `a + b` / `a == b`. This predicate reads the operator TOKEN
-  // (`childForFieldName('operator')?.type`) and returns true for the
-  // short-circuit logical operators — `&&`/`||`/`??` (SonarJS counts `??`; Go
-  // simply never has it). See isCFamilyBooleanOperator below. Python is clean (a
-  // distinct `boolean_operator` node folded straight into `decisionNodeTypes`),
-  // so it omits this.
-  isBooleanOperator?: (node: Node) => boolean;
+  // An EXTRA per-node +1 cyclomatic-decision predicate (beyond `decisionNodeTypes`):
+  // any node it returns true for adds +1. It exists for "extra decisions" a flat
+  // node-type set can't express, and is reused by THREE kinds of consumer:
+  //  - the C-family boolean trap (TS/Go): ONE `binary_expression` node covers ALL
+  //    binary ops, so a flat set would miscount `a + b` / `a == b`; the predicate
+  //    reads the operator TOKEN (`childForFieldName('operator')?.type`) and returns
+  //    true only for the short-circuit logical operators `&&`/`||`/`??` (SonarJS
+  //    counts `??`; Go never has it). See isCFamilyBooleanOperator below.
+  //  - Java (`javaCyclomaticExtra`): a non-default `switch_label` OR a boolean.
+  //  - Rust (`rustCyclomaticExtra`): a match-arm GUARD (a `match_pattern` with a
+  //    `condition` field) OR a boolean.
+  // Python omits it — its `boolean_operator` is a distinct node folded straight into
+  // `decisionNodeTypes`. (Formerly named `isBooleanOperator`; renamed once a 2nd
+  // non-boolean consumer (Rust guards, after Java switch-labels) made the old name
+  // a misnomer.)
+  extraDecisionPredicate?: (node: Node) => boolean;
   // Children of these types are NOT descended — pass the language's MAIN call
   // walk skip set (TS_SKIP_TYPES / PY_SKIP_TYPES / GO_SKIP_TYPES), so the number
   // tracks "this symbol's body" along the same boundary the resolved call graph
@@ -63,8 +70,8 @@ export interface ComplexityOptions {
   // COGNITIVE complexity (proposal §1.2): when present, a second nesting-aware
   // walk runs alongside the cyclomatic one and writes `Symbol.cognitiveComplexity`.
   // Absent ⇒ cognitive stays undefined for that language (the not-yet-done
-  // Rust/Swift/Kotlin/Dart/C#/PHP).
-  // Populated for **Java + TS/JS + Go + Python**. The algorithm is the SonarSource
+  // Swift/Kotlin/Dart/C#/PHP).
+  // Populated for **Java + TS/JS + Go + Python + Rust**. The algorithm is the SonarSource
   // whitepaper's, clean-room verified against `sonar-java`'s
   // `CognitiveComplexityVisitor` (Java), `eslint-plugin-sonarjs`'s S3776 (TS/JS),
   // `uudashr/gocognit` (Go), AND `sonar-python`'s `CognitiveComplexityVisitor`
@@ -75,11 +82,13 @@ export interface ComplexityOptions {
   // nesting rule, boolean-run collapse, and labeled jumps need structured handlers),
   // so CognitiveOptions names each construct explicitly. The OPTIONAL fields below
   // (`elseClauseType`, `elifClauseType`, `initField`, `nestElseBody`, `loopBodyField`,
-  // `booleanRunStarts`, `excludeBooleanRun`, `recursion`) default to the Java/
-  // sonar-java behavior; TS sets `elseClauseType`/`booleanRunStarts`/`excludeBooleanRun`
-  // (SonarJS S3776), Go sets `initField`/`nestElseBody`/`recursion` + sentinel
-  // `parenthesizedType` (gocognit), Python sets `elifClauseType`/`loopBodyField` +
-  // sentinel `parenthesizedType` (sonar-python). See computeCognitive below +
+  // `booleanRunStarts`, `excludeBooleanRun`, `recursion`, `flatIncrement`) default to
+  // the Java/sonar-java behavior; TS sets `elseClauseType`/`booleanRunStarts`/
+  // `excludeBooleanRun` (SonarJS S3776), Go sets `initField`/`nestElseBody`/`recursion`
+  // + sentinel `parenthesizedType` (gocognit), Python sets `elifClauseType`/
+  // `loopBodyField` + sentinel `parenthesizedType` (sonar-python), Rust sets
+  // `elseClauseType` (the TS unwrap) + `flatIncrement` (let-else) and unwraps
+  // `parenthesized_expression` (whitepaper/sonar-rust). See computeCognitive below +
   // CLAUDE.md "Cognitive Complexity Rules".
   cognitive?: CognitiveOptions;
 }
@@ -224,6 +233,15 @@ export interface CognitiveOptions {
     bareCalleeName: (node: Node) => string | null;
     eligibleKinds: ReadonlySet<string>;
   };
+  // Optional FLAT-increment predicate: a node it returns true for adds +1 FLAT
+  // (no nesting surcharge, no nesting bump) and is then descended normally. For a
+  // single conditional flow-breaker that has no dedicated construct branch — Rust's
+  // `let … else` (`let PAT = EXPR else { diverge }`), the irrefutable-binding analog
+  // of `if let … else`: it adds one branch but, having no "then" arm and a
+  // divergent `else`, doesn't raise nesting (matching how a guard or labeled jump
+  // is flat). Checked AFTER skipTypes but the node must not match another branch
+  // (a let_declaration matches none). Java/TS/Go/Python leave it unset.
+  flatIncrement?: (node: Node) => boolean;
 }
 
 // Shared C-family boolean-operator reader (TS/JS + Go). One `binary_expression`
@@ -312,7 +330,7 @@ export function computeComplexity(
     while (stack.length > 0) {
       const node = stack.pop()!;
       if (opts.decisionNodeTypes.has(node.type)) count++;
-      else if (opts.isBooleanOperator?.(node)) count++;
+      else if (opts.extraDecisionPredicate?.(node)) count++;
       for (const child of node.namedChildren) {
         if (!cycSkip.has(child.type)) stack.push(child);
       }
@@ -546,10 +564,16 @@ function computeCognitive(
       return;
     }
 
-    // --- labeled break/continue: +1 flat (the only break/continue that counts) ---
+    // --- labeled break/continue: +1 flat if it jumps to a label, then DESCEND. In
+    // Rust `break`/`continue` are EXPRESSIONS that can carry a value (`break a && b`,
+    // `break if c {1} else {2}`) whose control flow counts (flat, no extra bump); the
+    // label is a `label` leaf that matches no branch, so descending it is a no-op.
+    // Go/Java/TS/Python jumps hold only a label/nothing, so the descent is a no-op
+    // there too (verified: the full suite is unchanged). ---
     if (cog.labeledJumpTypes.has(t)) {
       if (cog.hasLabel(node)) total += 1;
-      return; // the only named child is the label identifier — nothing to descend
+      for (const child of node.namedChildren) visit(child, nesting, depth + 1);
+      return;
     }
 
     // --- boolean runs: +1 per maximal same-kind sequence in SOURCE order ---
@@ -596,6 +620,15 @@ function computeCognitive(
       // Descend operands at the SAME nesting (booleans are flat). The flattened
       // logical nodes are in `counted` so they skip the run-count but are still
       // descended (to catch a nested ternary / control structure in an operand).
+      for (const child of node.namedChildren) visit(child, nesting, depth + 1);
+      return;
+    }
+
+    // --- flat conditional (Rust `let … else`): +1 flat, then descend at the
+    // SAME nesting (no surcharge, no bump — the value expr and the divergent else
+    // block both stay at the binding's level). ---
+    if (cog.flatIncrement?.(node)) {
+      total += 1;
       for (const child of node.namedChildren) visit(child, nesting, depth + 1);
       return;
     }

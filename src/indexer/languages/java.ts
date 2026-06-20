@@ -82,7 +82,7 @@ const JAVA_CYCLOMATIC_SKIP_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 // The "+1 per node" cyclomatic cases a flat type set can't express, composed
-// into the engine's `isBooleanOperator` slot (really an "extra +1 predicate"):
+// into the engine's `extraDecisionPredicate` slot:
 // (1) a NON-DEFAULT `switch_label` — a `default` label has zero named children
 // (just the keyword token), a `case X`/`case X,Y` label has ≥1; this counts each
 // case label like sonar-java's CASE_LABEL, default excluded; (2) the C-family
@@ -300,7 +300,7 @@ export function extractJava(
   );
   computeComplexity(bodies, symbols, {
     decisionNodeTypes: JAVA_DECISION_NODE_TYPES,
-    isBooleanOperator: javaCyclomaticExtra,
+    extraDecisionPredicate: javaCyclomaticExtra,
     skipTypes: JAVA_SKIP_TYPES,
     cyclomaticSkipTypes: JAVA_CYCLOMATIC_SKIP_TYPES,
     cognitive: JAVA_COGNITIVE_OPTIONS,
