@@ -51,6 +51,10 @@ const swiftCog = (src: string, name = 'f') => bothCx(src, name, 'swift', 'src/te
 // top-level declarations (a function `f` unless noted). MULTI-LINE is REQUIRED — the
 // tree-sitter-kotlin grammar errors on members/when-entries crammed on one line.
 const kotlinCog = (src: string, name = 'f') => bothCx(src, name, 'kotlin', 'src/test.kt');
+// Dart carries both metrics, BOTH verified for behavioral compatibility with SonarSource's
+// SonarQube's Dart rules (per-function). `src` is one or more
+// top-level declarations (a function `f` unless noted).
+const dartCog = (src: string, name = 'f') => bothCx(src, name, 'dart', 'src/test.dart');
 
 // Java carries BOTH metrics (Phase 3). `src` is one or more member declarations;
 // they're wrapped in `class T { … }`. Returns { cyc, cog } for the named member
@@ -1254,5 +1258,150 @@ describe('cognitive complexity — Kotlin (sonar-kotlin CognitiveComplexity / wh
 
   it('nested fun is excluded (per-symbol model)', () => {
     expect(kotlinCog('fun f(a: Boolean) {\n  fun g() {\n    if (a) {\n      if (a) h()\n    }\n  }\n  k()\n}').cog).toBeUndefined();
+  });
+});
+
+// ── Dart (SonarQube-S1541-pinned, BOTH metrics) — every value verified for behavioral
+// compatibility with SonarQube's Dart rules (+ dogfood-found edges). ──
+describe('complexity — Dart cyclomatic (SonarQube S1541)', () => {
+  it('omits trivial; counts each branch point', () => {
+    expect(dartCog('void f(){ g(); }').cyc).toBeUndefined();
+    expect(dartCog('void f(int a){ if(a>0){} }').cyc).toBe(2);
+    expect(dartCog('void f(int a){ if(a>0){} else {} }').cyc).toBe(2); // else adds 0
+    expect(dartCog('void f(int a){ if(a>0){} else if(a<0){} else {} }').cyc).toBe(3); // else-if +1
+    expect(dartCog('int f(int a)=> a>0 ? 1 : 2;').cyc).toBe(2);
+  });
+  it('all loop forms count', () => {
+    expect(dartCog('void f(){ for(var i=0;i<3;i++){} }').cyc).toBe(2);
+    expect(dartCog('void f(List l){ for(var x in l){} }').cyc).toBe(2);
+    expect(dartCog('void f(int a){ while(a>0){a--;} }').cyc).toBe(2);
+    expect(dartCog('void f(int a){ do{a--;}while(a>0); }').cyc).toBe(2);
+    expect(dartCog('Future f(Stream s) async { await for(var x in s){} }').cyc).toBe(2);
+  });
+  it('switch: each statement case + expression arm (incl _); default excluded', () => {
+    expect(dartCog('void f(int a){ switch(a){case 1:break;case 2:break;default:break;} }').cyc).toBe(3);
+    expect(dartCog('void f(int a){ switch(a){case 1:case 2:case 3:break;default:break;} }').cyc).toBe(4); // 3 cases
+    expect(dartCog('int f(int a)=> switch(a){1=>10,2=>20,_=>0};').cyc).toBe(4); // 3 arms incl _
+    expect(dartCog('int f(int a)=> switch(a){int x when x>0=>1,_=>0};').cyc).toBe(3);
+  });
+  it('catch / finally / assert add 0', () => {
+    expect(dartCog('void f(){ try{g();}catch(e){h();} }').cyc).toBeUndefined();
+    expect(dartCog('void f(){ try{}finally{g();} }').cyc).toBeUndefined();
+    expect(dartCog('void f(int a){ assert(a>0); }').cyc).toBeUndefined();
+  });
+  it('booleans: each && / || counts', () => {
+    expect(dartCog('bool f(bool a,bool b)=> a && b;').cyc).toBe(2);
+    expect(dartCog('bool f(bool a,bool b,bool c)=> a && b && c;').cyc).toBe(3);
+    expect(dartCog('bool f(bool a,bool b,bool c,bool d)=> a || b || c || d;').cyc).toBe(4);
+    expect(dartCog('bool f(bool a,bool b,bool c)=> a && !b && c;').cyc).toBe(3); // ! irrelevant
+  });
+  it('null-aware: ?? / ?[ index / ??= count; ?.. cascade does not', () => {
+    expect(dartCog('int f(int? a)=> a ?? 0;').cyc).toBe(2);
+    expect(dartCog('int f(int? a,int? b)=> a ?? b ?? 0;').cyc).toBe(3);
+    expect(dartCog('int? f(List? a)=> a?[0];').cyc).toBe(2); // null-aware index (read)
+    // the ?[ index counts even when its result is INVOKED — unlike ?.m() (which is 0); measured
+    expect(dartCog("void f(Map? h){ h?['k'](); }").cyc).toBe(2);
+    expect(dartCog("void f(Map m){ m['k'] ??= 1; }").cyc).toBe(2); // ??=
+    expect(dartCog('void f(List? a){ a?..clear()..add(1); }').cyc).toBeUndefined(); // ?.. cascade not counted
+  });
+  it('?. property access counts; ?. method invocation does not (incl generic)', () => {
+    expect(dartCog('int? f(A a)=> a?.length;').cyc).toBe(2); // property access
+    expect(dartCog('void f(A a){ a?.m(); }').cyc).toBeUndefined(); // method call — not counted
+    expect(dartCog('void f(A a){ a?.m<int>(1); }').cyc).toBeUndefined(); // generic method call
+    expect(dartCog('int? f(A a)=> a?.b?.c;').cyc).toBe(3); // two property accesses
+    expect(dartCog('void f(A a){ a?.b?.m(); }').cyc).toBe(2); // ?.b property (1), ?.m() call (0)
+  });
+  it('null-aware WRITE selectors count (property + index)', () => {
+    expect(dartCog('void f(A a){ a?.b = 1; }').cyc).toBe(2);
+    expect(dartCog('void f(A a){ a?.b += 1; }').cyc).toBe(2); // the ?., not the +=
+    expect(dartCog('void f(List? a){ a?[0] = 1; }').cyc).toBe(2); // null-aware index write
+  });
+  it('null-aware spread ...? counts; plain ... does not', () => {
+    expect(dartCog('List f(List? b)=> [...?b];').cyc).toBe(2);
+    expect(dartCog('List f(List b)=> [...b];').cyc).toBeUndefined();
+  });
+  it('collection-if / collection-for count', () => {
+    expect(dartCog('List f(bool b)=> [1, if(b) 2, 3];').cyc).toBe(2);
+    expect(dartCog('List f(List xs)=> [for(var x in xs) x];').cyc).toBe(2);
+  });
+  it('lambda + local-fn branches roll into the enclosing member', () => {
+    expect(dartCog('void f(List l){ l.forEach((x){ if(x!=null){} }); }').cyc).toBe(2);
+    expect(dartCog('void f(int a){ void g(){ if(a>0){} } g(); }').cyc).toBe(2);
+  });
+  it('member kinds: method / getter / setter / operator / constructor', () => {
+    expect(dartCog('class C { void m(int a){ if(a>0){} } }', 'm').cyc).toBe(2);
+    expect(dartCog('class C { int get x { if(true){return 1;} return 0; } }', 'x').cyc).toBe(2);
+    expect(dartCog('class C { bool operator==(o){ if(o==null){return false;} return true; } }', '==').cyc).toBe(2);
+    expect(dartCog('class C { C(int a){ if(a>0){} } }', 'constructor').cyc).toBe(2);
+  });
+});
+
+describe('complexity — Dart cognitive (SonarQube S3776)', () => {
+  it('structural +1 (flat), nesting surcharge', () => {
+    expect(dartCog('void f(int a){ if(a>0){g(a);} }').cog).toBe(1);
+    expect(dartCog('int f(int a)=> a>0 ? 1 : 2;').cog).toBe(1);
+    expect(dartCog('void f(int a){ if(a>0){ if(a>1){g(a);} } }').cog).toBe(3); // 1 + (1+1)
+    expect(dartCog('void f(List l){ for(var x in l){ for(var y in l){ if(x==y){g(x);} } } }').cog).toBe(6);
+  });
+  it('do-while SURCHARGES (not Kotlin-style nest-only)', () => {
+    expect(dartCog('void f(int a){ do{ if(a>0){g();} }while(a>0); }').cog).toBe(3); // do(1) + if@n1(2)
+  });
+  it('whole switch = +1 (not per case); catch surcharges; finally is free', () => {
+    expect(dartCog('void f(int a){ switch(a){case 1:break;case 2:break;case 3:break;} }').cog).toBe(1);
+    expect(dartCog('void f(){ try{}on A catch(e){}on B catch(e){} }').cog).toBe(2); // 2 catches
+    expect(dartCog('void f(){ try{g();}finally{h();} }').cog).toBeUndefined(); // finally free
+    expect(dartCog('void f(bool c,bool d){ try{}catch(e){ if(c){} }finally{ if(d){} } }').cog).toBe(4);
+  });
+  it('binding-less `on E {}` surcharges like a catch', () => {
+    expect(dartCog('void f(bool c){ try{}on StateError{ if(c){} } }').cog).toBe(3); // on(1) + if@n1(2)
+  });
+  it('else / else-if chain are +1 flat; if-in-else nests', () => {
+    expect(dartCog('void f(int a){ if(a>0){g(1);} else {g(2);} }').cog).toBe(2);
+    expect(dartCog('void f(int a){ if(a>0){} else if(a==0){} else if(a<0){} }').cog).toBe(3); // flat
+    expect(dartCog('void f(int a){ if(a>0){} else { if(a<0){} } }').cog).toBe(4); // if 1 + else 1 + nested if 2
+  });
+  it('collection-if charges its else (unlike a bare surcharge); nesting compounds', () => {
+    expect(dartCog('List f(bool b)=> [if(b) 1 else 2];').cog).toBe(2); // if 1 + else 1
+    expect(dartCog('List f(bool b,bool c)=> [if(b) if(c) 1];').cog).toBe(3); // outer 1 + inner (1+1)
+    expect(dartCog('List f(bool b,bool c)=> [if(b) 1 else if(c) 2 else 3];').cog).toBe(3); // flat chain
+    expect(dartCog('List f(List xs)=> [for(var x in xs) if(x!=null) x];').cog).toBe(3); // for 1 + if@n1 2
+  });
+  it('booleans are TREE-SCOPED (a run = a kind-change vs the logical ancestor)', () => {
+    expect(dartCog('bool f(bool a,bool b)=> a && b;').cog).toBe(1);
+    expect(dartCog('bool f(bool a,bool b,bool c)=> a && b && c;').cog).toBe(1); // one && run
+    expect(dartCog('bool f(bool a,bool b,bool c)=> a && b || c;').cog).toBe(2);
+    expect(dartCog('bool f(bool a,bool b,bool c,bool d)=> a && b || c && d;').cog).toBe(3);
+    // parens don't change the count (tree-scoped, not source-order): both 4
+    expect(dartCog('bool f(bool a,bool b,bool c,bool d,bool e,bool g)=> (a&&b)||(c&&d)||(e&&g);').cog).toBe(4);
+    expect(dartCog('bool f(bool a,bool b,bool c,bool d,bool e,bool g)=> a&&b||c&&d||e&&g;').cog).toBe(4);
+    expect(dartCog('bool f(bool a,bool b,bool c)=> (a && b) && c;').cog).toBe(1); // same-kind paren merges
+    // ONLY parens are transparent to the ancestor walk — a `!`/`as` wrapper is NOT (oracle-
+    // verified): the inner run stays separate. Leaf-`!` (`a && !b && c`) is still 1, but a
+    // `!`/cast WRAPPING a same-kind sub-run does NOT merge it.
+    expect(dartCog('bool f(bool a,bool b,bool c)=> !(a && b) && c;').cog).toBe(2);
+    expect(dartCog('bool f(bool a,bool b,bool c)=> (a && b) as bool && c;').cog).toBe(2);
+    // && spine with || leaves: the SonarQube Dart model = 3 (NOT sonar-java's 4 nor SonarJS's 2)
+    expect(dartCog('bool f(bool a,bool b,bool c,bool d,bool e,bool g)=> a && b && (c||d) && (e||g);').cog).toBe(3);
+    expect(dartCog('void f(int a,int b){ if(a>0 && b>0){g();} }').cog).toBe(2); // if 1 + && run 1
+  });
+  it('?? is FREE cognitively (the cyc/cog divergence)', () => {
+    expect(dartCog('int f(int? a,int? b)=> a ?? b ?? 0;').cog).toBeUndefined();
+    expect(dartCog('int? f(List? a)=> a?.b;').cog).toBeUndefined();
+  });
+  it('recursion adds 0 cognitively (measured)', () => {
+    expect(dartCog('void f(){ f(); }').cog).toBeUndefined();
+    expect(dartCog('void f(bool c){ if(c) f(); }').cog).toBe(1); // just the if
+    expect(dartCog('int f(int n)=> n<=1 ? 1 : n * f(n-1);').cog).toBe(1); // just the ternary
+  });
+  it('Dart-3 if-case guard booleans count', () => {
+    expect(dartCog('void f(Object o,bool a,bool b){ if(o case int n when a && b){} }').cog).toBe(2);
+  });
+  it('labeled break/continue +1 flat; plain ones free', () => {
+    expect(dartCog('void f(){ for(var i=0;i<3;i++){ break; } }').cog).toBe(1); // plain break free
+    expect(dartCog('void f(){ outer: for(var i=0;i<3;i++){ for(var j=0;j<3;j++){ if(j==1) break outer; } } }').cog).toBe(7);
+  });
+  it('lambda + local-fn raise nesting and roll in (+0 themselves)', () => {
+    expect(dartCog('void f(List l){ l.forEach((x){ if(x!=null){g(x);} }); }').cog).toBe(2); // lambda nests the if
+    expect(dartCog('void f(int a){ void g(){ if(a>0){h(a);} } g(); }').cog).toBe(2); // local fn rolls in
   });
 });

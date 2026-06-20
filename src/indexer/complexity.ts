@@ -124,6 +124,23 @@ export interface CognitiveOptions {
   conditionField: string;
   consequenceField: string;
   alternativeField: string;
+  // A SECOND node type treated identically to `ifType` (Dart's collection-`if`
+  // `if_element`, which lives inside list/set/map literals). It surcharges as the
+  // head if, charges its `else`/`else if` +1 flat, and nests — measured EXACT vs
+  // the SonarQube Dart model (`[if(b) 1 else 2]` = cog 2, not 1; a bare `switchTypes` mapping
+  // would drop the else). Routed through the same if-branch + handleAlternative
+  // else-if test. Only Dart sets it; the engine's single `ifType` is unchanged.
+  collectionIfType?: string;
+  // Some grammars give the `if` NO condition field — the condition (and Dart-3
+  // `case`/pattern/`when`-guard) are POSITIONAL children (Dart's `if_statement`).
+  // When set, the if-case (and handleAlternative's else-if) walk every named child
+  // that is NOT the consequence/alternative field-child (and not a comment) at base
+  // nesting, so the condition's booleans/pattern guards count. `conditionField`/
+  // `initField` are then unused. Dart's collection `if_element` ALSO routes through
+  // this (it HAS a `condition` field, but that field-child is simply the lone
+  // non-consequence/alternative named child, so the same walk reaches it). Other
+  // languages expose a condition field and leave this unset (field-based path).
+  conditionFromNamedChildren?: boolean;
   // Some grammars wrap the `else`/`else if` in a dedicated node under the
   // `alternativeField` instead of holding the if/block directly (tree-sitter-
   // typescript: `alternative: else_clause → if_statement|statement_block`,
@@ -228,6 +245,17 @@ export interface CognitiveOptions {
   // and `finally` add nothing and don't raise nesting, so no parent node needs
   // naming).
   catchType: string;
+  // A try container whose catch BODIES are SIBLINGS of the catch clause rather
+  // than children of it (Dart: `try_statement` holds `body:` block, then flat
+  // `on`/type/`catch_clause` headers each FOLLOWED BY a sibling `block`, then a
+  // `finally_clause`). The generic `catchType` branch can't nest such a body, so a
+  // dedicated handler surcharges (+1 + nesting) once per catch-body block and nests
+  // it at +1, while the try body, on-type/catch headers, and finally stay at base
+  // nesting. The try body is found by `bodyField`; every OTHER direct child of
+  // `catchBodyType` is a catch body — which also covers a binding-less `on E {}`
+  // (a block with no `catch_clause`). Only Dart sets it; others leave it unset and
+  // keep the `catchType` branch (their catch clause CONTAINS its body).
+  tryType?: { node: string; bodyField: string; catchBodyType: string };
   // Raise nesting for the subtree but add NOTHING (lambdas; Go's func_literal;
   // Python's match_statement — 0 structural with its case bodies nested; later:
   // nested fns). The whitepaper-derived "hybrid +1 flat" hypothesis was WRONG —
@@ -253,6 +281,18 @@ export interface CognitiveOptions {
   // comment can't shift the operands.
   booleanLeftField?: string;
   booleanRightField?: string;
+  // TREE-SCOPED boolean counting (the SonarQube Dart model) instead of the source-order flatten.
+  // A logical node adds +1 iff its operator KIND differs from its nearest LOGICAL
+  // ANCESTOR's kind (skipping `parenthesizedType` wrappers) — i.e. a top-of-tree
+  // logical node, or one whose enclosing logical operator is the other kind, starts
+  // a run. This is a THIRD distinct boolean algorithm: `a&&b&&(c||d)&&(e||f)` is 4 in
+  // sonar-java (source-order), 2 in SonarJS (`&&`-runs only), and 3 in the SonarQube Dart model
+  // (tree-scoped) — and parenthesized vs precedence-grouped operands count
+  // identically (`(a&&b)||(c&&d)||(e&&g)` = `a&&b||c&&d||e&&g` = 4). When set, the
+  // boolean branch skips the flatten entirely and processes each logical node as the
+  // DFS reaches it (operands descend via namedChildren), so booleanRunStarts /
+  // excludeBooleanRun / the operand fields are unused. Only Dart sets it.
+  booleanByTreeParent?: boolean;
   // Decides whether a flattened boolean-run node STARTS a counted +1, given its
   // operator `kind` and the previous flattened node's `prevKind` (null at the run
   // start). DEFAULT (sonar-java / current behavior) = `prevKind === null ||
@@ -483,10 +523,34 @@ function computeCognitive(
   // nodes use lhs/rhs.
   const leftField = cog.booleanLeftField ?? 'left';
   const rightField = cog.booleanRightField ?? 'right';
+  // A second if-like node type (Dart's collection `if_element`) is treated as `ifType`.
+  const isIfLike = (t: string): boolean =>
+    t === cog.ifType || (cog.collectionIfType !== undefined && t === cog.collectionIfType);
 
   const visitField = (node: Node, field: string, nesting: number, depth: number): void => {
     const child = node.childForFieldName(field);
     if (child) visit(child, nesting, depth + 1);
+  };
+
+  // Walks an `if`'s condition at base nesting. Field-based by default (`initField`
+  // + `conditionField`); when `conditionFromNamedChildren` is set (Dart's fieldless
+  // condition/pattern/`when`-guard), walks every named child that is NOT the
+  // consequence/alternative field-child (and not a comment) so the condition's
+  // booleans and Dart-3 pattern guards count. Shared by the head-if and the
+  // else-if branch so the two never drift.
+  const visitIfCondition = (ifNode: Node, nesting: number, depth: number): void => {
+    if (cog.conditionFromNamedChildren) {
+      const cons = ifNode.childForFieldName(cog.consequenceField);
+      const alt = ifNode.childForFieldName(cog.alternativeField);
+      for (const c of ifNode.namedChildren) {
+        if (c.type === 'comment') continue;
+        if ((cons && c.id === cons.id) || (alt && c.id === alt.id)) continue;
+        visit(c, nesting, depth + 1);
+      }
+      return;
+    }
+    if (cog.initField) visitField(ifNode, cog.initField, nesting, depth);
+    visitField(ifNode, cog.conditionField, nesting, depth);
   };
 
   // Python's `else_clause` (+1 FLAT, body one level deeper). Shared by BOTH the
@@ -538,9 +602,8 @@ function computeCognitive(
         : rawAlt;
     if (!alt) return;
     total += 1; // the `else` / `else if` keyword: +1 flat, no surcharge
-    if (alt.type === cog.ifType) {
-      if (cog.initField) visitField(alt, cog.initField, nesting, depth);
-      visitField(alt, cog.conditionField, nesting, depth);
+    if (isIfLike(alt.type)) {
+      visitIfCondition(alt, nesting, depth);
       visitField(alt, cog.consequenceField, nesting + 1, depth);
       handleAlternative(alt, nesting, depth + 1);
     } else {
@@ -634,16 +697,17 @@ function computeCognitive(
       if (callee !== null && callee === sym.name) total += 1;
     }
 
-    // --- if / else-if / else chain (head if surcharges; chain links are flat) ---
-    if (t === cog.ifType) {
+    // --- if / else-if / else chain (head if surcharges; chain links are flat).
+    // `isIfLike` also matches Dart's collection `if_element` (an if inside a
+    // collection literal — same surcharge/else handling). ---
+    if (isIfLike(t)) {
       total += 1 + nesting;
       if (cog.ifPositionalBlockType || cog.ifConsequenceFromNamedChildren) {
         // Positional consequence/else (no fields): Swift (keyword-split) or Kotlin
         // (anon `else` + brace-less branches). See visitPositionalIfBody.
         visitPositionalIfBody(node, nesting, depth);
       } else {
-        if (cog.initField) visitField(node, cog.initField, nesting, depth);
-        visitField(node, cog.conditionField, nesting, depth);
+        visitIfCondition(node, nesting, depth);
         visitField(node, cog.consequenceField, nesting + 1, depth);
         handleAlternative(node, nesting, depth);
       }
@@ -703,6 +767,31 @@ function computeCognitive(
       return;
     }
 
+    // --- try container with FLAT catch bodies (Dart): the try body (`bodyField`
+    // child) and the `on`/type/`catch_clause` headers + `finally` stay at base
+    // nesting; EACH other direct `catchBodyType` child is a catch body that
+    // surcharges (+1 + nesting) and nests at +1. This covers `catch(e){}`,
+    // `on E catch(e){}`, AND a binding-less `on E {}` (a block with no catch_clause),
+    // all of which the SonarQube Dart rule counts as a catch. Other languages leave tryType unset
+    // (their catch clause contains its body — handled by the catchType branch). ---
+    if (cog.tryType && t === cog.tryType.node) {
+      const tryBody = node.childForFieldName(cog.tryType.bodyField);
+      for (const child of node.namedChildren) {
+        // A catch body = a `catchBodyType` child that is NOT the try body. The
+        // `tryBody &&` guard matters on a malformed parse where the `body:` field
+        // didn't bind (tryBody null): without it the try body itself would be
+        // mis-surcharged as a catch (an over-count); instead descend everything at
+        // base nesting (a safe under-count). Valid Dart always binds `body:`.
+        if (tryBody && child.type === cog.tryType.catchBodyType && child.id !== tryBody.id) {
+          total += 1 + nesting;
+          visit(child, nesting + 1, depth + 1);
+        } else {
+          visit(child, nesting, depth + 1);
+        }
+      }
+      return;
+    }
+
     // --- nesting-only (lambda): raise nesting, add nothing ---
     if (cog.nestOnlyTypes.has(t)) {
       for (const child of node.namedChildren) visit(child, nesting + 1, depth + 1);
@@ -719,6 +808,22 @@ function computeCognitive(
       if (cog.hasLabel(node)) total += 1;
       for (const child of node.namedChildren) visit(child, nesting, depth + 1);
       return;
+    }
+
+    // --- boolean runs (TREE-SCOPED, the SonarQube Dart model): a logical node adds +1 iff its
+    // operator kind differs from its nearest LOGICAL ANCESTOR (skipping parens) —
+    // a top-of-tree logical node or a kind-change starts a run. No flatten: each
+    // logical node is processed once as the DFS reaches it, operands descend below. ---
+    if (cog.booleanByTreeParent) {
+      const kind = cog.booleanOperatorKind(node);
+      if (kind !== null) {
+        let anc = node.parent;
+        while (anc && anc.type === cog.parenthesizedType) anc = anc.parent;
+        const ancKind = anc ? cog.booleanOperatorKind(anc) : null;
+        if (ancKind !== kind) total += 1; // new run (different or no logical parent)
+        for (const child of node.namedChildren) visit(child, nesting, depth + 1);
+        return;
+      }
     }
 
     // --- boolean runs: +1 per maximal same-kind sequence in SOURCE order ---
@@ -745,7 +850,7 @@ function computeCognitive(
             // the comment as the right operand and drop a parenthesized sub-run.
             // Every logical node so far (Java/TS/Go/Rust `binary_expression`,
             // Python `boolean_operator`, Swift `conjunction_expression`/
-            // `disjunction_expression`) exposes a left/right operand field pair.
+            // `disjunction_expression`) exposes a left/right operand field pair;
             flatten(inner.childForFieldName(leftField), d + 1);
             run.push(inner);
             flatten(inner.childForFieldName(rightField), d + 1);

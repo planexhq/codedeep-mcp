@@ -23,6 +23,24 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v17: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for Dart
+// (`.dart`) — BOTH metrics in one slice. BOTH are pinned for behavioral compatibility
+// with SonarQube's Dart cyclomatic (S1541) and cognitive (S3776) rules, per the
+// published Cognitive Complexity whitepaper (pinning the public spec directly, so the
+// Kotlin "oracle the PIN, not a proxy" trap is structurally impossible). CYCLOMATIC
+// (S1541): +1 per if/collection-if/ternary/each loop/each switch case+arm (incl `_`,
+// excl `default`)/each `&&`/`||`/`??`/`?.`/`??=` (collection-if/for count; `?..` and
+// `else`/`default` don't). COGNITIVE (S3776): structural+1 + nesting surcharge per
+// if/ternary/switch/loop/catch/collection-if/for; `&&`/`||` runs count but `??` is FREE
+// (the cyc/cog divergence); recursion is FREE (measured: a self-call adds 0). The
+// nielsenko grammar + the SonarQube Dart cognitive model forced 4 additive engine knobs
+// (conditionFromNamedChildren — the `if` condition is positional; tryType — catch bodies
+// are siblings of the catch clause; collectionIfType — collection-`if` charges its else;
+// booleanByTreeParent — a `&&`/`||` run is a tree-parent operator change, the SonarQube
+// Dart model, distinct from sonar-java's source-order and SonarJS's `&&`-only). Adding the
+// fields to Dart symbols is an
+// extraction-logic change `isUnchanged` (mtime/size/language) can't detect, so the bump
+// force-invalidates warm caches.
 // v16: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for Kotlin
 // (`.kt`/`.kts`) — BOTH metrics in one slice (the Java/Rust/Swift pattern). BOTH are
 // pinned to sonar-kotlin (source-available, the "compare to SonarQube" north-star, the
@@ -110,7 +128,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 16;
+export const SCHEMA_VERSION = 17;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both

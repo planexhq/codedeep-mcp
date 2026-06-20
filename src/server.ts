@@ -54,7 +54,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "find_symbol",
     {
       description:
-        "AST-aware symbol lookup. Returns definitions matching a name (exact, prefix, or fuzzy), each with fan-in (references), fan-out (callees), and complexity — cyclomatic (TS/JS, Python, Go, Java, Rust, Swift, Kotlin) plus cognitive (Java, TS/JS, Go, Python, Rust, Swift, Kotlin). Optional kind/scope/limit filters.",
+        "AST-aware symbol lookup. Returns definitions matching a name (exact, prefix, or fuzzy), each with fan-in (references), fan-out (callees), and complexity — cyclomatic (TS/JS, Python, Go, Java, Rust, Swift, Kotlin, Dart) plus cognitive (Java, TS/JS, Go, Python, Rust, Swift, Kotlin, Dart). Optional kind/scope/limit filters.",
       inputSchema: {
         name: z.string().describe("Symbol name (exact, prefix, or fuzzy)"),
         kind: z

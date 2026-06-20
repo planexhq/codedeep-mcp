@@ -17,6 +17,8 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
+import { computeComplexity } from '../complexity.js';
+import type { CognitiveOptions } from '../complexity.js';
 
 // Nested `local_function_declaration`s create their own scope — their calls
 // must NOT attribute to an enclosing body, so they're pruned from the body walk
@@ -216,6 +218,135 @@ const DART_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
   'catchError', 'whenComplete', 'listen', 'cancel', 'noSuchMethod',
 ]);
 
+// ── complexity (cyclomatic S1541 + cognitive S3776), pinned for behavioral
+// compatibility with SonarQube's Dart rules, per the published Cognitive Complexity
+// whitepaper and the public S1541/S3776 rule definitions. ──
+
+// CYCLOMATIC decision nodes (+1 each). if + collection-`if` (`if_element`); ternary;
+// all loops (C-`for`/`for-in`/`await for` all parse as `for_statement`; `while`/`do`)
+// + collection-`for` (`for_element`); each switch-STATEMENT `case` AND switch-
+// EXPRESSION arm (incl the `_` wildcard arm — `switch_*_default`/the container add
+// nothing); and the per-OPERATOR null-aware/boolean nodes `&&`/`||`
+// (logical_and/or_expression), `??` (if_null_expression — note `??` is cyclomatic
+// but FREE cognitively), `?.` (null_aware_member_expression). `??=` is added by
+// dartCyclomaticExtra; `?..` (a cascade, not a null_aware_member_expression) is not.
+const DART_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'if_statement',
+  'if_element',
+  'conditional_expression',
+  'for_statement',
+  'for_element',
+  'while_statement',
+  'do_statement',
+  'switch_statement_case',
+  'switch_expression_case',
+  'logical_and_expression',
+  'logical_or_expression',
+  'if_null_expression',
+  'null_aware_index_expression', // `a?[i]` null-aware index access (read) — always +1
+  // `null_aware_member_expression` (`?.`) is NOT here — its counting is context-
+  // dependent (property access counts, method-call callee does not), handled in
+  // dartCyclomaticExtra.
+]);
+
+// Two cyclomatic decisions a flat node-type set can't express:
+//   1. `??=` shares `assignment_expression` with `=`/`+=`/etc. (told apart by the
+//      `operator:` field text).
+//   2. `?.` (`null_aware_member_expression`) counts as a null-aware PROPERTY ACCESS
+//      (`a?.length` → +1) but NOT as the callee of a null-aware INVOCATION
+//      (`a?.m()` → +0) — measured EXACT (`a?.length` = cyc 2, `a?.m()` = cyc 1,
+//      `a?.b?.c()` = cyc 2: the `?.b` property counts, the `?.c()` call does not).
+//      Detected by whether the node is the `function:` child of a `call_expression`.
+//   3. A null-aware WRITE `a?.b = …` / `a?[i] = …` (incl compound `+=`) parses as an
+//      `assignable_expression` whose trailing null-aware selector is an ANONYMOUS
+//      token — `?.` for a property write, a bare `?` (before `[`) for an index write
+//      (the read forms are a null_aware_member_expression / null_aware_index_expression
+//      above). The cyclomatic DFS visits only NAMED children, so the token is counted
+//      here via its parent. One null-aware selector per assignable_expression level
+//      (a deeper `a?.b?.c =` nests the inner read).
+// True when a `null_aware_member_expression` is the callee of a (possibly generic)
+// null-aware invocation `a?.m(...)` / `a?.m<T>(...)` — those don't count, while a
+// bare null-aware property access `a?.x` does. A generic call wraps the callee in an
+// `instantiation_expression` (`function: instantiation_expression{ function: a?.m,
+// type_arguments: <T> }`) before the `call_expression`, so step through it.
+function dartNullAwareMemberIsCallee(node: Node): boolean {
+  let cur: Node = node;
+  let parent = cur.parent;
+  if (
+    parent?.type === 'instantiation_expression' &&
+    parent.childForFieldName('function')?.id === cur.id
+  ) {
+    cur = parent;
+    parent = cur.parent;
+  }
+  return parent?.type === 'call_expression' && parent.childForFieldName('function')?.id === cur.id;
+}
+
+function dartCyclomaticExtra(node: Node): boolean {
+  switch (node.type) {
+    case 'assignment_expression':
+      return node.childForFieldName('operator')?.text === '??='; // null-aware compound assign
+    case 'null_aware_member_expression':
+      return !dartNullAwareMemberIsCallee(node); // access `a?.x` → +1; call `a?.m()` → 0
+    case 'assignable_expression': // null-aware WRITE `a?.b = …` / `a?[i] = …` (anonymous `?.`/`?` token)
+      return node.children.some((c) => c?.type === '?.' || c?.type === '?');
+    case 'spread_element': // null-aware spread `...?x` (token `...?`); plain `...x` is not a decision
+      return node.children.some((c) => c?.type === '...?');
+    default:
+      return false;
+  }
+}
+
+// COGNITIVE boolean-run reader: `&&`/`||` count (their own distinct nodes), while `??`
+// (if_null_expression) is FREE cognitively — the expected cyc/cog divergence (cyclomatic
+// counts `??`). Counted TREE-SCOPED (booleanByTreeParent): a `&&`/`||` adds +1 iff its
+// nearest logical ancestor (skipping parens) is a different kind — the SonarQube Dart model,
+// distinct from sonar-java's source-order flatten and SonarJS's `&&`-only runs.
+function dartCognitiveBooleanKind(node: Node): string | null {
+  if (node.type === 'logical_and_expression') return '&&';
+  if (node.type === 'logical_or_expression') return '||';
+  return null;
+}
+
+// Complexity body boundary — skip ONLY `annotation` (its args are const expressions,
+// not executable: `@Foo(c ? a : b)` must not count). `local_function_declaration` and
+// `function_expression` (closures) are DELIBERATELY ABSENT (so descended): the SonarQube
+// Dart model rolls a local fn / lambda's control flow INTO the enclosing member with a nesting
+// bump (measured: a member with a local-fn/lambda `if` reads cyc 2 / cog 2 with ONE
+// per-member message). This is a SEPARATE set from DART_SKIP_TYPES (the resolveCalls
+// boundary, which DOES prune local functions from call attribution) — complexity and
+// call-graph have different boundaries here, both correct for their purpose.
+const DART_COMPLEXITY_SKIP_TYPES: ReadonlySet<string> = new Set(['annotation']);
+
+// Cognitive config (SonarQube Dart cognitive rule S3776). Grammar + algorithm shapes forced:
+// the `if_statement` condition/pattern/`when`-guard are POSITIONAL (no condition field) →
+// conditionFromNamedChildren; catch bodies are SIBLINGS of `catch_clause` → the `tryType`
+// handler; collection-`if` (`if_element`) charges its `else` like a statement if →
+// collectionIfType (NOT a switch); `&&`/`||` runs are TREE-SCOPED (a kind-change vs the
+// logical ancestor, distinct from sonar-java/SonarJS) → booleanByTreeParent.
+const DART_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if_statement',
+  collectionIfType: 'if_element', // collection-if charges its else (`[if(b)1 else 2]` = cog 2)
+  conditionFromNamedChildren: true, // positional condition/pattern/`when`-guard (booleans + guards count)
+  conditionField: '__dart_unused__', // sentinel — conditionFromNamedChildren replaces the field walk
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  loopTypes: new Set(['for_statement', 'for_element', 'while_statement', 'do_statement']),
+  // No loopBodyField: the SonarQube Dart rule nests the WHOLE loop (a ternary in a `for` init reads
+  // cog 3 — the header IS bumped, unlike sonar-python). Bump-all-children is correct here.
+  switchTypes: new Set(['switch_statement', 'switch_expression']), // whole-switch +1 (stmt AND expr)
+  ternaryType: 'conditional_expression',
+  tryType: { node: 'try_statement', bodyField: 'body', catchBodyType: 'block' }, // flat sibling catch bodies
+  catchType: '__dart_no_catch__', // sentinel — tryType handles every catch (incl binding-less `on E {}`)
+  nestOnlyTypes: new Set(['function_expression', 'local_function_declaration']), // closures + local fns roll in (+0, nest)
+  labeledJumpTypes: new Set(['break_statement', 'continue_statement']),
+  hasLabel: (n) => n.namedChildren.some((c) => c.type === 'identifier'), // labeled = a positional identifier child
+  booleanOperatorKind: dartCognitiveBooleanKind,
+  booleanByTreeParent: true, // tree-scoped runs (a logical op counts iff != its logical-ancestor kind)
+  parenthesizedType: 'parenthesized_expression', // skipped when finding the logical ancestor
+  // No recursion (a self-call adds 0 cognitively — measured). No initField (for-init isn't a distinct if-init).
+};
+
 // Per-file duplicate-id disambiguation. A named ctor duplicating a method name,
 // or an extension method duplicating a type method, can be byte-identical in
 // (name, kind, signature, qualifier). Repeats get an ordinal qualifier.
@@ -273,6 +404,17 @@ export function extractDart(
       ignoredMemberCallees: DART_IGNORED_MEMBER_CALLEES,
     },
   );
+
+  // Cyclomatic + cognitive complexity, computed while the tree is alive (the
+  // Go/Kotlin call-site pattern). Uses its OWN skip set (local fns + closures roll
+  // into the enclosing member — the SonarQube Dart per-member model), not DART_SKIP_TYPES.
+  computeComplexity(ctx.bodies, ctx.symbols, {
+    decisionNodeTypes: DART_DECISION_NODE_TYPES,
+    extraDecisionPredicate: dartCyclomaticExtra,
+    skipTypes: DART_COMPLEXITY_SKIP_TYPES,
+    cognitive: DART_COGNITIVE_OPTIONS,
+  });
+
   return { symbols: ctx.symbols, references, imports: ctx.imports };
 }
 
