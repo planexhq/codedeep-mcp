@@ -68,6 +68,7 @@ const LANGUAGE_DISPLAY: Readonly<Partial<Record<string, string>>> = {
   php: 'PHP',
   ruby: 'Ruby',
   cpp: 'C++',
+  c: 'C',
 };
 
 const KIND_PLURAL: Record<SymbolKind, string> = {

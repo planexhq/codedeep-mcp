@@ -27,11 +27,16 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   '.rb': 'ruby',
   '.rake': 'ruby',
   '.gemspec': 'ruby',
+  // C: `.c` source files use the dedicated tree-sitter-c grammar — NOT
+  // tree-sitter-cpp, which errors on K&R old-style functions and mis-parses C
+  // code that uses C++ keywords as identifiers (`int new;`, `int class;`).
+  // `'c'` then dispatches to the C++ extractor (tree-sitter-c and -cpp produce
+  // byte-identical ASTs for the C subset — see extractor.ts).
+  '.c': 'c',
   // C++: the C++-specific source/header extensions plus `.h`. `.h` is
   // ambiguous (C or C++) but C++ is the dominant case for this tool's
-  // audience and tree-sitter-cpp parses C headers fine as a superset. `.c`
-  // stays unmapped (a possible future, separate C extractor — the grammars
-  // differ; do NOT fold C into the C++ extractor).
+  // audience and tree-sitter-cpp parses C headers fine as a superset — so a C
+  // header maps to 'cpp', not 'c' (only `.c` is C-specific).
   '.cpp': 'cpp',
   '.cc': 'cpp',
   '.cxx': 'cpp',

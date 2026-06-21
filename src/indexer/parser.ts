@@ -28,6 +28,9 @@ const LANG_TO_WASM: Record<string, string> = {
   php: 'tree-sitter-php.wasm',
   ruby: 'tree-sitter-ruby.wasm',
   cpp: 'tree-sitter-cpp.wasm',
+  // `.c` needs the dedicated C grammar (tree-sitter-cpp errors on K&R + C code
+  // using C++ keywords as identifiers); the extractor is shared with cpp.
+  c: 'tree-sitter-c.wasm',
 };
 
 const parsers = new Map<string, Parser>();

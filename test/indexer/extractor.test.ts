@@ -19,6 +19,7 @@ describe('extractSymbols dispatcher', () => {
     ['php', '<?php class X { }'],
     ['ruby', 'class X\nend\n'],
     ['cpp', 'int main() { return 0; }'],
+    ['c', 'int main(void) { return 0; }'],
   ])('routes %s to its extractor without warning', (language, src) => {
     const tree = parseFile(src, language)!;
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);

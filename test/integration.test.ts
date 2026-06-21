@@ -33,7 +33,7 @@ const FIXTURES_ROOT = join(
   'fixtures',
 );
 
-type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin' | 'small-dart' | 'small-cs' | 'small-php' | 'small-cpp';
+type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin' | 'small-dart' | 'small-cs' | 'small-php' | 'small-cpp' | 'small-c';
 
 const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-ts': [
@@ -58,6 +58,13 @@ const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
     'src/greeter.cpp',
     'src/shape.cpp',
     'src/main.cpp',
+  ],
+  'small-c': [
+    'include/greeter.h',
+    'include/shape.h',
+    'src/greeter.c',
+    'src/shape.c',
+    'src/main.c',
   ],
 };
 
@@ -639,6 +646,58 @@ describe('integration: end-to-end pipeline + tools', () => {
     expect(text).toContain('- C++: 5 files (100%)');
     expect(text).toContain('### Entry Points');
     expect(text).toContain('main.cpp');
+  });
+
+  it('indexes the C fixture end-to-end (.c/.h split, file-scope static linkage)', async () => {
+    const { index } = await setup('small-c');
+
+    expect(index.getStats().totalFiles).toBe(5);
+
+    for (const name of [
+      'Greeter',
+      'greeter_init',
+      'greeter_greet',
+      'format',
+      'Circle',
+      'circle_area',
+      'default_shape',
+      'main',
+    ]) {
+      expect(
+        index.findSymbolByName(name).length,
+        `expected to find symbol "${name}"`,
+      ).toBeGreaterThan(0);
+    }
+
+    // Within-file resolved edge: main() -> default_shape() (both in src/main.c).
+    const main = index.findSymbolByName('main')[0]!;
+    const defaultShape = index.findSymbolByName('default_shape')[0]!;
+    expect(index.getCallees(main.id).map((s) => s.id)).toContain(defaultShape.id);
+
+    // Same-file resolved bare call: greeter_greet() -> format() (both in greeter.c).
+    const greetDef = index
+      .findSymbolByName('greeter_greet')
+      .find((s) => s.file === 'src/greeter.c')!;
+    const formatDef = index.findSymbolByName('format')[0]!;
+    expect(greetDef).toBeDefined();
+    expect(index.getCallees(greetDef.id).map((s) => s.id)).toContain(formatDef.id);
+
+    // File-scope `static` → internal linkage → NOT exported (C's privacy rule);
+    // a non-static free function is exported.
+    expect(formatDef.exported).toBe(false);
+    expect(defaultShape.exported).toBe(false);
+    expect(greetDef.exported).toBe(true);
+  });
+
+  it('overview classifies .c as C and .h as C++ (the header-ambiguity tradeoff)', async () => {
+    const deps = await setup('small-c');
+    const text = (await runOverview({}, deps)).content[0].text;
+    // `.c` → C (the 3 source files); `.h` stays mapped to C++ (a C header parses
+    // fine as a C++ subset) — so the C fixture's two headers report as C++.
+    expect(text).toContain('- C: 3 files (60%)');
+    expect(text).toContain('- C++: 2 files (40%)');
+    expect(text).toContain('### Entry Points');
+    expect(text).toContain('main.c');
   });
 
   it('overview shows Go language stats and the main.go entry point', async () => {

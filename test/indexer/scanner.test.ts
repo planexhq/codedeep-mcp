@@ -44,6 +44,11 @@ describe('scanner helpers', () => {
       expect(detectLanguage('greeter.h')).toBe('cpp');
     });
 
+    it('maps the .c source extension to c (its own grammar; .h stays cpp)', () => {
+      expect(detectLanguage('util.c')).toBe('c');
+      expect(detectLanguage('a.c')).toBe('c');
+    });
+
     it('is case-insensitive on the extension', () => {
       expect(detectLanguage('Foo.TS')).toBe('typescript');
       expect(detectLanguage('Bar.PY')).toBe('python');

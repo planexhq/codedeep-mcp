@@ -203,6 +203,13 @@ export function extractSymbols(
     case 'ruby':
       return extractRuby(tree, content, fileInfo);
     case 'cpp':
+    // C reuses the C++ extractor wholesale: tree-sitter-c and tree-sitter-cpp
+    // produce byte-identical ASTs for the C subset, and every C++-specific
+    // branch (namespaces, templates, `::`, `new`, operators, `extern "C"`,
+    // access specifiers) is simply inert on C. `.c` uses the dedicated C
+    // grammar (parser.ts) so K&R + C++-keyword-identifier code parses cleanly;
+    // symbols still carry language 'c' (makeCppSymbol reads fileInfo.language).
+    case 'c':
       return extractCpp(tree, content, fileInfo);
     default:
       log.warn(`extractSymbols: unsupported language "${fileInfo.language}"`);

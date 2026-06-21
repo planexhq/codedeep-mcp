@@ -23,6 +23,13 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v21: file-scope `static` free functions/globals now extract `exported=false`
+// for C AND C++ (internal-linkage privacy; also correct for C++ file-scope free
+// functions). This is the C-extractor (13th language) slice: the new `.c`
+// language alone needs NO bump (new files self-heal via the startup scan diff),
+// but the SHARED cpp.ts `exported` flip is an extraction-logic change to the
+// EXISTING cpp language that `isUnchanged` (mtime/size/language) can't detect, so
+// the bump force-invalidates warm cpp caches to re-extract the corrected flags.
 // v20: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for RUBY
 // (`.rb`/`.rake`/`.gemspec`) — the LAST gap (the Ruby extractor shipped
 // extractor-only), completing the per-language complexity campaign across all 11
@@ -187,7 +194,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 20;
+export const SCHEMA_VERSION = 21;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both
@@ -267,7 +274,7 @@ const TS_FROM_JS_CANDIDATES: readonly string[] = [
 ];
 
 export const ENTRY_POINT_FILENAME_RE =
-  /^(index|main|app|server|cli|__main__|__init__)\.(ts|tsx|js|mjs|cjs|jsx|py|java|go|rs|swift|kt|kts|dart|cs|php|rb|cpp|cc|cxx)$/i;
+  /^(index|main|app|server|cli|__main__|__init__)\.(ts|tsx|js|mjs|cjs|jsx|py|java|go|rs|swift|kt|kts|dart|cs|php|rb|cpp|cc|cxx|c)$/i;
 
 // `symbol` is set when the caller is a declared source symbol; absent for
 // module-level call sites. Invariant: when `symbol` is set, `file` and

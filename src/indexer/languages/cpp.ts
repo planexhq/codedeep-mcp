@@ -533,7 +533,7 @@ function extractFunctionDef(
   const info = analyze(declarator);
   if (!info || !info.isFunction) return;
   const tgt = resolveFunctionTarget(ctx, info, enclosing);
-  const exported = info.qualified || !enclosing.inClass ? true : memberExported(enclosing, visibility);
+  const exported = info.qualified ? true : declExported(decl, enclosing, visibility);
   const sym = makeCppSymbol(
     ctx,
     wrap?.docNode ?? decl,
@@ -577,7 +577,7 @@ function extractDeclaration(
     if (!info) continue;
     if (info.isFunction) {
       const tgt = resolveFunctionTarget(ctx, info, enclosing);
-      const exported = info.qualified || !enclosing.inClass ? true : memberExported(enclosing, visibility);
+      const exported = info.qualified ? true : declExported(decl, enclosing, visibility);
       ctx.symbols.push(
         makeCppSymbol(ctx, anchor, sig, tgt.kind, info.name, tgt.fqn, exported, doc, tgt.qualifier),
       );
@@ -608,7 +608,7 @@ function extractVariable(
     'variable',
     info.name,
     fqn,
-    memberExported(enclosing, visibility),
+    declExported(decl, enclosing, visibility),
     doc,
     enclosing.qualifier,
   );
@@ -830,6 +830,38 @@ function memberExported(enclosing: Enclosing, visibility: Visibility): boolean {
   return enclosing.exported && visibility === 'public';
 }
 
+// A direct `static` storage-class specifier (`static int f(){}` /
+// `static int g;`). `static inline` carries two specifiers — only the `static`
+// one matches; `extern`/`register`/`inline`/`thread_local` never do.
+function hasStaticStorage(decl: Node): boolean {
+  return decl.namedChildren.some(
+    (c) => c.type === 'storage_class_specifier' && c.text === 'static',
+  );
+}
+
+// Exportedness for a function/variable DECLARATION, accounting for file-scope
+// `static` internal linkage. At file scope (not in a class), a `static` free
+// function or global is internal linkage — C's primary privacy mechanism, and
+// also internal for a C++ file-scope free function — so NOT exported. A class
+// member `static` (inClass) means "no implicit this", NOT internal linkage, so
+// it routes through the visibility-based `memberExported` untouched. Records,
+// enums, and typedefs cannot legally take `static`, so they keep
+// `memberExported` directly. `exported` is never hashed into the symbol id, and
+// the extract-time engine (`resolveCalls`) never reads it. The only query-time
+// edge consumer is `isCallerOf`'s cross-file member-ref gate (code-index.ts),
+// which drops an unexported target. A flipped file-scope `static` CAN newly hit
+// that gate — a cross-file member ref `obj.foo()` paired by name with a
+// now-unexported top-level static `foo()` would be dropped — but such a
+// member-call→free-function match is itself a wrong-kind false positive (you
+// cannot call a free function via `obj.`), so the drop is a precision win, never
+// a lost or wrong edge. Otherwise `exported` feeds only the overview
+// exports/internal split, search ranking boost, entry-point detection, and
+// get_context.
+function declExported(decl: Node, enclosing: Enclosing, visibility: Visibility): boolean {
+  if (enclosing.inClass) return memberExported(enclosing, visibility);
+  return !hasStaticStorage(decl);
+}
+
 function recordName(decl: Node): string | null {
   const n = decl.childForFieldName('name');
   if (!n) return null;
@@ -880,8 +912,13 @@ function cppSignature(ctx: CppCtx, decl: Node, prefix = ''): string {
   let cut = decl.endIndex;
   const body = decl.childForFieldName('body');
   if (body) cut = Math.min(cut, body.startIndex);
+  const isFnDef = decl.type === 'function_definition';
   for (const c of decl.namedChildren) {
     if (c.type === 'field_initializer_list') cut = Math.min(cut, c.startIndex);
+    // K&R old-style C: the parameter declarations (`int a;`) sit as `declaration`
+    // children between the function_declarator and the body — clamp before them so
+    // `int sum(a, b)` is the signature, not `int sum(a, b) int a; int b`.
+    if (isFnDef && c.type === 'declaration') cut = Math.min(cut, c.startIndex);
   }
   let sig = normalizeSignature(prefix + ctx.content.slice(decl.startIndex, cut));
   sig = sig.replace(/[;{]\s*$/, '').trimEnd();

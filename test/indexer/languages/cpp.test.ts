@@ -201,6 +201,35 @@ describe('cpp extractor — positional access visibility', () => {
   });
 });
 
+describe('cpp extractor — file-scope static internal linkage (shared with C)', () => {
+  it('a file-scope static free function is NOT exported (internal linkage)', () => {
+    const r = extract('static int helper() { return 1; }\nint pub() { return 2; }\n');
+    expect(byName(r, 'helper')[0]!.exported).toBe(false);
+    expect(byName(r, 'pub')[0]!.exported).toBe(true);
+  });
+
+  it('a file-scope static global is NOT exported', () => {
+    const r = extract('static int g_internal = 0;\nint g_public = 0;\n');
+    expect(byName(r, 'g_internal')[0]!.exported).toBe(false);
+    expect(byName(r, 'g_public')[0]!.exported).toBe(true);
+  });
+
+  it('a static CLASS member stays governed by visibility, NOT flipped by `static`', () => {
+    // `static` on a class member means "no implicit this", NOT internal linkage —
+    // it must not be confused with file-scope static. Visibility still governs.
+    // The discriminating case is a PUBLIC static class member: if the gate wrongly
+    // flipped class statics it would read exported=false, but it must stay true.
+    const r = extract(
+      'struct S {\n  static int count();\n  static int n;\n};\n' +
+        'class C {\npublic:\n  static int shown();\nprivate:\n  static int hidden();\n};\n',
+    );
+    expect(byName(r, 'count')[0]!.exported).toBe(true); // struct → public default
+    expect(byName(r, 'n')[0]!.exported).toBe(true);
+    expect(byName(r, 'shown')[0]!.exported).toBe(true); // public static class member NOT flipped
+    expect(byName(r, 'hidden')[0]!.exported).toBe(false); // private (not because of static)
+  });
+});
+
 describe('cpp extractor — namespaces & nested types', () => {
   it('namespaces fold into the qualifier; the FQN stays simple-name', () => {
     const r = extract('namespace app {\nclass S {\npublic:\n  void run();\n};\n}\n');
