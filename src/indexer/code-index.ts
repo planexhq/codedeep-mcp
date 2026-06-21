@@ -23,6 +23,26 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v19: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for PHP
+// (`.php`) — the 11th and LAST extractor, BOTH metrics in one slice (the
+// Java/Rust/Swift/Kotlin/Dart/C# pattern). BOTH are pinned to SonarPHP
+// (`php-frontend` 3.38.0.12239's ComplexityVisitor / CognitiveComplexityVisitor),
+// run as a per-function Maven oracle — every value MEASURED against the real
+// analyzer. CYCLOMATIC: +1 per if/each loop (for/foreach/while/do)/ternary (incl
+// elvis `?:`)/switch `case` (NOT default)/`&&`/`||`/`and`/`or`; NOT one-word
+// `elseif` (3.38 quirk — see CLAUDE.md), `xor`, `??`, `|`, catch/try/finally, or
+// `default`. COGNITIVE (SonarPHP 3.38): structural+1 + nesting surcharge per
+// if/ternary/switch/loop/catch; elseif/else +1 flat (two-word `else if` gets an
+// extra nesting bump); `&&`/`||` SOURCE-ORDER runs (paren-unwrap, NOT `and`/`or`);
+// break/continue WITH a level arg + goto +1 flat; closures/arrow-fns roll in
+// (nestOnly); no recursion. PHP FORKS on `match`: it counts each arm like a switch
+// case (cyc) and the whole match +1 (cog) — a DELIBERATE divergence from SonarPHP
+// (which counts match in neither metric). TWO new optional engine knobs: `elseChainsIf`
+// (the PHP two-word `else if` = else-clause-contains-if hybrid) and `ternaryBranchFields`
+// (nest only a ternary's branches so a chained elvis `a ?: b ?: c` doesn't compound).
+// Both are PHP-only (the other 10 languages leave them unset). Adding the fields
+// to PHP symbols is an extraction-logic change `isUnchanged` (mtime/size/language)
+// can't detect, so the bump force-invalidates warm caches.
 // v18: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for C#
 // (`.cs`) — BOTH metrics in one slice (the Java/Rust/Swift/Kotlin/Dart pattern).
 // BOTH are pinned EXACT to SonarC# (`SonarAnalyzer.CSharp`, the Roslyn-based
@@ -147,7 +167,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 18;
+export const SCHEMA_VERSION = 19;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both

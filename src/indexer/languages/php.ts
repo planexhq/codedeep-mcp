@@ -17,6 +17,8 @@ import type {
   MemberCallInfo,
   PendingBody,
 } from '../extractor.js';
+import { computeComplexity } from '../complexity.js';
+import type { CognitiveOptions } from '../complexity.js';
 
 // Type-declaration node types → SymbolKind. A `trait` maps to **class** (PHP
 // traits are concrete, stateful, member-bearing mixins — unlike Rust's
@@ -302,6 +304,121 @@ function innerVarName(vn: Node): string | null {
   return vn.namedChildren[0]?.text ?? null;
 }
 
+// ── complexity (cyclomatic + cognitive) — pinned EXACT to SonarPHP 3.38.0.12239 ──
+// (php-frontend's ComplexityVisitor / CognitiveComplexityVisitor, run as a per-function
+// oracle; see CLAUDE.md "Cyclomatic/Cognitive Complexity Rules"). Both metrics MEASURED
+// against the real analyzer. TWO master-vs-3.38 divergences are pinned to the RELEASED
+// 3.38 (the runnable version users compare against): one-word `elseif` is NOT counted
+// cyclomatically (3.38's ComplexityVisitor has no visitElseifClause; master added it),
+// and the bitwise `|` (PIPE) is NOT counted cognitively (master added it). PHP also
+// FORKS on `match`: it counts each arm like a switch case — a DELIBERATE divergence from
+// SonarPHP (which counts `match` in NEITHER metric), user-chosen for McCabe-truth +
+// consistency with switch.
+
+// Cyclomatic decision nodes (+1 each). `else_if_clause` is DELIBERATELY ABSENT (3.38
+// does not count one-word `elseif`; the inner `if` of a two-word `else if` still counts
+// via `if_statement`). `default_statement` and the switch/match CONTAINERS are absent.
+// `match_conditional_expression` (each non-default arm) is the match FORK
+// (`match_default_expression` excluded). `conditional_expression` covers BOTH the full
+// ternary and the elvis `?:` (same node).
+const PHP_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'if_statement',
+  'for_statement', 'foreach_statement', 'while_statement', 'do_statement',
+  'conditional_expression', // ternary + elvis ?:
+  'case_statement', // switch case (NOT default_statement)
+  'match_conditional_expression', // match arm — the FORK (NOT match_default_expression)
+]);
+
+// Cyclomatic booleans: `&&`/`||` AND the word operators `and`/`or` (SonarPHP counts
+// CONDITIONAL_AND/OR + ALTERNATIVE_CONDITIONAL_AND/OR), but NOT `xor`, `??`, or `|`.
+// One `binary_expression` covers all binary ops, so read the `operator` field token.
+const PHP_CYCLOMATIC_BOOLEAN_OPS: ReadonlySet<string> = new Set(['&&', '||', 'and', 'or']);
+function phpCyclomaticExtra(node: Node): boolean {
+  if (node.type !== 'binary_expression') return false;
+  const op = node.childForFieldName('operator')?.type;
+  return op !== undefined && PHP_CYCLOMATIC_BOOLEAN_OPS.has(op);
+}
+
+// Cognitive boolean-run kind: `&&`/`||` ONLY (3.38 cognitive tests only CONDITIONAL_AND/
+// CONDITIONAL_OR — NOT the word `and`/`or`, NOT `xor`/`??`, NOT the PIPE `|` master
+// added). Source-order + kind-change + paren-unwrap is the engine default.
+const PHP_COGNITIVE_BOOLEAN_OPS: ReadonlySet<string> = new Set(['&&', '||']);
+function phpCognitiveBooleanKind(node: Node): string | null {
+  if (node.type !== 'binary_expression') return null;
+  const op = node.childForFieldName('operator')?.type;
+  return op !== undefined && PHP_COGNITIVE_BOOLEAN_OPS.has(op) ? op : null;
+}
+
+// Cognitive jump: PHP `break`/`continue` take an optional numeric LEVEL (`break 2;`) —
+// SonarPHP charges +1 FLAT only when that argument is present (bare `break;` adds 0).
+// The argument is the statement's lone non-comment named child.
+function phpJumpHasArgument(node: Node): boolean {
+  return node.namedChildren.some((c) => c.type !== 'comment');
+}
+
+// Complexity body boundary — SEPARATE from PHP_SKIP_TYPES (the resolveCalls boundary).
+// Closures (`anonymous_function`) and arrow fns (`arrow_function`) are DELIBERATELY
+// ABSENT → DESCENDED, so they roll into the enclosing function cognitively (nestOnly,
+// +1 nesting — SonarPHP's per-function model via visitWithNesting). The type
+// declarations + their `declaration_list` body + `attribute_list` ARE skipped (an
+// anon-class member's control flow then rolls into nobody — a rare documented
+// per-symbol-model under-count, the Java anon-class precedent). `function_definition`
+// is NOT listed: a top-level function's PendingBody IS a function_definition, so
+// skipping it would root-skip the whole function; nested NAMED functions (vanishingly
+// rare in PHP) are instead descended pass-through — a documented minor cognitive
+// under-count (cyclomatic still excludes them via PHP_CYCLOMATIC_SKIP_TYPES).
+const PHP_COMPLEXITY_SKIP_TYPES: ReadonlySet<string> = new Set([
+  'attribute_list',
+  'class_declaration', 'interface_declaration', 'trait_declaration', 'enum_declaration',
+  'declaration_list',
+]);
+
+// CYCLOMATIC-only child skip: additionally exclude ALL nested functions (closures,
+// arrow fns, nested named fns). SonarPHP's per-function cyclomatic uses the
+// ShallowComplexityVisitor, which does not descend nested functions (each gets its own
+// number). Cognitive instead descends closures/arrow-fns (nestOnly) via the narrower
+// PHP_COMPLEXITY_SKIP_TYPES — the Java lambda asymmetry.
+const PHP_CYCLOMATIC_SKIP_TYPES: ReadonlySet<string> = new Set([
+  ...PHP_COMPLEXITY_SKIP_TYPES,
+  'function_definition', 'anonymous_function', 'arrow_function',
+]);
+
+// Cognitive config (SonarPHP 3.38 CognitiveComplexityVisitor). PHP's `if_statement`
+// holds elseif/else under a REPEATED `alternative` field (the Python elifClauseType
+// shape) PLUS the two-word `else if` = else-clause-contains-if hybrid (elseChainsIf, one
+// of the two new engine knobs this slice — see complexity.ts; the other is
+// ternaryBranchFields below). Loops nest body only (loopBodyField).
+// switch + match (the FORK) are whole-+1. catch surcharges; try/finally pass through.
+// break/continue WITH a level argument + goto are +1 flat. Booleans `&&`/`||`
+// source-order. No recursion (SonarPHP doesn't count it).
+const PHP_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if_statement',
+  conditionField: 'condition',
+  consequenceField: 'body',
+  alternativeField: 'alternative',
+  elifClauseType: 'else_if_clause',
+  elseClauseType: 'else_clause',
+  elseChainsIf: true, // two-word `else if` (else_clause→if_statement) flatten + extra nesting
+  loopTypes: new Set(['for_statement', 'foreach_statement', 'while_statement', 'do_statement']),
+  loopBodyField: 'body',
+  switchTypes: new Set(['switch_statement', 'match_expression']), // match = the FORK (whole +1)
+  ternaryType: 'conditional_expression',
+  // Nest ONLY the true/false branches; the condition stays at ambient nesting so a
+  // CHAINED elvis `a ?: b ?: c` (each link in the next's condition) doesn't compound —
+  // SonarPHP-exact (verified on 5 Laravel chained-elvis cases). Elvis `?:` has only the
+  // `alternative` branch; the full ternary adds `body`.
+  ternaryBranchFields: ['body', 'alternative'],
+  catchType: 'catch_clause',
+  nestOnlyTypes: new Set(['anonymous_function', 'arrow_function']), // closures roll in, +0
+  labeledJumpTypes: new Set(['break_statement', 'continue_statement']),
+  hasLabel: phpJumpHasArgument, // `break 2;`/`continue 2;` → +1 flat (bare → 0)
+  flatIncrement: (node) => node.type === 'goto_statement', // goto → +1 flat
+  booleanOperatorKind: phpCognitiveBooleanKind,
+  parenthesizedType: 'parenthesized_expression', // UNWRAP (SonarPHP removeParenthesis)
+  // NO: recursion / booleanByTreeParent / booleanRunStarts / initField / nestElseBody /
+  //     conditionFromNamedChildren / positional-if knobs — PHP is field-based.
+};
+
 // Per-file duplicate-id disambiguation (the Kotlin/Dart/C# OccurrenceCounter):
 // two same-(name,kind,signature,qualifier) symbols get an ordinal qualifier.
 type OccurrenceCounter = Map<string, number>;
@@ -362,6 +479,17 @@ export function extractPHP(tree: Tree, content: string, fileInfo: FileInfo): Ext
       ignoredMemberCallees: PHP_IGNORED_MEMBER_CALLEES,
     },
   );
+  // Cyclomatic + cognitive complexity (SonarPHP-3.38-pinned), computed while the tree
+  // is alive (the Dart/Kotlin/C# call-site pattern). Cyclomatic uses its OWN skip set
+  // (nested functions excluded — the Shallow per-function model); cognitive descends
+  // closures/arrow-fns (nestOnly) via PHP_COMPLEXITY_SKIP_TYPES.
+  computeComplexity(ctx.bodies, ctx.symbols, {
+    decisionNodeTypes: PHP_DECISION_NODE_TYPES,
+    extraDecisionPredicate: phpCyclomaticExtra,
+    skipTypes: PHP_COMPLEXITY_SKIP_TYPES,
+    cyclomaticSkipTypes: PHP_CYCLOMATIC_SKIP_TYPES,
+    cognitive: PHP_COGNITIVE_OPTIONS,
+  });
   return { symbols: ctx.symbols, references, imports: ctx.imports };
 }
 

@@ -99,10 +99,10 @@ export interface Symbol {
   // function/method symbols. OMITTED when trivial (=1) — the `receiver?`-omit
   // hygiene — and kept OUT of the symbolId hash (body-volatile: hashing it would
   // re-key symbols on body-only edits and fracture the persisted call graph).
-  // Populated for TS/JS, Python, Go (Phase 2 MVP), Java (Phase 3), Rust
-  // (rust-code-analysis-pinned), Swift (SwiftLint-pinned), Kotlin
-  // (sonar-kotlin-pinned), Dart (SonarQube-S1541-pinned), and C# (SonarC#-pinned).
-  // PHP is a follow-up.
+  // Populated for ALL 14 languages: TS/JS, Python, Go (Phase 2 MVP), Java (Phase 3),
+  // Rust (rust-code-analysis-pinned), Swift (SwiftLint-pinned), Kotlin
+  // (sonar-kotlin-pinned), Dart (SonarQube-S1541-pinned), C# (SonarC#-pinned), PHP
+  // (SonarPHP-3.38-pinned, with a deliberate `match` fork), Ruby, C++, C, and Objective-C.
   complexity?: number;
   // Cognitive complexity (SonarSource whitepaper §1.2: a nesting-aware sum of
   // increments measuring how hard the control flow is to FOLLOW, vs cyclomatic's
@@ -112,9 +112,11 @@ export interface Symbol {
   // Rust (SonarSource-whitepaper/sonar-rust-aligned — deliberately NOT matching
   // rust-code-analysis's loop-omission + boolean-carry cognitive bugs), Swift
   // (whitepaper-aligned — no published cognitive spec for Swift to pin), Kotlin
-  // (pinned EXACTLY to sonar-kotlin's CognitiveComplexity), Dart (pinned EXACT
-  // to SonarQube's Dart Cognitive Complexity rule S3776), and C# (pinned
-  // EXACT to SonarC#'s CSharpCognitiveComplexityMetric); PHP follows.
+  // (pinned EXACTLY to sonar-kotlin's CognitiveComplexity), Dart (pinned to
+  // SonarQube's Dart Cognitive Complexity rule S3776 / the whitepaper), C# (pinned
+  // EXACT to SonarC#'s CSharpCognitiveComplexityMetric), PHP (pinned to SonarPHP
+  // 3.38's CognitiveComplexityVisitor), Ruby (sonar-ruby SLANG), and the C-family
+  // — C++, C, Objective-C (the Cognitive Complexity whitepaper). All 14 carry both.
   cognitiveComplexity?: number;
 }
 

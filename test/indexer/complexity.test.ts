@@ -66,6 +66,13 @@ function csharpCog(src: string, name = 'm'): { cyc: number | undefined; cog: num
   return { cyc: sym.complexity, cog: sym.cognitiveComplexity };
 }
 
+// PHP carries BOTH metrics, pinned to SonarPHP 3.38 (php-frontend's ComplexityVisitor /
+// CognitiveComplexityVisitor, run as a per-function Maven oracle). `src` is one or more
+// top-level declarations (a function `f` unless noted); the `<?php` tag is prepended.
+// PHP FORKS on `match` (counts arms like switch — a deliberate divergence from SonarPHP,
+// which counts match in neither metric).
+const phpCog = (src: string, name = 'f') => bothCx(`<?php\n${src}`, name, 'php', 'src/test.php');
+
 // Java carries BOTH metrics (Phase 3). `src` is one or more member declarations;
 // they're wrapped in `class T { … }`. Returns { cyc, cog } for the named member
 // (default `m`), each undefined when trivial (cyc 1 / cog 0).
@@ -1523,5 +1530,145 @@ describe('cyclomatic + cognitive — C# (SonarC# S1541 / S3776)', () => {
       'csharp', 'src/E.cs',
     );
     expect(all.filter((s) => s.name === 'constructor').every((s) => s.cognitiveComplexity === undefined)).toBe(true);
+  });
+});
+
+describe('cyclomatic + cognitive complexity — PHP (SonarPHP 3.38-pinned)', () => {
+  // All values MEASURED against php-frontend 3.38.0.12239's ComplexityVisitor /
+  // CognitiveComplexityVisitor (run as a per-function Maven oracle, ~/sonarphp-oracle).
+
+  it('omits trivial (cyc 1 / cog 0)', () => {
+    expect(phpCog('function f(){ return 1; }')).toEqual({ cyc: undefined, cog: undefined });
+  });
+
+  it('cyclomatic: if / loops / switch case / ternary / elvis', () => {
+    expect(phpCog('function f($a){ if($a){} }').cyc).toBe(2);
+    expect(phpCog('function f($a){ if($a){} else {} }').cyc).toBe(2); // else not counted
+    // for/foreach/while/do-while — 4 loops + base
+    expect(phpCog('function f($xs){ for($i=0;$i<3;$i++){} foreach($xs as $x){} while(false){} do{}while(false); }').cyc).toBe(5);
+    // switch: each case +1, default excluded
+    expect(phpCog('function f($x){ switch($x){ case 1: break; case 2: break; case 3: break; default: break; } }').cyc).toBe(4);
+    expect(phpCog('function f($x){ return $x ? 1 : 2; }').cyc).toBe(2); // ternary
+    expect(phpCog('function f($x){ return $x ?: 2; }').cyc).toBe(2);    // elvis ?: (same node)
+    expect(phpCog('function f($x){ return $x ?? 2; }').cyc).toBeUndefined(); // ?? not counted
+  });
+
+  it('cyclomatic booleans: && || and or count; xor / ?? / | do not', () => {
+    expect(phpCog('function f($a,$b,$c){ return $a && $b || $c; }').cyc).toBe(3);
+    expect(phpCog('function f($a,$b,$c){ return $a and $b or $c; }').cyc).toBe(3); // word ops count cyc
+    expect(phpCog('function f($a,$b){ return $a xor $b; }').cyc).toBeUndefined();  // xor not counted
+    expect(phpCog('function f($a,$b,$c){ return $a | $b | $c; }').cyc).toBeUndefined(); // bitwise | not counted
+  });
+
+  it('cyclomatic: one-word elseif NOT counted (3.38), but the inner if of two-word else if IS', () => {
+    // SonarPHP 3.38's ComplexityVisitor has no visitElseifClause → one-word elseif = +0.
+    expect(phpCog('function f($a,$b){ if($a){} elseif($b){} else {} }').cyc).toBe(2);
+    // Two-word `else if` nests an if_statement in the else clause → that inner if counts.
+    expect(phpCog('function f($a,$b){ if($a){} else if($b){} else {} }').cyc).toBe(3);
+  });
+
+  it('cyclomatic: match FORK — each non-default arm counts like a switch case', () => {
+    // DELIBERATE divergence from SonarPHP (which counts match in neither metric):
+    // 2 arms (`1,2 =>` is ONE arm) + base = 3; default excluded.
+    expect(phpCog('function f($x){ return match($x){ 1,2 => "a", 3 => "b", default => "c" }; }').cyc).toBe(3);
+  });
+
+  it('cyclomatic: nested functions excluded (Shallow per-function model)', () => {
+    expect(phpCog('function f($a){ $g = function() use ($a) { if($a){} }; }').cyc).toBeUndefined(); // closure excluded
+    expect(phpCog('function f($a){ $g = fn() => $a ? 1 : 2; }').cyc).toBeUndefined();                // arrow excluded
+  });
+
+  it('cyclomatic: method', () => {
+    expect(phpCog('class C { function m($a){ if($a){} } }', 'm').cyc).toBe(2);
+    expect(phpCog('class C { function n($a,$b){ if($a){ if($b){} } } }', 'n').cyc).toBe(3);
+  });
+
+  it('cognitive: if surcharge / elseif flat / else flat', () => {
+    expect(phpCog('function f($a){ if($a){} }').cog).toBe(1);
+    expect(phpCog('function f($a){ if($a){} else {} }').cog).toBe(2);
+    expect(phpCog('function f($a,$b){ if($a){} elseif($b){} else {} }').cog).toBe(3);
+    expect(phpCog('function f($a,$b){ if($a){} else if($b){} else {} }').cog).toBe(3);
+  });
+
+  it('cognitive: two-word `else if` nests one level DEEPER than one-word `elseif`', () => {
+    // SonarPHP quirk (the `else` clause visitWithNesting wraps the inner if), oracle-verified.
+    expect(phpCog('function f($a,$b,$c){ if($a){} elseif($b){ if($c){} } }').cog).toBe(4);   // 1 + 1 + 2
+    expect(phpCog('function f($a,$b,$c){ if($a){} else if($b){ if($c){} } }').cog).toBe(5);  // 1 + 1 + 3 (extra nesting)
+  });
+
+  it('cognitive: switch whole +1; match FORK whole +1', () => {
+    expect(phpCog('function f($x){ switch($x){ case 1: break; case 2: break; default: break; } }').cog).toBe(1);
+    expect(phpCog('function f($x){ return match($x){ 1,2 => "a", 3 => "b", default => "c" }; }').cog).toBe(1);
+  });
+
+  it('cognitive: loops nest body only (no loop-header overbump)', () => {
+    // 4 sequential loops each surcharge at nesting 0 → 4 (headers at ambient).
+    expect(phpCog('function f($xs){ for($i=0;$i<3;$i++){} foreach($xs as $x){} while(false){} do{}while(false); }').cog).toBe(4);
+    expect(phpCog('function f($xs){ foreach($xs as $x){ if($x){} } }').cog).toBe(3); // for 1 + if-at-1 2
+  });
+
+  it('cognitive: ternary / elvis surcharge; ?? free', () => {
+    expect(phpCog('function f($x){ return $x ? 1 : 2; }').cog).toBe(1);
+    expect(phpCog('function f($x){ return $x ?: 2; }').cog).toBe(1);
+    expect(phpCog('function f($x){ return $x ?? 2; }').cog).toBeUndefined();
+  });
+
+  it('cognitive: booleans && || source-order (NOT and/or/xor/pipe), paren-unwrap', () => {
+    expect(phpCog('function f($a,$b,$c){ return $a && $b || $c; }').cog).toBe(2); // && run + || run
+    expect(phpCog('function f($a,$b,$c,$d,$e,$g){ return $a && $b && ($c || $d) && ($e || $g); }').cog).toBe(4);
+    expect(phpCog('function f($a,$b,$c){ return ($a && $b) && $c; }').cog).toBe(1); // paren unwrapped → one run
+    expect(phpCog('function f($a,$b,$c){ return $a and $b or $c; }').cog).toBeUndefined(); // word ops free (cog)
+    expect(phpCog('function f($a,$b,$c){ return $a | $b | $c; }').cog).toBeUndefined();    // pipe free (3.38)
+  });
+
+  it('cognitive: break/continue with a level argument + goto are +1 flat', () => {
+    expect(phpCog('function f(){ while(true){ if(true) break 2; if(true) continue 2; break; } }').cog).toBe(7);
+    expect(phpCog('function f(){ goto end; end: ; }').cog).toBe(1);
+  });
+
+  it('cognitive: catch surcharges (even empty); try/finally pass through', () => {
+    expect(phpCog('function f($a,$b){ try{ if($a){} } catch(\\Exception $e){ if($b){} } finally{} }').cog).toBe(4);
+    expect(phpCog('function f(){ try{ g(); } catch(\\Exception $e){} }').cog).toBe(1); // catch surcharges even with empty body
+    expect(phpCog('function f(){ try{ g(); } finally{ h(); } }').cog).toBeUndefined(); // try + finally (no catch) add nothing
+  });
+
+  it('cognitive: closures + arrow fns roll into the enclosing function (nestOnly)', () => {
+    expect(phpCog('function f($a){ $g = function() use ($a) { if($a){} }; }').cog).toBe(2); // if at nesting 1
+    expect(phpCog('function f($a){ $g = fn() => $a ? 1 : 2; }').cog).toBe(2);                // ternary at nesting 1
+  });
+
+  it('cognitive: nested STRUCTURE compounds nesting', () => {
+    expect(phpCog('function f($a,$b){ if($a){ if($b){} } }').cog).toBe(3); // 1 + 2
+    expect(phpCog('class C { function m($a,$b){ if($a){ if($b){} } } }', 'm').cog).toBe(3);
+  });
+
+  it('cognitive: chained elvis / ternary-in-condition do NOT compound (ternaryBranchFields)', () => {
+    // Regression guard for the ternaryBranchFields knob: a chained elvis nests each link in
+    // the next link's CONDITION position; the engine's old bump-all default would compound
+    // the surcharge per link (cog 3/4 below), but SonarPHP visits the condition at ambient
+    // nesting so each elvis is +1 flat. Single-level tests can't catch this (both paths agree).
+    expect(phpCog('function f($a,$b,$c){ return $a ?: $b ?: $c; }')).toEqual({ cyc: 3, cog: 2 });
+    expect(phpCog('function f($a,$b,$c,$d){ return $a ?: $b ?: $c ?: $d; }')).toEqual({ cyc: 4, cog: 3 });
+    // ternary in the CONDITION position stays at ambient (cog 2, not bump-all's 3)...
+    expect(phpCog('function f($a,$b){ return ($a ? 1 : 0) ? $b : 0; }').cog).toBe(2);
+    // ...but a ternary in a BRANCH position correctly nests (cog 3 — both paths agree).
+    expect(phpCog('function f($a,$b,$c){ return $a ? ($b ? 1 : 2) : $c; }').cog).toBe(3);
+  });
+
+  it('alternative `if(): endif;` / `foreach(): endforeach;` syntax behaves like braces', () => {
+    expect(phpCog('function f($a,$b){ if($a): foo(); elseif($b): bar(); else: baz(); endif; }')).toEqual({ cyc: 2, cog: 3 });
+    expect(phpCog('function f($xs){ foreach($xs as $x): if($x): bar(); endif; endforeach; }')).toEqual({ cyc: 3, cog: 3 });
+  });
+
+  it('cognitive: a multi-type catch is ONE surcharge; multiple catch clauses each surcharge', () => {
+    expect(phpCog('function f($a){ try{ if($a){} } catch(\\A | \\B $e){ if($a){} } }')).toEqual({ cyc: 3, cog: 4 });
+    expect(phpCog('function f($a){ try{ g(); } catch(\\A $e){ if($a){} } catch(\\B $e){ if($a){} } }')).toEqual({ cyc: 3, cog: 6 });
+  });
+
+  it('DOCUMENTED divergence: nested NAMED function under-counts cognitive (rare, per-symbol model)', () => {
+    // SonarPHP rolls the inner named fn in with a nesting bump (cog 2); Probe descends it
+    // pass-through (cog 1) because the body IS a function_definition (can't be nestOnly
+    // without nest-bumping the root). Cyclomatic still excludes it. Vanishingly rare in PHP.
+    expect(phpCog('function f($a){ function inner(){ if($a){} } }')).toEqual({ cyc: undefined, cog: 1 });
   });
 });

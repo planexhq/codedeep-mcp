@@ -79,8 +79,8 @@ export interface ComplexityOptions {
   cyclomaticDecrement?: (node: Node) => boolean;
   // COGNITIVE complexity (proposal §1.2): when present, a second nesting-aware
   // walk runs alongside the cyclomatic one and writes `Symbol.cognitiveComplexity`.
-  // Absent ⇒ cognitive stays undefined for that language (the not-yet-done PHP).
-  // Populated for **Java + TS/JS + Go + Python + Rust + Swift + Kotlin + Dart + C#**. The algorithm is the
+  // Absent ⇒ cognitive stays undefined for that language (none remain — all wired).
+  // Populated for ALL 11: **Java + TS/JS + Go + Python + Rust + Swift + Kotlin + Dart + C# + PHP**. The algorithm is the
   // SonarSource whitepaper's, clean-room verified against `sonar-java`'s
   // `CognitiveComplexityVisitor` (Java), `eslint-plugin-sonarjs`'s S3776 (TS/JS),
   // `uudashr/gocognit` (Go), AND `sonar-python`'s `CognitiveComplexityVisitor`
@@ -113,7 +113,8 @@ export interface ComplexityOptions {
 // Per-construct node-type config for the cognitive walk. Each field is a
 // tree-sitter node TYPE name (or set of names) for one whitepaper construct
 // category; the SHARED algorithm in computeCognitive is language-agnostic, only
-// the names differ per grammar. Filled for Java, TS/JS, Go, Python, Rust, Swift, and Kotlin.
+// the names differ per grammar. Filled for all 14 languages (Java, TS/JS, Go, Python,
+// Rust, Swift, Kotlin, Dart, C#, PHP, Ruby, C++, C, Objective-C).
 export interface CognitiveOptions {
   // The `if` node + the field names used to walk its chain. `else if` is detected
   // structurally: the `alternative` field holding another `ifType` node is an
@@ -161,6 +162,17 @@ export interface CognitiveOptions {
   // general descent — the `if`'s own else is consumed here and the if-case returns).
   // Java/TS/Go leave it unset (the single-child C-family recursion). Python: 'elif_clause'.
   elifClauseType?: string;
+  // PHP only (used with elifClauseType): a two-word `else if` is NOT a one-word
+  // `else_if_clause` — the grammar nests it as an `elseClauseType` whose
+  // `consequenceField` child is itself an `ifType`. SonarPHP flattens that inner `if`
+  // (treats it like an else-if: +1 FLAT, and the `else` keyword adds NOTHING) BUT
+  // visits it INSIDE the else clause's own nesting bump, so the inner if's body lands
+  // one level DEEPER than a one-word elseif would (oracle-verified: `else if`-nested
+  // cog 5 vs `elseif`-nested cog 4). When set, handleAlternative's else-clause case
+  // detects this shape and recurses the inner if FLAT at nesting+1. Other languages
+  // leave it unset; Python's else_clause body is never an `ifType` (it uses elif), so
+  // it always falls through to visitElseClauseBody.
+  elseChainsIf?: boolean;
   // POSITIONAL `if` shape (Swift): the grammar's `if_statement` has NO
   // consequence/alternative field — the consequence is a positional block child of
   // this type, an `else if` is a sibling `ifType` child, and a plain `else` body is a
@@ -236,6 +248,18 @@ export interface CognitiveOptions {
   loopBodyField?: string;
   switchTypes: ReadonlySet<string>;
   ternaryType: string;
+  // When set, a `ternaryType` node surcharges and nests ONLY these field children (the
+  // true/false branches), visiting all OTHER children (the CONDITION) at the ternary's
+  // AMBIENT nesting — the loopBodyField analog for ternaries. This RESOLVES the
+  // ternary-condition overbump for a CHAINED elvis `a ?: b ?: c` (`((a ?: b) ?: c)`),
+  // where each inner conditional sits in the next one's CONDITION position and would
+  // otherwise be over-surcharged by the bump-all default (compounding per link). Only
+  // PHP sets it (chained `?:` is idiomatic there, so the overbump is material — 5 real
+  // Laravel cases; SonarPHP visits the condition at ambient nesting); switch is
+  // unaffected (it's in switchTypes, the bump-all branch). Java/TS/Go/Dart leave it
+  // unset → bump-ALL (the documented COG-loopheader-overbump, deferred for them — 0
+  // oracle cases because their ternaries rarely chain in the condition).
+  ternaryBranchFields?: ReadonlyArray<string>;
   // Extra node types that surcharge (+1 + nesting) but descend their children at the
   // SAME nesting — a flow-breaker with the full nesting surcharge that does NOT nest
   // its operand. C#'s `goto`/`goto case`: SonarC# scores it at +1+nesting (a `goto`
@@ -628,7 +652,20 @@ function computeCognitive(
           visitField(alt, cog.conditionField, nesting, depth);
           visitField(alt, cog.consequenceField, nesting + 1, depth);
         } else if (cog.elseClauseType && alt.type === cog.elseClauseType) {
-          visitElseClauseBody(alt, nesting, depth);
+          // PHP two-word `else if`: an `else` clause whose body is itself an `if`.
+          // SonarPHP gives the inner if +1 FLAT (no `else` +1) but inside the else
+          // clause's own nesting bump, so its body is one level deeper than a one-word
+          // elseif (elseChainsIf). Otherwise a plain `else`: +1 flat, body nested.
+          const innerIf = cog.elseChainsIf ? alt.childForFieldName(cog.consequenceField) : null;
+          if (innerIf && innerIf.type === cog.ifType) {
+            const n2 = nesting + 1; // the else clause's nesting bump wraps the inner if
+            total += 1; // inner if: +1 FLAT (SonarPHP's ifStatementWithoutNesting)
+            visitIfCondition(innerIf, n2, depth);
+            visitField(innerIf, cog.consequenceField, n2 + 1, depth);
+            handleAlternative(innerIf, n2, depth + 1);
+          } else {
+            visitElseClauseBody(alt, nesting, depth);
+          }
         }
       }
       return;
@@ -808,6 +845,25 @@ function computeCognitive(
     if (cog.surchargeTypes?.has(t)) {
       total += 1 + nesting;
       for (const child of node.namedChildren) visit(child, nesting, depth + 1);
+      return;
+    }
+
+    // --- ternary with BRANCH-ONLY nesting (PHP): surcharge, but nest ONLY the
+    // configured branch fields (true/false); the CONDITION stays at the ternary's
+    // ambient nesting. Resolves the overbump for a chained elvis `a ?: b ?: c`
+    // (`((a ?: b) ?: c)`), whose inner conditionals sit in the CONDITION position —
+    // bump-all would compound the surcharge per link (SonarPHP visits the condition at
+    // ambient). The loopBodyField analog for ternaries; only PHP sets ternaryBranchFields. ---
+    if (t === cog.ternaryType && cog.ternaryBranchFields) {
+      total += 1 + nesting;
+      const branchIds = new Set<number>();
+      for (const f of cog.ternaryBranchFields) {
+        const c = node.childForFieldName(f);
+        if (c) branchIds.add(c.id);
+      }
+      for (const child of node.namedChildren) {
+        visit(child, branchIds.has(child.id) ? nesting + 1 : nesting, depth + 1);
+      }
       return;
     }
 
