@@ -35,6 +35,7 @@ const wanted = [
   { srcDir: repomixDir, file: "tree-sitter-c_sharp.wasm" },
   { srcDir: repomixDir, file: "tree-sitter-php.wasm" },
   { srcDir: repomixDir, file: "tree-sitter-ruby.wasm" },
+  { srcDir: repomixDir, file: "tree-sitter-cpp.wasm" },
 ];
 
 // Cache directory listings so each source dir is read at most once.

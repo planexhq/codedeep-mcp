@@ -27,6 +27,7 @@ const LANG_TO_WASM: Record<string, string> = {
   csharp: 'tree-sitter-c_sharp.wasm',
   php: 'tree-sitter-php.wasm',
   ruby: 'tree-sitter-ruby.wasm',
+  cpp: 'tree-sitter-cpp.wasm',
 };
 
 const parsers = new Map<string, Parser>();

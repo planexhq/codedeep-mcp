@@ -157,6 +157,27 @@ describe('runSearchStructure — query mode', () => {
     expect(py).not.toContain('src/App.tsx');
   });
 
+  it('honors the cpp language filter', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(
+      makeFileInfo('cpp', 'src/widget.cpp'),
+      [mkSym({ name: 'renderWidget', file: 'src/widget.cpp', language: 'cpp' })],
+      [],
+      [],
+    );
+    idx.addFile(
+      makeFileInfo('python', 'app/w.py'),
+      [mkSym({ name: 'renderWidget', file: 'app/w.py', language: 'python' })],
+      [],
+      [],
+    );
+    const out = text(
+      await runSearchStructure({ query: 'renderWidget', language: 'cpp' }, makeDeps(idx)),
+    );
+    expect(out).toContain('src/widget.cpp');
+    expect(out).not.toContain('app/w.py');
+  });
+
   it('returns an in-band error for an unknown language', async () => {
     const idx = new CodeIndex(tmpRoot);
     const out = text(

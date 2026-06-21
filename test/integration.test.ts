@@ -33,7 +33,7 @@ const FIXTURES_ROOT = join(
   'fixtures',
 );
 
-type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin' | 'small-dart' | 'small-cs' | 'small-php';
+type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin' | 'small-dart' | 'small-cs' | 'small-php' | 'small-cpp';
 
 const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-ts': [
@@ -52,6 +52,13 @@ const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-dart': ['greeter.dart', 'shape.dart', 'main.dart'],
   'small-cs': ['Greeter.cs', 'Shape.cs', 'Program.cs'],
   'small-php': ['Greeter.php', 'Shape.php', 'index.php'],
+  'small-cpp': [
+    'include/greeter.h',
+    'include/shape.h',
+    'src/greeter.cpp',
+    'src/shape.cpp',
+    'src/main.cpp',
+  ],
 };
 
 async function copyFixtureToTmp(
@@ -575,6 +582,63 @@ describe('integration: end-to-end pipeline + tools', () => {
     expect(index.getCallees(defaultShape.id).map((s) => s.id)).toContain(
       circle.id,
     );
+  });
+
+  it('indexes the C++ fixture end-to-end (header/impl decl-def split)', async () => {
+    const { index } = await setup('small-cpp');
+
+    expect(index.getStats().totalFiles).toBe(5);
+
+    for (const name of [
+      'Greeter',
+      'greet',
+      'format',
+      'Shape',
+      'Circle',
+      'area',
+      'describe',
+      'kPi',
+      'defaultShape',
+      'main',
+    ]) {
+      expect(
+        index.findSymbolByName(name).length,
+        `expected to find symbol "${name}"`,
+      ).toBeGreaterThan(0);
+    }
+
+    // Within-file resolved edge (no decl/def ambiguity): main() → defaultShape().
+    const main = index.findSymbolByName('main')[0]!;
+    const defaultShape = index.findSymbolByName('defaultShape')[0]!;
+    expect(index.getCallees(main.id).map((s) => s.id)).toContain(defaultShape.id);
+
+    // Same-file out-of-line self-call edge: Greeter::greet() → Greeter::format(),
+    // both DEFINED in greeter.cpp (the in-class decls live in greeter.h).
+    const greetDef = index.findSymbolByName('greet').find((s) => s.file === 'src/greeter.cpp')!;
+    const formatDef = index.findSymbolByName('format').find((s) => s.file === 'src/greeter.cpp')!;
+    expect(greetDef).toBeDefined();
+    expect(formatDef).toBeDefined();
+    expect(index.getCallees(greetDef.id).map((s) => s.id)).toContain(formatDef.id);
+
+    // The decl/def split: greet exists as both an include/greeter.h declaration
+    // and a src/greeter.cpp definition; the FQN folds the namespace into the
+    // qualifier (FQN stays simple-name, the receiver type is the "class").
+    const greetDecl = index.findSymbolByName('greet').find((s) => s.file === 'include/greeter.h')!;
+    expect(greetDecl.fqn).toBe('include/greeter.h:Greeter.greet');
+    expect(greetDecl.kind).toBe('method');
+
+    // public:/private: access governs exportedness.
+    expect(greetDecl.exported).toBe(true);
+    const formatDecl = index.findSymbolByName('format').find((s) => s.file === 'include/greeter.h')!;
+    expect(formatDecl.exported).toBe(false);
+  });
+
+  it('overview shows C++ language stats and the main.cpp entry point', async () => {
+    const deps = await setup('small-cpp');
+    const text = (await runOverview({}, deps)).content[0].text;
+    expect(text).toContain('- C++: 5 files (100%)');
+    expect(text).toContain('### Entry Points');
+    expect(text).toContain('main.cpp');
   });
 
   it('overview shows Go language stats and the main.go entry point', async () => {

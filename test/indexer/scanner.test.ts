@@ -32,10 +32,23 @@ describe('scanner helpers', () => {
       expect(detectLanguage('a.py')).toBe('python');
     });
 
+    it('maps C++ source and header extensions to cpp (incl. ambiguous .h)', () => {
+      expect(detectLanguage('main.cpp')).toBe('cpp');
+      expect(detectLanguage('a.cc')).toBe('cpp');
+      expect(detectLanguage('a.cxx')).toBe('cpp');
+      expect(detectLanguage('a.hpp')).toBe('cpp');
+      expect(detectLanguage('a.hh')).toBe('cpp');
+      expect(detectLanguage('a.hxx')).toBe('cpp');
+      expect(detectLanguage('a.ipp')).toBe('cpp');
+      expect(detectLanguage('a.tpp')).toBe('cpp');
+      expect(detectLanguage('greeter.h')).toBe('cpp');
+    });
+
     it('is case-insensitive on the extension', () => {
       expect(detectLanguage('Foo.TS')).toBe('typescript');
       expect(detectLanguage('Bar.PY')).toBe('python');
       expect(detectLanguage('Main.GO')).toBe('go');
+      expect(detectLanguage('Widget.HPP')).toBe('cpp');
     });
 
     it('returns null for unknown or absent extensions', () => {

@@ -27,6 +27,20 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   '.rb': 'ruby',
   '.rake': 'ruby',
   '.gemspec': 'ruby',
+  // C++: the C++-specific source/header extensions plus `.h`. `.h` is
+  // ambiguous (C or C++) but C++ is the dominant case for this tool's
+  // audience and tree-sitter-cpp parses C headers fine as a superset. `.c`
+  // stays unmapped (a possible future, separate C extractor — the grammars
+  // differ; do NOT fold C into the C++ extractor).
+  '.cpp': 'cpp',
+  '.cc': 'cpp',
+  '.cxx': 'cpp',
+  '.hpp': 'cpp',
+  '.hh': 'cpp',
+  '.hxx': 'cpp',
+  '.ipp': 'cpp',
+  '.tpp': 'cpp',
+  '.h': 'cpp',
 };
 
 const BINARY_EXT = new Set([

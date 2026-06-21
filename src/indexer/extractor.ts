@@ -4,6 +4,7 @@ import type { Node, Tree } from 'web-tree-sitter';
 import { log } from '../logger.js';
 import { NON_CALLABLE_KINDS, classNameFromFqn } from '../types.js';
 import type { FileInfo, ImportInfo, Reference, Symbol } from '../types.js';
+import { extractCpp } from './languages/cpp.js';
 import { extractCSharp } from './languages/csharp.js';
 import { extractDart } from './languages/dart.js';
 import { extractGo } from './languages/go.js';
@@ -201,6 +202,8 @@ export function extractSymbols(
       return extractPHP(tree, content, fileInfo);
     case 'ruby':
       return extractRuby(tree, content, fileInfo);
+    case 'cpp':
+      return extractCpp(tree, content, fileInfo);
     default:
       log.warn(`extractSymbols: unsupported language "${fileInfo.language}"`);
       return { symbols: [], references: [], imports: [] };
