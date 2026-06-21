@@ -33,7 +33,7 @@ const FIXTURES_ROOT = join(
   'fixtures',
 );
 
-type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin' | 'small-dart' | 'small-cs' | 'small-php' | 'small-cpp' | 'small-c';
+type FixtureName = 'small-ts' | 'small-py' | 'small-java' | 'small-go' | 'small-rust' | 'small-swift' | 'small-kotlin' | 'small-dart' | 'small-cs' | 'small-php' | 'small-cpp' | 'small-c' | 'small-objc';
 
 const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
   'small-ts': [
@@ -65,6 +65,13 @@ const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
     'src/greeter.c',
     'src/shape.c',
     'src/main.c',
+  ],
+  'small-objc': [
+    'include/Greeter.h',
+    'include/Shape.h',
+    'src/Greeter.m',
+    'src/Shape.m',
+    'src/main.m',
   ],
 };
 
@@ -698,6 +705,61 @@ describe('integration: end-to-end pipeline + tools', () => {
     expect(text).toContain('- C++: 2 files (40%)');
     expect(text).toContain('### Entry Points');
     expect(text).toContain('main.c');
+  });
+
+  it('indexes the Objective-C fixture end-to-end (.h sniff, decl/def split, self-send)', async () => {
+    const { index } = await setup('small-objc');
+
+    expect(index.getStats().totalFiles).toBe(5);
+
+    for (const name of [
+      'Greeter',
+      'greet',
+      'format',
+      'initWithName:',
+      'Shape',
+      'Circle',
+      'area',
+      'makeGreeter',
+      'main',
+    ]) {
+      expect(
+        index.findSymbolByName(name).length,
+        `expected to find symbol "${name}"`,
+      ).toBeGreaterThan(0);
+    }
+
+    // Same-file self-send edge: Greeter -greet → -format (both DEFINED in Greeter.m;
+    // -format is NOT in the header). The full-selector naming + the byte-identical
+    // call-side match make `[self format]` resolve.
+    const greetDef = index.findSymbolByName('greet').find((s) => s.file === 'src/Greeter.m')!;
+    const formatDef = index.findSymbolByName('format')[0]!;
+    expect(greetDef).toBeDefined();
+    expect(index.getCallees(greetDef.id).map((s) => s.id)).toContain(formatDef.id);
+
+    // Bare C call edge (no implicit-this): main() → the static makeGreeter() free function.
+    const main = index.findSymbolByName('main')[0]!;
+    const makeGreeter = index.findSymbolByName('makeGreeter')[0]!;
+    expect(index.getCallees(main.id).map((s) => s.id)).toContain(makeGreeter.id);
+
+    // The decl/def split: -greet exists as both an include/Greeter.h declaration and a
+    // src/Greeter.m definition; the header decl is a class-keyed method.
+    const greetDecl = index.findSymbolByName('greet').find((s) => s.file === 'include/Greeter.h')!;
+    expect(greetDecl.fqn).toBe('include/Greeter.h:Greeter.greet');
+    expect(greetDecl.kind).toBe('method');
+
+    // File-scope `static` C function → internal linkage → not exported (the shared C gate).
+    expect(makeGreeter.exported).toBe(false);
+  });
+
+  it('overview shows Objective-C stats (headers content-sniffed) and the main.m entry point', async () => {
+    const deps = await setup('small-objc');
+    const text = (await runOverview({}, deps)).content[0].text;
+    // All 5 files are Objective-C: the two `.h` headers are content-sniffed from cpp→objc
+    // (they carry `#import`/`@interface` markers), not left as C++.
+    expect(text).toContain('- Objective-C: 5 files (100%)');
+    expect(text).toContain('### Entry Points');
+    expect(text).toContain('main.m');
   });
 
   it('overview shows Go language stats and the main.go entry point', async () => {

@@ -110,8 +110,11 @@ const LANGUAGE_ALIASES: Record<string, readonly string[]> = {
   'c++': ['cpp'],
   cc: ['cpp'],
   c: ['c'],
+  objc: ['objc'],
+  'objective-c': ['objc'],
+  objectivec: ['objc'],
 };
-const SUPPORTED_LANGUAGES = 'typescript, tsx, javascript, python, java, go, rust, swift, kotlin, dart, csharp, php, ruby, cpp, c';
+const SUPPORTED_LANGUAGES = 'typescript, tsx, javascript, python, java, go, rust, swift, kotlin, dart, csharp, php, ruby, cpp, c, objc';
 
 type AstGrep = typeof import('@ast-grep/napi');
 // Type-only — erased at compile time, so it cannot trigger the native

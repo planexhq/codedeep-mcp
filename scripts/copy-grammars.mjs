@@ -17,6 +17,9 @@ const kotlinDir = path.join(projectRoot, "node_modules", "@tree-sitter-grammars"
 // nielsenko/tree-sitter-dart @ b57d734c84f510bbd524097902cab671e4dbfca9 with
 // `npx tree-sitter-cli@0.26.8 build --wasm` (ABI 15; loads in web-tree-sitter 0.26.8).
 const vendorDir = path.join(projectRoot, "vendor", "grammars");
+// Objective-C, like Kotlin, ships its prebuilt wasm at its own (unscoped) npm
+// package root — the @repomix bundle has no Objective-C.
+const objcDir = path.join(projectRoot, "node_modules", "tree-sitter-objc");
 
 // Most grammars ship in the @repomix bundle; Kotlin is sourced from its own
 // @tree-sitter-grammars package (the bundle has no Kotlin); Dart from the
@@ -37,6 +40,7 @@ const wanted = [
   { srcDir: repomixDir, file: "tree-sitter-ruby.wasm" },
   { srcDir: repomixDir, file: "tree-sitter-cpp.wasm" },
   { srcDir: repomixDir, file: "tree-sitter-c.wasm" },
+  { srcDir: objcDir, file: "tree-sitter-objc.wasm" },
 ];
 
 // Cache directory listings so each source dir is read at most once.

@@ -20,6 +20,7 @@ describe('extractSymbols dispatcher', () => {
     ['ruby', 'class X\nend\n'],
     ['cpp', 'int main() { return 0; }'],
     ['c', 'int main(void) { return 0; }'],
+    ['objc', '@implementation Greeter\n- (void)draw { }\n@end'],
   ])('routes %s to its extractor without warning', (language, src) => {
     const tree = parseFile(src, language)!;
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);

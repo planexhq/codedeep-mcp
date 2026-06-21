@@ -10,6 +10,7 @@ import { extractDart } from './languages/dart.js';
 import { extractGo } from './languages/go.js';
 import { extractJava } from './languages/java.js';
 import { extractKotlin } from './languages/kotlin.js';
+import { extractObjc } from './languages/objc.js';
 import { extractPHP } from './languages/php.js';
 import { extractRuby } from './languages/ruby.js';
 import { extractRust } from './languages/rust.js';
@@ -211,6 +212,12 @@ export function extractSymbols(
     // symbols still carry language 'c' (makeCppSymbol reads fileInfo.language).
     case 'c':
       return extractCpp(tree, content, fileInfo);
+    case 'objc':
+      // Objective-C is a C SUPERSET: extractObjc reuses cpp.ts's C-subset machinery
+      // (delegating every non-OO node to handleMember at file scope) and implements
+      // the OO surface (@interface/@implementation/@protocol/@property/methods/message
+      // sends) itself. A fresh extractor — NOT folded into extractCpp like C (a subset).
+      return extractObjc(tree, content, fileInfo);
     default:
       log.warn(`extractSymbols: unsupported language "${fileInfo.language}"`);
       return { symbols: [], references: [], imports: [] };

@@ -39,6 +39,7 @@
     "@tree-sitter-grammars/tree-sitter-kotlin": "^1.1.0",
     "@types/node": "^25.6.0",
     "@types/picomatch": "^4.0.3",
+    "tree-sitter-objc": "^3.0.2",
     "tsx": "^4.22.4",
     "typescript": "^6.0.0",
     "vitest": "^4.1.0"

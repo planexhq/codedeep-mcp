@@ -8,6 +8,7 @@ import {
   detectLanguage,
   isBinaryByContent,
   isBinaryByExtension,
+  refineHeaderLanguage,
   scanProject,
   toPosix,
 } from '../../src/indexer/scanner.js';
@@ -47,6 +48,12 @@ describe('scanner helpers', () => {
     it('maps the .c source extension to c (its own grammar; .h stays cpp)', () => {
       expect(detectLanguage('util.c')).toBe('c');
       expect(detectLanguage('a.c')).toBe('c');
+    });
+
+    it('maps the Objective-C .m extension to objc; .mm (ObjC++) stays unmapped', () => {
+      expect(detectLanguage('main.m')).toBe('objc');
+      expect(detectLanguage('AppDelegate.m')).toBe('objc');
+      expect(detectLanguage('View.mm')).toBeNull();
     });
 
     it('is case-insensitive on the extension', () => {
@@ -95,6 +102,65 @@ describe('scanner helpers', () => {
       const tail = Buffer.from([0]);
       writeFileSync(join(root, 'late-null.txt'), Buffer.concat([head, tail]));
       expect(await isBinaryByContent(join(root, 'late-null.txt'))).toBe(false);
+    });
+  });
+
+  describe('refineHeaderLanguage (.h content-sniff)', () => {
+    let root: string;
+    const OBJC_ENABLED = new Set(['cpp', 'objc']);
+
+    beforeEach(() => {
+      root = makeProjectDir('probe-objc-sniff-test-');
+    });
+    afterEach(() => {
+      rmSync(root, { recursive: true, force: true });
+    });
+
+    const sniff = async (content: string, lang = 'cpp', langSet = OBJC_ENABLED) => {
+      const p = join(root, 'header.h');
+      writeFileSync(p, content);
+      return refineHeaderLanguage(p, lang, langSet);
+    };
+
+    it('routes an ObjC header (#import / @interface / NS_ASSUME_NONNULL) to objc', async () => {
+      expect(await sniff('#import <Foundation/Foundation.h>\n@interface C : NSObject\n@end\n')).toBe('objc');
+      expect(await sniff('@protocol P\n- (void)x;\n@end\n')).toBe('objc');
+      expect(await sniff('NS_ASSUME_NONNULL_BEGIN\n@interface C\n@end\nNS_ASSUME_NONNULL_END\n')).toBe('objc');
+      expect(await sniff('typedef NS_ENUM(NSInteger, E) { A, B };\n')).toBe('objc');
+    });
+
+    it('keeps a C++ header as cpp (the critical mixed-repo regression)', async () => {
+      expect(await sniff('#pragma once\nnamespace ns { template <class T> class Box {}; }\n')).toBe('cpp');
+      expect(await sniff('#include <vector>\nclass Foo { public: int bar(); };\n')).toBe('cpp');
+      expect(await sniff('#include "util.h"\nstruct Point { int x, y; };\n')).toBe('cpp');
+    });
+
+    it('is not fooled by ObjC markers in comments or strings, or by C++23 `import std;`', async () => {
+      expect(await sniff('// @interface is documented here\nclass Foo {};\n')).toBe('cpp');
+      expect(await sniff('const char *s = "#import not real";\nclass Foo {};\n')).toBe('cpp');
+      expect(await sniff('import std;\nint main() { return 0; }\n')).toBe('cpp');
+      // a NS_ASSUME_NONNULL_* mention in a comment must not flip the header.
+      expect(await sniff('// guarded by NS_ASSUME_NONNULL_BEGIN elsewhere\nclass Foo {};\n')).toBe('cpp');
+    });
+
+    it('only sniffs the ambiguous .h extension; unambiguous .cpp/.hpp stay cpp even with markers', async () => {
+      // The sniff must not pay the read (or risk a misroute) on unambiguous C++ files.
+      const objcLike = '#import <Foundation/Foundation.h>\n@interface C\n@end\n';
+      for (const ext of ['cc', 'cpp', 'hpp', 'hh', 'cxx']) {
+        const p = join(root, `file.${ext}`);
+        writeFileSync(p, objcLike);
+        expect(await refineHeaderLanguage(p, 'cpp', OBJC_ENABLED)).toBe('cpp');
+      }
+    });
+
+    it('does not flip when objc is not a configured language', async () => {
+      const cppOnly = new Set(['cpp']);
+      expect(await sniff('#import <Foundation/Foundation.h>\n@interface C\n@end\n', 'cpp', cppOnly)).toBe('cpp');
+    });
+
+    it('passes a non-cpp language through unchanged (only `.h`→cpp is ambiguous)', async () => {
+      expect(await refineHeaderLanguage(join(root, 'x.swift'), 'swift', OBJC_ENABLED)).toBe('swift');
+      expect(await refineHeaderLanguage(join(root, 'x.m'), 'objc', OBJC_ENABLED)).toBe('objc');
     });
   });
 

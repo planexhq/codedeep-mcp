@@ -69,6 +69,7 @@ const LANGUAGE_DISPLAY: Readonly<Partial<Record<string, string>>> = {
   ruby: 'Ruby',
   cpp: 'C++',
   c: 'C',
+  objc: 'Objective-C',
 };
 
 const KIND_PLURAL: Record<SymbolKind, string> = {

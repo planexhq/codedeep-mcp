@@ -12,6 +12,7 @@ import {
   detectLanguage,
   isBinaryByContent,
   isBinaryByExtension,
+  refineHeaderLanguage,
   scanProject,
   toPosix,
 } from './scanner.js';
@@ -245,7 +246,13 @@ export class Indexer {
     // REAL second same-size edit landing in the same coarse-mtime tick
     // (HFS+/FAT/NFS report whole seconds) — an explicit fs event fired,
     // so verify by content hash (read without parse) before skipping.
-    const language = detectLanguage(relPath) ?? LANGUAGE_UNKNOWN;
+    let language = detectLanguage(relPath) ?? LANGUAGE_UNKNOWN;
+    // A `.h` mapped to 'cpp' may be an Objective-C header — content-sniff it (no-op
+    // unless `.h` AND objc configured). MUST run before isUnchanged (which compares
+    // the stored language), so a `.h` re-classified by a heuristic tweak re-indexes.
+    if (language === 'cpp') {
+      language = await refineHeaderLanguage(absPath, language, new Set(this.config.languages));
+    }
     const existing = this.index.getFile(relPath);
     if (isUnchanged(existing, stats.mtimeMs, stats.size, language)) {
       if (existing?.contentHash !== undefined) {

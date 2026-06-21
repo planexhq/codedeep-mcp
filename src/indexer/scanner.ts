@@ -46,7 +46,31 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   '.ipp': 'cpp',
   '.tpp': 'cpp',
   '.h': 'cpp',
+  // Objective-C: `.m` is unambiguous ObjC. `.h` stays mapped to 'cpp' above and is
+  // content-sniffed (refineHeaderLanguage) — ObjC headers are also `.h` and hold the
+  // bulk of the API (@protocol + @property are header-exclusive). `.mm` (ObjC++) is
+  // intentionally UNMAPPED (it needs a separate grammar; tree-sitter-objc errors on
+  // the C++ parts) — it falls through to LANGUAGE_UNKNOWN.
+  '.m': 'objc',
 };
+
+// Line-anchored Objective-C markers used to refine an ambiguous `.h` from cpp→objc.
+// Anchoring kills the false positives a substring match would hit: `//@interface`
+// comments, a `"#import"` string literal, and C++23's bare `import std;` (which has
+// neither the leading `#` of `#import` nor the `@` of `@import`). `#import` is
+// ObjC-exclusive and present in essentially every ObjC header.
+const OBJC_HEADER_MARKERS: readonly RegExp[] = [
+  // `#import` is the dominant ObjC header signal (also a niche MSVC C++ directive, so
+  // not strictly ObjC-exclusive — but a C++ `.h` using MSVC `#import` is rare and the
+  // mis-route is recall-only). All markers are LINE-ANCHORED so a `//@interface`
+  // comment or a `"#import"` string literal never matches.
+  /^\s*#\s*import\b/m,
+  /^\s*@(?:interface|protocol|implementation|class|import)\b/m,
+  /^\s*NS_ASSUME_NONNULL_(?:BEGIN|END)\b/m,
+  // `typedef NS_ENUM(NSInteger, Foo)` is the real shape, so allow a leading
+  // `typedef` (still line-anchored — a `// NS_ENUM(...)` comment stays excluded).
+  /^\s*(?:typedef\s+)?NS_(?:ENUM|OPTIONS)\s*\(/m,
+];
 
 const BINARY_EXT = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.ico',
@@ -67,6 +91,46 @@ export function toPosix(p: string): string {
 export function detectLanguage(filename: string): string | null {
   const ext = posix.extname(toPosix(filename)).toLowerCase();
   return LANGUAGE_BY_EXT[ext] ?? null;
+}
+
+// A `.h` file is ambiguous: a C/C++ header maps to 'cpp' (above), but an Objective-C
+// header is also `.h` and holds the public API (@protocol + @property are
+// header-exclusive). tree-sitter-cpp errors on every ObjC header, and tree-sitter-objc
+// wrecks C++ headers, so a blanket route is wrong either way. Refine the detected
+// language by content: ONLY a `.h`-that-resolved-to-'cpp', and ONLY when 'objc' is a
+// configured language (so disabling objc keeps `.h`→cpp), read the first 8KB and route
+// to 'objc' iff a line-anchored ObjC marker matches. Self-heals: `isUnchanged` compares
+// the stored language, so a later heuristic tweak re-indexes a re-classified `.h` with
+// no schema bump. Everything else returns `language` unchanged (one I/O-free fast path).
+export async function refineHeaderLanguage(
+  absPath: string,
+  language: string,
+  langSet: ReadonlySet<string>,
+): Promise<string> {
+  // Only the ambiguous `.h` extension is sniffed. `.cpp`/`.hpp`/`.cc`/… also map to
+  // 'cpp' but are unambiguously C++ — they must NOT pay the read or risk a misroute.
+  if (
+    language !== 'cpp' ||
+    !langSet.has('objc') ||
+    posix.extname(toPosix(absPath)).toLowerCase() !== '.h'
+  ) {
+    return language;
+  }
+  let head: string;
+  try {
+    const fh = await open(absPath, 'r');
+    try {
+      const buf = Buffer.alloc(BYTE_CHECK_BUF_SIZE);
+      const { bytesRead } = await fh.read(buf, 0, BYTE_CHECK_BUF_SIZE, 0);
+      head = buf.toString('utf8', 0, bytesRead);
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    // A read failure here is non-fatal for routing — keep the path-based 'cpp'.
+    return language;
+  }
+  return OBJC_HEADER_MARKERS.some((re) => re.test(head)) ? 'objc' : language;
 }
 
 export function isBinaryByExtension(filename: string): boolean {
@@ -191,7 +255,11 @@ export async function scanProject(config: ProbeConfig): Promise<ScanResult> {
     if (matchExclude(relPath)) continue;
     if (isBinaryByExtension(relPath)) continue;
 
-    const language = detectLanguage(relPath) ?? LANGUAGE_UNKNOWN;
+    let language = detectLanguage(relPath) ?? LANGUAGE_UNKNOWN;
+    // A `.h` mapped to 'cpp' may be an Objective-C header — content-sniff it (no-op
+    // unless the ext is `.h` AND objc is configured). Done before the langSet gate so
+    // a refined 'objc' is kept iff objc is enabled (refineHeaderLanguage self-gates).
+    if (language === 'cpp') language = await refineHeaderLanguage(absPath, language, langSet);
     // Recognized-but-unconfigured languages are dropped; unknown files are
     // kept (subject to residual budget) so overview can surface them.
     if (language !== LANGUAGE_UNKNOWN && !langSet.has(language)) continue;

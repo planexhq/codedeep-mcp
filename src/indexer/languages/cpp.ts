@@ -637,6 +637,10 @@ const WRAPPER_DECLARATORS: ReadonlySet<string> = new Set([
   'parenthesized_declarator',
   'array_declarator',
   'init_declarator',
+  // Objective-C / Clang blocks: `void (^handler)(int)` nests the name under a
+  // `block_pointer_declarator` (it carries a `declarator:` field, so innerDeclaratorChild
+  // reaches the inner identifier). Never produced by tree-sitter-c/-cpp → inert there.
+  'block_pointer_declarator',
 ]);
 
 // Innermost name-bearing nodes (everything in DECL_OR_NAME that is NOT a
@@ -1007,3 +1011,29 @@ function makeCppSymbol(
     language: ctx.fileInfo.language,
   };
 }
+
+// ── shared with the Objective-C extractor ───────────────────────────────────
+// Objective-C is a C SUPERSET: `objc.ts` reuses this module's C-subset machinery
+// and implements only the OO surface (`@interface`/`@implementation`/`@protocol`/
+// `@property`/methods/message sends) itself. For every NON-OO top-level node (C
+// functions, structs, enums, typedefs, globals, `#import`) objc.ts delegates to the
+// shared `handleMember` dispatcher at FILE SCOPE — so the static-linkage gate, inline
+// `struct Named {…} g;` types, K&R signatures, and `#import` all behave identically to
+// the C extractor with zero divergence. It also reuses `cppMemberCallInfo` (C-subset
+// `p->fn()`/`Foo::bar()` calls), `analyze` (the `@property` name), the FQN + symbol
+// constructors, the doc reader, and the skip sets (incl. the `preproc_*` group set, so
+// `#ifndef` include guards are recursed transparently). These are pure module-scope
+// helpers; re-exporting them is inert for the cpp/c extractors (re-dogfood confirms).
+export {
+  handleMember,
+  analyze,
+  cppDoc,
+  cppMemberCallInfo,
+  topFqn,
+  memberFqn,
+  makeCppSymbol,
+  CPP_SKIP_TYPES,
+  CPP_FUNCTION_BODY_SKIP_TYPES,
+  PREPROC_GROUPS,
+};
+export type { CppCtx, Enclosing, Visibility };
