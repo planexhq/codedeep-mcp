@@ -3437,4 +3437,141 @@ describe('CodeIndex.getRiskHotspots', () => {
     expect(idx.getGitMeta()).toBeNull();
     expect(idx.getRiskHotspots()).toEqual([]);
   });
+
+  // A file whose offender hub has `callers` callers and the given complexity —
+  // exercises the (1 + log1p(cx)) factor in isolation.
+  function seedHub(
+    idx: CodeIndex,
+    file: string,
+    hubName: string,
+    callers: number,
+    cx?: { complexity?: number; cognitiveComplexity?: number },
+  ): void {
+    const hub = mkSym({
+      name: hubName,
+      file,
+      startLine: 1,
+      complexity: cx?.complexity,
+      cognitiveComplexity: cx?.cognitiveComplexity,
+    });
+    const callerSyms = Array.from({ length: callers }, (_, i) =>
+      mkSym({ name: `${hubName}_c${i}`, file, startLine: 10 + i }),
+    );
+    idx.addFile(
+      makeFileInfo('typescript', file),
+      [hub, ...callerSyms],
+      callerSyms.map((c) => mkRef(c, hub)),
+      [],
+    );
+  }
+
+  async function churn(idx: CodeIndex, counts: Record<string, number>): Promise<void> {
+    await idx.applyGitAnalysis({
+      counts: new Map(Object.entries(counts)),
+      cochanges: new Map(),
+      hotspots: Object.keys(counts),
+      meta: mkGitMeta(),
+    });
+  }
+
+  it('leads the complexity factor with cognitive', async () => {
+    const idx = new CodeIndex();
+    seedHub(idx, 'src/a.ts', 'gnarly', 5, { cognitiveComplexity: 10 });
+    seedHub(idx, 'src/b.ts', 'plain', 5);
+    await churn(idx, { 'src/a.ts': 10, 'src/b.ts': 10 });
+    const rows = idx.getRiskHotspots();
+
+    expect(rows[0].file).toBe('src/a.ts'); // cog 10 outranks the trivial hub
+    expect(rows[0].cognitiveComplexity).toBe(10);
+    const a = rows.find((r) => r.file === 'src/a.ts')!;
+    const b = rows.find((r) => r.file === 'src/b.ts')!;
+    const phase1 = Math.log1p(10) * Math.log1p(5);
+    expect(a.score).toBeCloseTo(phase1 * (1 + Math.log1p(10)), 10);
+    expect(b.score).toBeCloseTo(phase1, 10); // trivial offender → exact phase-1
+    expect(a.score).toBeGreaterThan(b.score);
+  });
+
+  it('falls back to cyclomatic-excess when cognitive is absent', async () => {
+    const idx = new CodeIndex();
+    seedHub(idx, 'src/a.ts', 'branchy', 5, { complexity: 8 });
+    seedHub(idx, 'src/b.ts', 'plain', 5);
+    await churn(idx, { 'src/a.ts': 10, 'src/b.ts': 10 });
+    const rows = idx.getRiskHotspots();
+
+    expect(rows[0].file).toBe('src/a.ts');
+    expect(rows[0].complexity).toBe(8);
+    expect(rows[0].cognitiveComplexity).toBeUndefined();
+    const a = rows.find((r) => r.file === 'src/a.ts')!;
+    // cx = (8 - 1) = 7 → factor 1 + log1p(7); proves the fallback is live.
+    expect(a.score).toBeCloseTo(Math.log1p(10) * Math.log1p(5) * (1 + Math.log1p(7)), 10);
+  });
+
+  it('uses cognitive over cyclomatic when both are present', async () => {
+    const idx = new CodeIndex();
+    // a: cog 10 wins over its own cyc 2; b: cyc 9 (cog absent) → cx 8.
+    seedHub(idx, 'src/a.ts', 'coghub', 5, { complexity: 2, cognitiveComplexity: 10 });
+    seedHub(idx, 'src/b.ts', 'cychub', 5, { complexity: 9 });
+    await churn(idx, { 'src/a.ts': 10, 'src/b.ts': 10 });
+    const rows = idx.getRiskHotspots();
+    // If a used its cyc 2 (cx 1) it would trail b (cx 8); cog leading puts a first.
+    expect(rows[0].file).toBe('src/a.ts');
+    // Both raw fields forwarded onto the row at the index layer (where the
+    // forwarding lives), independent of which one drove the score.
+    expect(rows[0].complexity).toBe(2);
+    expect(rows[0].cognitiveComplexity).toBe(10);
+  });
+
+  it('degrades to the exact churn × coupling score for a trivial offender', async () => {
+    const idx = seedRisk();
+    await applyChurn(idx);
+    const rows = idx.getRiskHotspots();
+    // hub.ts: churn 50, fanIn 5, trivial offender → factor 1 → bit-identical.
+    expect(rows[0].file).toBe('src/hub.ts');
+    expect(rows[0].score).toBe(Math.log1p(50) * Math.log1p(5));
+    expect(rows[0].complexity).toBeUndefined();
+    expect(rows[0].cognitiveComplexity).toBeUndefined();
+  });
+
+  it('treats an explicit cognitive 0 the same as absent (defends ?? 0)', async () => {
+    const idx = new CodeIndex();
+    seedHub(idx, 'src/a.ts', 'zero', 5, { complexity: 5, cognitiveComplexity: 0 });
+    seedHub(idx, 'src/b.ts', 'absent', 5, { complexity: 5 });
+    await churn(idx, { 'src/a.ts': 10, 'src/b.ts': 10 });
+    const rows = idx.getRiskHotspots();
+    const a = rows.find((r) => r.file === 'src/a.ts')!;
+    const b = rows.find((r) => r.file === 'src/b.ts')!;
+    // both fall back to cx = (5 - 1) = 4 → identical score.
+    expect(a.score).toBe(b.score);
+  });
+
+  it('keeps a churny + coupled but simple hub (anti-zeroing guard)', async () => {
+    const idx = new CodeIndex();
+    seedHub(idx, 'src/hub.ts', 'simplehub', 5); // high churn + coupling, cx 0
+    await churn(idx, { 'src/hub.ts': 50 });
+    const rows = idx.getRiskHotspots();
+    expect(rows.map((r) => r.file)).toContain('src/hub.ts');
+    expect(rows[0].score).toBeGreaterThan(0); // a pure 3-way product would zero this
+  });
+
+  it('breaks score ties deterministically by file path', async () => {
+    const idx = new CodeIndex();
+    // identical churn, fanIn, and complexity → identical score.
+    seedHub(idx, 'src/z.ts', 'zhub', 5, { cognitiveComplexity: 10 });
+    seedHub(idx, 'src/a.ts', 'ahub', 5, { cognitiveComplexity: 10 });
+    await churn(idx, { 'src/z.ts': 10, 'src/a.ts': 10 });
+    const rows = idx.getRiskHotspots();
+    expect(rows.map((r) => r.file)).toEqual(['src/a.ts', 'src/z.ts']);
+  });
+
+  it('lets complexity reorder rows vs the plain churn × coupling score', async () => {
+    const idx = new CodeIndex();
+    seedHub(idx, 'src/high.ts', 'highhub', 5); // more churn + coupling, trivial
+    seedHub(idx, 'src/low.ts', 'lowhub', 5, { cognitiveComplexity: 20 });
+    await churn(idx, { 'src/high.ts': 40, 'src/low.ts': 10 });
+    const rows = idx.getRiskHotspots();
+    // Bare churn × coupling would rank high.ts first...
+    expect(Math.log1p(40) * Math.log1p(5)).toBeGreaterThan(Math.log1p(10) * Math.log1p(5));
+    // ...but low.ts's cognitive 20 flips it to the top.
+    expect(rows[0].file).toBe('src/low.ts');
+  });
 });

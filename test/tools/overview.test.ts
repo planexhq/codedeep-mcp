@@ -1111,7 +1111,7 @@ describe('runOverview — git sections', () => {
     });
 
     const text = (await runOverview({}, makeDeps(idx))).content[0].text;
-    expect(text).toContain('### Risk Hotspots (churn × coupling) [behavioral]');
+    expect(text).toContain('### Risk Hotspots (churn × coupling × complexity) [behavioral]');
     expect(text).toContain(
       '- src/hub.ts — hub — 50 commits × 5 references (blast radius 5 across 1 file)',
     );
@@ -1121,6 +1121,60 @@ describe('runOverview — git sections', () => {
     expect(riskSection.indexOf('src/hub.ts —')).toBeLessThan(
       riskSection.indexOf('src/cold.ts —'),
     );
+    // Trivial offenders → no complexity segment appended to the rows, and no
+    // dangling separator after the blast clause (the omit-when-null guard).
+    expect(riskSection).not.toContain('— cyc');
+    expect(riskSection).not.toContain('— cog');
+    expect(riskSection).not.toContain('1 file) — ');
+  });
+
+  // Seed one churny 5-caller hub whose offender carries the given complexity,
+  // then render the overview. Returns the rendered text.
+  async function renderHubWithComplexity(cx: {
+    complexity?: number;
+    cognitiveComplexity?: number;
+  }): Promise<string> {
+    const idx = new CodeIndex(tmpRoot);
+    const hub = mkSym({ name: 'hub', file: 'src/hub.ts', startLine: 1, ...cx });
+    const callers = Array.from({ length: 5 }, (_, i) =>
+      mkSym({ name: `c${i}`, file: 'src/hub.ts', startLine: 10 + i }),
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/hub.ts'),
+      [hub, ...callers],
+      callers.map((c) => mkRef(c, hub)),
+      [],
+    );
+    await idx.applyGitAnalysis({
+      counts: new Map([['src/hub.ts', 50]]),
+      cochanges: new Map(),
+      hotspots: ['src/hub.ts'],
+      meta: mkGitMeta(),
+    });
+    return (await runOverview({}, makeDeps(idx))).content[0].text;
+  }
+
+  it('appends the offender complexity (cyc + cog) to a Risk Hotspots row', async () => {
+    const text = await renderHubWithComplexity({ complexity: 4, cognitiveComplexity: 6 });
+    expect(text).toContain('### Risk Hotspots (churn × coupling × complexity) [behavioral]');
+    expect(text).toContain('(blast radius 5 across 1 file) — cyc 4 / cog 6');
+  });
+
+  it('appends cognitive only when cyclomatic is absent', async () => {
+    const text = await renderHubWithComplexity({ cognitiveComplexity: 6 });
+    expect(text).toContain('(blast radius 5 across 1 file) — cog 6');
+    expect(text.slice(text.indexOf('### Risk Hotspots'))).not.toContain('cyc');
+  });
+
+  it('appends cyclomatic only when cognitive is absent', async () => {
+    const text = await renderHubWithComplexity({ complexity: 4 });
+    expect(text).toContain('(blast radius 5 across 1 file) — cyc 4');
+    expect(text.slice(text.indexOf('### Risk Hotspots'))).not.toContain('cog');
+  });
+
+  it('appends no [structural] tag to the risk row (the [behavioral] heading covers it)', async () => {
+    const text = await renderHubWithComplexity({ complexity: 4, cognitiveComplexity: 6 });
+    expect(text.slice(text.indexOf('### Risk Hotspots'))).not.toContain('[structural]');
   });
 
   it('Risk Hotspots order is the churn×coupling score, not the plain churn order', async () => {

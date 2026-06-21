@@ -22,6 +22,7 @@ import {
 
 import {
   BEHAVIORAL_TAG,
+  formatComplexityMetrics,
   INDEXING_BANNER,
   plural,
   textResponse,
@@ -222,19 +223,25 @@ function appendGitSections(lines: string[], data: OverviewGitData): void {
       lines.push(`- ${h.path} — ${h.commits} ${plural('commit', h.commits)}`);
     }
   }
-  // Churn × coupling: the file's most-coupled symbol crossed with its commit
-  // frequency. Empty (and so omitted) off-git, where the product has no churn
-  // factor — the same silent-omission contract as the sections above.
+  // Churn × coupling × complexity: the file's most-coupled symbol crossed with
+  // its commit frequency, refined by that offender's complexity. Empty (and so
+  // omitted) off-git, where the product has no churn factor — the same silent-
+  // omission contract as the sections above.
   if (data.riskHotspots.length > 0) {
-    lines.push('', `### Risk Hotspots (churn × coupling) ${BEHAVIORAL_TAG}`);
+    lines.push('', `### Risk Hotspots (churn × coupling × complexity) ${BEHAVIORAL_TAG}`);
     for (const r of data.riskHotspots) {
       // No `()` after the offender — it can be a class/variable, not a function.
       // "references" (not "callers") because fanIn is reference-granular, unlike
       // the distinct-caller blast count; a trailing `+` flags a capped walk.
+      // The offender's complexity is appended tag-less (fanIn/blast are already
+      // rendered tag-less under the one [behavioral] heading); omitted entirely
+      // for a trivial offender so the line keeps its churn × coupling shape.
+      const complexity = formatComplexityMetrics(r);
       lines.push(
         `- ${r.file} — ${r.symbol} — ${r.churn} ${plural('commit', r.churn)} × ` +
           `${r.fanIn} ${plural('reference', r.fanIn)} ` +
-          `(blast radius ${r.blast.callers}${r.blast.truncated ? '+' : ''} across ${r.blast.files} ${plural('file', r.blast.files)})`,
+          `(blast radius ${r.blast.callers}${r.blast.truncated ? '+' : ''} across ${r.blast.files} ${plural('file', r.blast.files)})` +
+          (complexity ? ` — ${complexity}` : ''),
       );
     }
   }

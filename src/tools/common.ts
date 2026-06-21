@@ -182,18 +182,31 @@ export const NAME_MATCH_HEADER_QUALIFIER = '(approximate — from AST name match
 // `get_context` symbol-mode caller/callee lists.
 export const STRUCTURAL_TAG = '[structural]';
 
-// Renders the combined complexity body ("cyc N / cog M [structural]") for a
-// symbol, or null when neither metric is present. Cyclomatic is omitted at the
-// trivial 1, cognitive at 0, so a symbol may carry either, both, or neither;
-// show whichever the extractor populated. Both are genuinely structural (no
-// name-match approximation, unlike fan-in), so one [structural] tag covers the
-// line. Callers add their own prefix ("Complexity:" / "- Complexity:").
-export function formatComplexity(sym: Symbol): string | null {
+// Tag-less complexity body ("cyc N / cog M") for anything carrying the two
+// optional metrics, or null when neither is present. Cyclomatic is omitted at
+// the trivial 1, cognitive at 0, so a value may carry either, both, or neither;
+// show whichever the extractor populated. The param is a minimal structural
+// shape (not full `Symbol`) so a RiskRow can render its offender's complexity
+// without a synthetic Symbol. Used where the caller adds the [structural] tag
+// (formatComplexity) or deliberately suppresses it (Risk Hotspots rows, already
+// under a single [behavioral] heading).
+export function formatComplexityMetrics(sym: {
+  complexity?: number;
+  cognitiveComplexity?: number;
+}): string | null {
   const parts: string[] = [];
   if (sym.complexity !== undefined) parts.push(`cyc ${sym.complexity}`);
   if (sym.cognitiveComplexity !== undefined) parts.push(`cog ${sym.cognitiveComplexity}`);
-  if (parts.length === 0) return null;
-  return `${parts.join(' / ')} ${STRUCTURAL_TAG}`;
+  return parts.length === 0 ? null : parts.join(' / ');
+}
+
+// Renders the combined complexity body with the [structural] tag for a symbol,
+// or null when neither metric is present. Both metrics are genuinely structural
+// (no name-match approximation, unlike fan-in), so one [structural] tag covers
+// the line. Callers add their own prefix ("Complexity:" / "- Complexity:").
+export function formatComplexity(sym: Symbol): string | null {
+  const body = formatComplexityMetrics(sym);
+  return body === null ? null : `${body} ${STRUCTURAL_TAG}`;
 }
 
 // Tier tag for git-derived data: commit co-occurrence and history, not

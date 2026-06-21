@@ -340,7 +340,7 @@ export interface BlastRadius {
   truncated: boolean;
 }
 
-// One row of the churn × coupling risk ranking (getRiskHotspots).
+// One row of the churn × coupling × complexity risk ranking (getRiskHotspots).
 export interface RiskRow {
   file: string;
   symbol: string;          // offender: the highest-fan-in symbol in the file
@@ -348,7 +348,9 @@ export interface RiskRow {
   churn: number;           // file commit frequency in the git window
   fanIn: number;           // offender's caller count (the coupling factor)
   blast: BlastRadius;      // offender's transitive blast radius (depth-bounded)
-  score: number;           // log1p(churn) * log1p(fanIn)
+  complexity?: number;     // offender's cyclomatic (omit=1), for display
+  cognitiveComplexity?: number; // offender's cognitive (omit=0), for display
+  score: number;           // log1p(churn) * log1p(fanIn) * (1 + log1p(cx))
 }
 
 // Ordinal edge weights feeding the path-confidence product, plus a rank for
@@ -1029,11 +1031,12 @@ export class CodeIndex {
     };
   }
 
-  // Risk Hotspots: files ranked by churn × coupling (the CodeScene/Feathers
-  // intersection model — churny-but-decoupled and coupled-but-frozen both fall
-  // away). Empty off-git (no churn signal). Hybrid for cost: rank a bounded
-  // candidate set by the O(1) cached fan-in, run the expensive transitive
-  // blast-radius walk only for the rows returned.
+  // Risk Hotspots: files ranked by churn × coupling × complexity (the
+  // CodeScene/Feathers intersection model — churny-but-decoupled and
+  // coupled-but-frozen both fall away — refined by the offender's complexity).
+  // Empty off-git (no churn signal). Hybrid for cost: rank a bounded candidate
+  // set by the O(1) cached fan-in, run the expensive transitive blast-radius
+  // walk only for the rows returned.
   getRiskHotspots(limit = DEFAULT_RISK_HOTSPOTS): RiskRow[] {
     if (this.gitMetaState === null) return [];
 
@@ -1079,16 +1082,36 @@ export class CodeIndex {
     }
     if (scored.length === 0) return [];
 
-    // Product on a log scale (heavy-tailed counts). No Math.max(...spread)
-    // anywhere — the ranking is a pure per-row product, so the RangeError
-    // guard that gitBoostMap needs does not apply here. Tie-break by file so
-    // equal-score rows order (and survive the limit slice) deterministically.
+    // Product on a log scale (heavy-tailed counts), refined by the offender's
+    // complexity. No Math.max(...spread) anywhere — the ranking is a pure
+    // per-row product, so the RangeError guard that gitBoostMap needs does not
+    // apply here. Complexity enters as a bounded factor (1 + log1p(cx)) that is
+    // ALWAYS >= 1: it amplifies a gnarly hub but never zeroes a churny+coupled-
+    // but-simple one (the dominant case, since the offender is picked by fan-in
+    // with no regard for complexity), and degrades to the exact churn × coupling
+    // score when the offender is trivial (cx === 0 → factor 1). `cx` leads with
+    // cognitive (the human-effort signal) and falls back to cyclomatic-excess —
+    // a deliberate blend, NOT a clean single metric: keep the (1 + …) guard or a
+    // cog-0 offender (cyc >= 1 by construction so cx >= 0) re-zeroes the score.
+    // Computed before the slice so complexity participates in ranking for ALL
+    // scored candidates. Tie-break by file so equal-score rows order (and
+    // survive the limit slice) deterministically.
     const rows = scored
-      .map((s) => ({ ...s, score: Math.log1p(s.churn) * Math.log1p(s.fanIn) }))
+      .map((s) => {
+        let cx = s.symbol.cognitiveComplexity ?? 0;
+        if (cx === 0) cx = (s.symbol.complexity ?? 1) - 1;
+        return {
+          ...s,
+          score: Math.log1p(s.churn) * Math.log1p(s.fanIn) * (1 + Math.log1p(cx)),
+        };
+      })
       .sort((a, b) => b.score - a.score || a.file.localeCompare(b.file))
       .slice(0, Math.max(0, limit));
 
-    // Expensive transitive walk ONLY for the displayed rows.
+    // Expensive transitive walk ONLY for the displayed rows. The offender's raw
+    // complexity is reported for display (undefined-clean when absent); a less-
+    // coupled-but-more-complex symbol in the same file is intentionally NOT the
+    // offender — the row's identity is the file's most-coupled hub.
     return rows.map((r) => ({
       file: r.file,
       symbol: r.symbol.name,
@@ -1096,6 +1119,8 @@ export class CodeIndex {
       churn: r.churn,
       fanIn: r.fanIn,
       blast: this.getBlastRadius(r.symbol.id, { maxDepth: RISK_BLAST_DEPTH }),
+      complexity: r.symbol.complexity,
+      cognitiveComplexity: r.symbol.cognitiveComplexity,
       score: r.score,
     }));
   }

@@ -86,6 +86,7 @@ export interface SymOpts {
   doc?: string | null;
   parent?: string;
   complexity?: number;
+  cognitiveComplexity?: number;
 }
 
 export function mkSym(opts: SymOpts): Symbol {
@@ -109,6 +110,8 @@ export function mkSym(opts: SymOpts): Symbol {
     language: opts.language ?? 'typescript',
   };
   if (opts.complexity !== undefined) sym.complexity = opts.complexity;
+  if (opts.cognitiveComplexity !== undefined)
+    sym.cognitiveComplexity = opts.cognitiveComplexity;
   return sym;
 }
 
