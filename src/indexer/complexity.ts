@@ -80,7 +80,7 @@ export interface ComplexityOptions {
   // COGNITIVE complexity (proposal §1.2): when present, a second nesting-aware
   // walk runs alongside the cyclomatic one and writes `Symbol.cognitiveComplexity`.
   // Absent ⇒ cognitive stays undefined for that language (none remain — all wired).
-  // Populated for ALL 11: **Java + TS/JS + Go + Python + Rust + Swift + Kotlin + Dart + C# + PHP**. The algorithm is the
+  // Populated for ALL 14: **Java + TS/JS + Go + Python + Rust + Swift + Kotlin + Dart + C# + PHP + Ruby + C++ + C + Objective-C**. The algorithm is the
   // SonarSource whitepaper's, clean-room verified against `sonar-java`'s
   // `CognitiveComplexityVisitor` (Java), `eslint-plugin-sonarjs`'s S3776 (TS/JS),
   // `uudashr/gocognit` (Go), AND `sonar-python`'s `CognitiveComplexityVisitor`
@@ -105,7 +105,11 @@ export interface ComplexityOptions {
   // a sentinel `parenthesizedType` (no-unwrap), and Kotlin sets `ifConsequenceFromNamedChildren`
   // + `elseKeywordType` + `elseChargeBlockType` (anonymous-else / brace-less positional if with
   // the sonar-kotlin else-body ternary gate) + a sentinel `parenthesizedType` (no-unwrap) and
-  // puts `do_while_statement` in `nestOnlyTypes` (sonar-kotlin omits the do-while increment).
+  // puts `do_while_statement` in `nestOnlyTypes` (sonar-kotlin omits the do-while increment),
+  // and Ruby sets `isExpressionTernary` (sonar-ruby's isTernaryOperator — suppress the `else`
+  // +1 for an if-with-else used as an expression) + `catchPredicate` (count `rescue` only in an
+  // explicit `begin` block, not a method-level rescue) + `collectionIfType` as a SET
+  // (`unless`/`elsif`) + a sentinel `parenthesizedType` (no-unwrap).
   // See computeCognitive below + CLAUDE.md "Cognitive Complexity Rules".
   cognitive?: CognitiveOptions;
 }
@@ -124,13 +128,18 @@ export interface CognitiveOptions {
   conditionField: string;
   consequenceField: string;
   alternativeField: string;
-  // A SECOND node type treated identically to `ifType` (Dart's collection-`if`
-  // `if_element`, which lives inside list/set/map literals). It surcharges as the
-  // head if, charges its `else`/`else if` +1 flat, and nests — measured EXACT vs
-  // the SonarQube Dart model (`[if(b) 1 else 2]` = cog 2, not 1; a bare `switchTypes` mapping
-  // would drop the else). Routed through the same if-branch + handleAlternative
-  // else-if test. Only Dart sets it; the engine's single `ifType` is unchanged.
-  collectionIfType?: string;
+  // ADDITIONAL node type(s) treated identically to `ifType` — a single string
+  // (Dart's collection-`if` `if_element`, which lives inside list/set/map
+  // literals) or a SET (Ruby's `unless` head + the `elsif` else-if link, since
+  // Ruby has THREE if-like roles: `if`/`unless` as surcharging heads and `elsif`
+  // as the chain link reached via `handleAlternative`). Each surcharges as the
+  // head if, charges its `else`/`else if` +1 flat, and nests — matching the Cognitive
+  // Complexity model (`[if(b) 1 else 2]` = cog 2) and the sonar-ruby SLANG oracle
+  // (`if a; x; elsif b; y; else z` = cog 3). Routed through the same if-branch +
+  // handleAlternative else-if test. The string-vs-set widening mirrors
+  // `parenthesizedType` (C#): inert for Dart's string + all languages that leave
+  // it unset; the engine's single `ifType` is unchanged.
+  collectionIfType?: string | ReadonlySet<string>;
   // Some grammars give the `if` NO condition field — the condition (and Dart-3
   // `case`/pattern/`when`-guard) are POSITIONAL children (Dart's `if_statement`).
   // When set, the if-case (and handleAlternative's else-if) walk every named child
@@ -260,6 +269,21 @@ export interface CognitiveOptions {
   // unset → bump-ALL (the documented COG-loopheader-overbump, deferred for them — 0
   // oracle cases because their ternaries rarely chain in the condition).
   ternaryBranchFields?: ReadonlyArray<string>;
+  // Models sonar-ruby's `isTernaryOperator`: returns true when an if-family node
+  // (the `ifType`/`collectionIfType` head OR a `ternaryType`) is a TERNARY — i.e. an
+  // if-with-else used as an EXPRESSION with simple branches — in which case the `else`
+  // keyword's +1 FLAT is SUPPRESSED (a ternary surcharges its head but adds no `else`).
+  // When false (statement position, an elsif-chain, or a multi-statement branch) the
+  // `else` +1 is charged normally. In Ruby everything is an expression, so the SAME
+  // syntactic if-else is cog 2 as a statement (`def f; if a; x; else; y; end; end`)
+  // but cog 1 as an expression (`v = if a; x; else; y; end` / `cond ? a : b`); the
+  // `?:` form is the dominant expression-ternary. The predicate gets the head node
+  // and is applied to BOTH the `conditional` (ternary branch) and the `if`/`unless`
+  // plain-else (handleAlternative). Only Ruby sets it; others leave it unset → the
+  // `else` +1 is always charged (the sonar-java/whitepaper behavior, where a ternary
+  // is its own `ternaryType` node distinct from an if and an if-else always counts
+  // its else).
+  isExpressionTernary?: (node: Node) => boolean;
   // Extra node types that surcharge (+1 + nesting) but descend their children at the
   // SAME nesting — a flow-breaker with the full nesting surcharge that does NOT nest
   // its operand. C#'s `goto`/`goto case`: SonarC# scores it at +1+nesting (a `goto`
@@ -277,6 +301,14 @@ export interface CognitiveOptions {
   // and `finally` add nothing and don't raise nesting, so no parent node needs
   // naming).
   catchType: string;
+  // Optional gate on the `catchType` branch: when set, a `catchType` node surcharges
+  // ONLY if the predicate returns true. Ruby needs it because the SAME `rescue` node
+  // type is a SLANG CatchTree (+1) when it sits in an explicit `begin … rescue … end`
+  // (parent `begin`) but is UNCOUNTED when it is a METHOD-level rescue (`def f; …;
+  // rescue E; …; end`, parent `body_statement` — an implicit begin the RubyConverter
+  // does not map to a CatchTree). Ruby passes `n => n.parent?.type === 'begin'`. Other
+  // languages leave it unset (every catch-like node of their `catchType` counts).
+  catchPredicate?: (node: Node) => boolean;
   // A try container whose catch BODIES are SIBLINGS of the catch clause rather
   // than children of it (Dart: `try_statement` holds `body:` block, then flat
   // `on`/type/`catch_clause` headers each FOLLOWED BY a sibling `block`, then a
@@ -592,9 +624,15 @@ function computeCognitive(
   // of expression+pattern parens. Used by the source-order flatten AND the tree-scoped
   // ancestor walk (both via `matchesParen`, which handles string or set).
   const parenSpec = cog.parenthesizedType;
-  // A second if-like node type (Dart's collection `if_element`) is treated as `ifType`.
+  // Additional if-like node type(s) (Dart's collection `if_element`; Ruby's
+  // `unless`/`elsif`) are treated as `ifType`. `collectionIfType` is a single type
+  // (Dart) or a set (Ruby) — matched by equality or membership.
   const isIfLike = (t: string): boolean =>
-    t === cog.ifType || (cog.collectionIfType !== undefined && t === cog.collectionIfType);
+    t === cog.ifType ||
+    (cog.collectionIfType !== undefined &&
+      (typeof cog.collectionIfType === 'string'
+        ? t === cog.collectionIfType
+        : cog.collectionIfType.has(t)));
 
   const visitField = (node: Node, field: string, nesting: number, depth: number): void => {
     const child = node.childForFieldName(field);
@@ -683,15 +721,18 @@ function computeCognitive(
         ? firstNonComment(rawAlt)
         : rawAlt;
     if (!alt) return;
-    total += 1; // the `else` / `else if` keyword: +1 flat, no surcharge
     if (isIfLike(alt.type)) {
+      total += 1; // the `else if` keyword: +1 flat, no surcharge (elsif chains always count)
       visitIfCondition(alt, nesting, depth);
       visitField(alt, cog.consequenceField, nesting + 1, depth);
       handleAlternative(alt, nesting, depth + 1);
     } else {
-      // Plain (terminal) else: body at nesting+1 (sonar default) or at base
-      // nesting (gocognit, via nestElseBody === false). `=== false` so an unset
-      // value keeps the sonar-java/TS behavior unchanged.
+      // Plain (terminal) else: +1 flat for the `else` keyword — UNLESS the head if is
+      // an EXPRESSION-TERNARY (Ruby: a simple 2-branch if-else used as an expression,
+      // where SLANG's isTernaryOperator suppresses the else). Unset elsewhere → always
+      // +1 (sonar-java/whitepaper). Body at nesting+1 (sonar default) or base nesting
+      // (gocognit, via nestElseBody === false; `=== false` keeps unset = sonar-java).
+      if (!cog.isExpressionTernary || !cog.isExpressionTernary(ifNode)) total += 1;
       visit(alt, cog.nestElseBody === false ? nesting : nesting + 1, depth + 1);
     }
   };
@@ -869,9 +910,17 @@ function computeCognitive(
 
     // --- switch / ternary: surcharge, then ALL children one level deeper. (sonar
     // nests the WHOLE ternary subtree — incl. its test — so bump-all is correct for
-    // a ternary; the header-overbump caveat above applies to switch discriminants.) ---
+    // a ternary; the header-overbump caveat above applies to switch discriminants.)
+    // A statement-position ternary (Ruby: parent ∈ ternaryStatementParentTypes) is
+    // an if-else, so it also takes the `else` keyword's +1 FLAT. ---
     if (cog.switchTypes.has(t) || t === cog.ternaryType) {
       total += 1 + nesting;
+      // A STATEMENT-position ternary (Ruby) is an if-else → also +1 for the `else`;
+      // an EXPRESSION-position ternary is the surcharge-only form. Unset elsewhere
+      // (other languages' ternaries are always surcharge-only).
+      if (t === cog.ternaryType && cog.isExpressionTernary && !cog.isExpressionTernary(node)) {
+        total += 1;
+      }
       for (const child of node.namedChildren) visit(child, nesting + 1, depth + 1);
       return;
     }
@@ -881,7 +930,7 @@ function computeCognitive(
     // branch, so it fires for ANY try container — `try_statement` AND
     // `try_with_resources_statement` — which are themselves plain pass-through
     // (the try body / resource spec / `finally` add nothing and don't bump). ---
-    if (t === cog.catchType) {
+    if (t === cog.catchType && (!cog.catchPredicate || cog.catchPredicate(node))) {
       total += 1 + nesting;
       for (const child of node.namedChildren) visit(child, nesting + 1, depth + 1);
       return;

@@ -1,6 +1,8 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
 import { collectAmbiguousTypeNames } from '../extractor.js';
+import { computeComplexity } from '../complexity.js';
+import type { CognitiveOptions } from '../complexity.js';
 import { RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import {
@@ -163,12 +165,216 @@ function rubyMemberCallInfo(callee: Node): MemberCallInfo | null {
   return { receiver: RECEIVER_OPAQUE, property, isSelf: false };
 }
 
-// NOTE: cyclomatic + cognitive complexity for Ruby is a focused FOLLOW-UP, pinned
-// to sonar-ruby (the SLANG-based analyzer), cross-checked vs rubocop — see PHASE3.md.
-// The extractor ships symbols + references first; the complexity node sets
-// (modifier forms, `unless`/`until`, `case/in`, `rescue`, keyword `and`/`or`,
-// the nested `elsif` chain) need the sonar-ruby per-function oracle to confirm, so
-// `computeComplexity` is wired in once those are measured — not guessed.
+// ── complexity (cyclomatic + cognitive) ──────────────────────────────────────
+//
+// BOTH metrics pinned EXACT to sonar-ruby — SonarSource's SLANG-based analyzer —
+// via a RUNNABLE per-function oracle: the sonar-ruby-plugin's `RubyConverter`
+// (JRuby + whitequark/parser) builds the SLANG tree, then the shared
+// `org.sonarsource.slang` `CyclomaticComplexityVisitor` / `CognitiveComplexity`
+// score each function. The increments below were MEASURED against that oracle on a
+// per-construct battery + the sinatra/rack/liquid/devise corpus, never guessed —
+// the campaign standard (oracle the PIN). See PHASE3.md + CLAUDE.md "Cyclomatic /
+// Cognitive Complexity Rules".
+
+// CYCLOMATIC (SLANG `CyclomaticComplexityVisitor`): base +1 per named function,
+// then +1 per IfTree (if/unless/elsif/ternary/modifier-if/unless), +1 per LoopTree
+// (while/until/for/modifier-while/until), +1 per MatchCaseTree-with-expression (a
+// `when` arm — NOT the `case` container, NOT the `else` arm), and +1 per
+// CONDITIONAL_AND/OR binary (the rubyCyclomaticExtra predicate). NOTABLY ABSENT
+// (measured, matching the pin — sonar-ruby is the "compare to SonarQube" north
+// star): `rescue`/`rescue_modifier` (SLANG registers no CatchTree cyclomatically —
+// consistent with sonar-java/JS omitting catch; defensible, so NOT forked toward
+// rubocop, which DOES count rescue), `case/in` pattern matching (`case_match`/
+// `in_clause` map to an uncounted native tree — a converter limitation, rare in
+// real Ruby), and `&.` safe-navigation. These are deliberate pin-faithful
+// divergences from rubocop/McCabe, documented in CLAUDE.md.
+const RUBY_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'if', 'elsif', 'unless', 'if_modifier', 'unless_modifier', // IfTree (+1 each)
+  'while', 'until', 'for', 'while_modifier', 'until_modifier', // LoopTree (+1 each)
+  'when', // MatchCaseTree with expression (the case container + `else` arm add nothing)
+  'conditional', // ternary `?:` → IfTree (+1)
+]);
+
+// Boolean operators counted by SLANG (BinaryExpressionTree CONDITIONAL_AND/OR):
+// the symbolic `&&`/`||` AND the keyword `and`/`or` (both are `binary` nodes). The
+// shared isCFamilyBooleanOperator only matches `&&`/`||`/`??`, so Ruby reads the
+// `operator` field token itself. Returns the raw operator TEXT (not a normalized
+// kind) because SLANG's cognitive run-collapse compares operator TEXT — so `&&`
+// and `and` are DISTINCT runs (`a && b and c` = cog 2), oracle-verified.
+const RUBY_BOOLEAN_OPS: ReadonlySet<string> = new Set(['&&', '||', 'and', 'or']);
+function rubyBooleanKind(node: Node): string | null {
+  if (node.type !== 'binary') return null;
+  const op = node.childForFieldName('operator')?.type;
+  return op !== undefined && RUBY_BOOLEAN_OPS.has(op) ? op : null;
+}
+function rubyCyclomaticExtra(node: Node): boolean {
+  return rubyBooleanKind(node) !== null;
+}
+
+// Complexity body boundary — SEPARATE from RUBY_SKIP_TYPES (the resolveCalls
+// boundary), which includes `method`/`singleton_method`. A method's PendingBody.body
+// IS a `method`/`singleton_method` node, so reusing RUBY_SKIP_TYPES would root-skip
+// the whole body (the engine's root guard + the cognitive walk both bail on a
+// skip-typed root) → every method reads trivial. So the cognitive + root boundary
+// lists ONLY the type/namespace nodes; blocks (`block`/`do_block`) DESCEND (roll
+// into the enclosing method — they are SLANG NativeTrees, transparent, no nesting),
+// and a NESTED `def` is descended pass-through cognitively (its control flow rolls
+// into the encloser WITHOUT a nesting bump — a documented minor cognitive
+// under-count vs the oracle's per-funcTree roll-in; nested defs are rare in Ruby,
+// the Java-anon-class / PHP-nested-fn precedent).
+const RUBY_COMPLEXITY_SKIP_TYPES: ReadonlySet<string> = new Set([
+  'class', 'module', 'singleton_class',
+]);
+
+// CYCLOMATIC-only child skip: additionally exclude nested `def`/`def self.x` so a
+// nested method's decisions don't count toward the encloser (the per-symbol model —
+// SLANG's per-funcTree oracle rolls them in, a rare documented divergence). The
+// root method body is checked against RUBY_COMPLEXITY_SKIP_TYPES (which lacks
+// `method`), so it survives; only nested-method CHILDREN are skipped here.
+const RUBY_CYCLOMATIC_SKIP_TYPES: ReadonlySet<string> = new Set([
+  ...RUBY_COMPLEXITY_SKIP_TYPES,
+  'method', 'singleton_method',
+]);
+
+// Never-matching paren sentinel: SLANG's `flattenOperators` does NOT skip
+// parentheses (the `// TODO parentheses` in CognitiveComplexity.java), so a
+// parenthesized boolean is its OWN run — `(a && b) && c` = cog 2, oracle-verified.
+// The sentinel makes the engine's skipParens a no-op (the gocognit/sonar-python
+// convention).
+const RUBY_NO_PAREN = '__ruby_no_paren__';
+
+// Statement-list container PARENT node types where a `?:`/`if`-else sits in STATEMENT
+// position (→ if-else, +2). Maps to a SLANG BlockTree: an if/loop/case body (`then`/
+// `else`/`ensure`/`do`), a `begin` body, the top level, AND a string `interpolation`
+// (`"#{a ? x : y}"` is +2 — measured; the interpolation embeds a statement list). NOT
+// included (→ EXPRESSION position, +1 ternary): `block_body` (a brace `{ }` block, a
+// SLANG NativeTree) and a `body_statement` whose grandparent is a `do_block` (a
+// `do…end` block, also a NativeTree) — both handled in rubyInStatementPosition.
+const RUBY_STATEMENT_PARENTS: ReadonlySet<string> = new Set([
+  'then', 'else', 'ensure', 'do', 'begin', 'program', 'interpolation',
+]);
+
+// True when an if-family node is in STATEMENT position (value discarded / a statement
+// in a SLANG BlockTree), false when in EXPRESSION position (assignment RHS, arg,
+// operator operand, OR the SOLE statement of a do/brace block — a NativeTree whose
+// value is the block's result). The block-body distinction is the subtle bit, measured
+// against the oracle: a method/class/module/begin body is ALWAYS a BlockTree (a
+// single-statement method body is still +2), but a BLOCK body (brace `block_body` or a
+// `do_block`'s `body_statement`) is a NativeTree → EXPRESSION only when it holds ONE
+// statement (the if-else is the block's return value); a MULTI-statement block body is
+// a BlockTree → STATEMENT. (A ternary nested in an arg/expression inside a multi-stmt
+// block is still expression — its immediate parent is the arg, not the block body.)
+function rubyInStatementPosition(node: Node): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  const t = parent.type;
+  if (t === 'block_body') return parent.namedChildCount > 1; // brace block: sole stmt → expr, multi → stmt
+  if (t === 'body_statement') {
+    return parent.parent?.type === 'do_block' ? parent.namedChildCount > 1 : true; // do_block sole → expr
+  }
+  return RUBY_STATEMENT_PARENTS.has(t);
+}
+
+// SLANG BlockTree node types: a STATEMENT-LIST that, when it holds >1 statement, is a
+// BlockTree (a single statement is unwrapped to the bare expression). A string
+// `interpolation` (`#{…}`) is ALWAYS a BlockTree (it embeds a statement list).
+const RUBY_BLOCK_LIST_NODES: ReadonlySet<string> = new Set([
+  'then', 'else', 'ensure', 'do', 'block_body', 'body_statement', 'begin',
+]);
+
+// True if the subtree under `node` contains a SLANG BlockTree — an `interpolation`, or
+// a multi-statement statement-list. This is `isTernaryOperator`'s final condition
+// (`tree.descendants().noneMatch(BlockTree)`): an if-with-else whose branches embed a
+// BlockTree (e.g. a string interpolation `["#{x}"] + super`, or a multi-statement
+// then/else) is NOT a ternary even in expression position. The DFS INTENTIONALLY
+// descends EVERYTHING — including a nested `def`/`class` in a branch — because SLANG's
+// `tree.descendants()` does too; a nested scope's multi-statement body IS a BlockTree
+// that disqualifies the ternary (oracle-confirmed: `v = if a; def g; x; y; end; else;
+// z; end` is cog 2, not 1). This is DELIBERATELY a different boundary from the
+// per-symbol cognitive walk (which skips nested scopes) — do NOT add a skip here, it
+// would diverge from the pin. It early-returns on the first BlockTree (a nested scope
+// is almost always multi-statement → detected immediately), so the bounded DFS stays
+// cheap on the small if-else subtree.
+function rubyHasBlockTree(node: Node): boolean {
+  const stack: Node[] = [...node.namedChildren];
+  while (stack.length > 0) {
+    const n = stack.pop()!;
+    if (n.type === 'interpolation') return true;
+    if (RUBY_BLOCK_LIST_NODES.has(n.type) && n.namedChildCount > 1) return true;
+    for (const c of n.namedChildren) stack.push(c);
+  }
+  return false;
+}
+
+// True when an if-family node is an EXPRESSION-TERNARY (sonar-ruby `isTernaryOperator`):
+// an if-with-else used as an EXPRESSION (not statement position) with NO nested BlockTree
+// (single-statement branches, no string interpolation) → its `else` +1 is SUPPRESSED
+// (cog 1, not 2). Measured against the SLANG oracle:
+//   v = cond ? a : b        → ternary (+1)       def f; cond ? a : b; end → NOT (+2)
+//   v = if a; x; else; y end → ternary (+1)      if a; x; else; y; end    → NOT (+2)
+//   arr.each { if a;x else y } → ternary (+1)    "#{cond ? a : b}"        → NOT (+2, interpolation)
+//   v = if a; x; elsif…      → NOT (elsif-chain, +3)   v = if a; p; q; else… → NOT (multi-stmt, +2)
+//   @x ||= if a; ["#{p}"]; else; q; end → NOT (+2, interpolation in a branch)
+// A `?:` (`conditional`) and an `if`/`unless` with a PLAIN `else` (no elsif) both qualify
+// when expression-position AND BlockTree-free; `elsif` is never a standalone ternary.
+function rubyIsExpressionTernary(node: Node): boolean {
+  if (rubyInStatementPosition(node)) return false; // statement position → if-else, charge else
+  if (node.type === 'conditional') return !rubyHasBlockTree(node); // `?:`: ternary iff no nested BlockTree
+  if (node.type !== 'if' && node.type !== 'unless') return false; // elsif / others: never standalone
+  const alt = node.childForFieldName('alternative');
+  if (!alt || alt.type !== 'else') return false; // no else, or an elsif-chain
+  return !rubyHasBlockTree(node);
+}
+
+// COGNITIVE (SLANG `CognitiveComplexity`). SLANG's nesting is ANCESTOR-based — every
+// IfTree(non-elseif)/LoopTree/MatchTree/CatchTree ancestor adds a level (reset at a
+// class), so a construct's CONDITION nests too (unlike sonar-java, where the engine
+// visits if-conditions at base). Consequences of that, all oracle-measured:
+//  - `unless`/`elsif` are if-like (the collectionIfType SET — the engine widening
+//    this slice): `unless` surcharges + handles its `else`; `elsif` is the chain
+//    link recursed by handleAlternative. (`if a; x; elsif b; y; else z` = cog 3.)
+//  - Modifier `if`/`unless` go in loopTypes (surcharge + bump ALL children — the engine's
+//    loop branch nests every child at nesting+1 because Ruby leaves `loopBodyField` unset,
+//    unlike Python which nests only the body), NOT collectionIfType: SLANG's ancestor-nesting
+//    bumps a modifier's CONDITION too (`x if (a?b:c)` = cog 3), and their then-branch lives
+//    under `body`, not `consequence`. Modifier loops bump-all likewise. So loopTypes carries
+//    the 3 real loops + the 4 modifier forms.
+//  - `conditional` (ternary) is +1 (ternaryType) — the dominant EXPRESSION-ternary
+//    form (`x = a?1:2` = cog 1); a rare BARE-statement ternary is +2 in SLANG (it
+//    becomes an if-else) → a documented near-zero under-count.
+//  - whole `case` is +1 (switchTypes/MatchTree); `case/in` is uncounted (not MatchTree).
+//  - block `rescue` is +1+nesting (catchType/CatchTree); modifier `x rescue y` is
+//    UNCOUNTED cognitively (not a CatchTree).
+//  - Ruby BLOCKS (`{}`/`do..end`) are SLANG NativeTrees → TRANSPARENT (no nesting):
+//    a 3-deep block keeps an inner `if` at base nesting → nestOnlyTypes is EMPTY.
+//  - booleans: source-order, +1 per operator-TEXT change, NO paren skip (above).
+//  - no recursion (SLANG doesn't count it), no labeled jumps (Ruby has none).
+const RUBY_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if',
+  collectionIfType: new Set(['unless', 'elsif']),
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  loopTypes: new Set([
+    'while', 'until', 'for',
+    'while_modifier', 'until_modifier', 'if_modifier', 'unless_modifier',
+  ]),
+  switchTypes: new Set(['case']),
+  ternaryType: 'conditional',
+  // sonar-ruby's isTernaryOperator: a simple if-with-else used as an EXPRESSION
+  // suppresses its `else` +1 (applies to `?:` AND `if`/`unless`). See the helper.
+  isExpressionTernary: rubyIsExpressionTernary,
+  catchType: 'rescue',
+  // Only an explicit `begin … rescue` (parent `begin`) is a SLANG CatchTree (+1); a
+  // METHOD-level rescue (`def f; …; rescue E; …`, parent `body_statement`) is
+  // uncounted — measured on the corpus (rescue parents: begin / body_statement only).
+  catchPredicate: (node) => node.parent?.type === 'begin',
+  nestOnlyTypes: new Set(),
+  labeledJumpTypes: new Set(),
+  hasLabel: () => false,
+  booleanOperatorKind: rubyBooleanKind,
+  parenthesizedType: RUBY_NO_PAREN,
+};
 
 // ── symbol extraction ─────────────────────────────────────────────────────────
 
@@ -228,7 +434,18 @@ export function extractRuby(tree: Tree, content: string, fileInfo: FileInfo): Ex
     },
   );
 
-  // Complexity (cyclomatic + cognitive) is a follow-up — see the note above.
+  // Cyclomatic + cognitive complexity (sonar-ruby SLANG-pinned), computed while the
+  // tree is alive (the php/csharp call-site pattern). The complexity boundary is
+  // SEPARATE from the resolveCalls RUBY_SKIP_TYPES (which includes the method node
+  // types a method's own PendingBody.body IS — see RUBY_COMPLEXITY_SKIP_TYPES).
+  // Cyclomatic additionally excludes nested defs (the Shallow per-function model).
+  computeComplexity(ctx.bodies, ctx.symbols, {
+    decisionNodeTypes: RUBY_DECISION_NODE_TYPES,
+    extraDecisionPredicate: rubyCyclomaticExtra,
+    skipTypes: RUBY_COMPLEXITY_SKIP_TYPES,
+    cyclomaticSkipTypes: RUBY_CYCLOMATIC_SKIP_TYPES,
+    cognitive: RUBY_COGNITIVE_OPTIONS,
+  });
   return { symbols: ctx.symbols, references, imports: ctx.imports };
 }
 

@@ -676,6 +676,34 @@ describe('CodeIndex persistence', () => {
     expect(existsSync(cachePath)).toBe(false);
   });
 
+  it('load deletes and returns false on a v19 cache (the v20 Ruby-complexity bump)', async () => {
+    // A v19 cache predates Ruby's cyclomatic/cognitive complexity — it must be
+    // force-invalidated so the next index re-extracts and populates the fields on
+    // `.rb` symbols. The payload is otherwise WELL-FORMED for v20 (every required
+    // array + gitMeta present), so the version mismatch is the SOLE failing
+    // condition (proving the bump, not a missing field, is what rejects it).
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        version: 19,
+        createdAt: 0,
+        projectRoot: tmpRoot,
+        symbols: [],
+        files: [],
+        imports: [],
+        callees: [],
+        callers: [],
+        references: [],
+        cochanges: [],
+        hotspots: [],
+        gitMeta: null,
+      }),
+    );
+    const idx = new CodeIndex(tmpRoot);
+    expect(await idx.load(cachePath)).toBe(false);
+    expect(existsSync(cachePath)).toBe(false);
+  });
+
   it('load deletes and returns false on a v8 cache (the v9 bump)', async () => {
     // A v8 cache predates Symbol.complexity — it must be force-invalidated so
     // the next index re-extracts and populates the field. The payload is

@@ -23,6 +23,26 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v20: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for RUBY
+// (`.rb`/`.rake`/`.gemspec`) — the LAST gap (the Ruby extractor shipped
+// extractor-only), completing the per-language complexity campaign across all 11
+// extractors. BOTH metrics pinned EXACT to sonar-ruby (SonarSource's SLANG-based
+// analyzer), run as a per-function oracle: the sonar-ruby-plugin's `RubyConverter`
+// (JRuby + whitequark/parser) builds the SLANG tree, then the shared
+// `org.sonarsource.slang` `CyclomaticComplexityVisitor` / `CognitiveComplexity`
+// score each function — MEASURED on a per-construct battery + the
+// sinatra/rack/liquid/devise corpus (cyclomatic 99.86% exact, cognitive 99.73%,
+// 0-unexplained). CYCLOMATIC: +1 per if/elsif/unless/ternary/modifier-if-unless,
+// each loop (while/until/for + modifier), each `when` arm (NOT the `case` container
+// or `else`), and `&&`/`||`/`and`/`or`; NOT counted (matching the pin): rescue,
+// `case/in`, `&.`, recursion. COGNITIVE (SLANG): structural+1 + nesting surcharge per
+// if/loop/whole-case/block-`rescue`; an if-with-else used as an EXPRESSION with no
+// nested BlockTree is a ternary (`else` suppressed); booleans are TEXT-based
+// source-order runs (no paren skip); blocks are transparent (no nesting). Reuses the
+// collectionIfType→set widening + two new optional engine knobs (`isExpressionTernary`,
+// `catchPredicate`), all inert for the other 10 languages. Adding the fields to Ruby
+// symbols is an extraction-logic change `isUnchanged` (mtime/size/language) can't
+// detect, so the bump force-invalidates warm caches.
 // v19: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for PHP
 // (`.php`) — the 11th and LAST extractor, BOTH metrics in one slice (the
 // Java/Rust/Swift/Kotlin/Dart/C# pattern). BOTH are pinned to SonarPHP
@@ -167,7 +187,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 19;
+export const SCHEMA_VERSION = 20;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both

@@ -73,6 +73,12 @@ function csharpCog(src: string, name = 'm'): { cyc: number | undefined; cog: num
 // which counts match in neither metric).
 const phpCog = (src: string, name = 'f') => bothCx(`<?php\n${src}`, name, 'php', 'src/test.php');
 
+// Ruby carries BOTH metrics, pinned EXACT to sonar-ruby (SonarSource's SLANG-based
+// analyzer: the shared org.sonarsource.slang CyclomaticComplexityVisitor /
+// CognitiveComplexity, run per-function via the sonar-ruby-plugin RubyConverter as the
+// oracle). `src` is one or more top-level declarations (a method `f` unless noted).
+const rubyCog = (src: string, name = 'f') => bothCx(src, name, 'ruby', 'src/test.rb');
+
 // Java carries BOTH metrics (Phase 3). `src` is one or more member declarations;
 // they're wrapped in `class T { … }`. Returns { cyc, cog } for the named member
 // (default `m`), each undefined when trivial (cyc 1 / cog 0).
@@ -1670,5 +1676,136 @@ describe('cyclomatic + cognitive complexity — PHP (SonarPHP 3.38-pinned)', () 
     // pass-through (cog 1) because the body IS a function_definition (can't be nestOnly
     // without nest-bumping the root). Cyclomatic still excludes it. Vanishingly rare in PHP.
     expect(phpCog('function f($a){ function inner(){ if($a){} } }')).toEqual({ cyc: undefined, cog: 1 });
+  });
+});
+
+describe('Ruby complexity (sonar-ruby SLANG-pinned, both metrics)', () => {
+  // Every value below is MEASURED against the sonar-ruby SLANG oracle (the
+  // CyclomaticComplexityVisitor + CognitiveComplexity run via the RubyConverter).
+
+  it('omits the trivial value (cyc 1 / cog 0)', () => {
+    expect(rubyCog('def f\n  1 + 1\nend')).toEqual({ cyc: undefined, cog: undefined });
+  });
+
+  // --- if / unless / elsif chain ---
+  it('if / if-else / if-elsif-else', () => {
+    expect(rubyCog('def f\n  if a\n    x\n  end\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  if a\n    x\n  else\n    y\n  end\nend')).toEqual({ cyc: 2, cog: 2 });
+    expect(rubyCog('def f\n  if a\n    x\n  elsif b\n    y\n  else\n    z\n  end\nend')).toEqual({ cyc: 3, cog: 3 });
+  });
+  it('unless (block and modifier) + modifier-if', () => {
+    expect(rubyCog('def f\n  unless a\n    x\n  end\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  x if a\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  x unless a\nend')).toEqual({ cyc: 2, cog: 1 });
+  });
+  it('a modifier-if BODY with a boolean is counted (the body is visited)', () => {
+    expect(rubyCog('def f\n  a && b if c\nend')).toEqual({ cyc: 3, cog: 2 });
+  });
+
+  // --- loops ---
+  it('while / until / for + modifier loops', () => {
+    expect(rubyCog('def f\n  while a\n    x\n  end\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  until a\n    x\n  end\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  for i in a\n    x\n  end\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  x while a\nend')).toEqual({ cyc: 2, cog: 1 });
+  });
+
+  // --- case/when (counted) vs case/in (NOT counted, matching the pin) ---
+  it('case/when counts per-arm cyclomatically, whole-case +1 cognitively', () => {
+    expect(rubyCog('def f\n  case a\n  when 1 then x\n  when 2 then y\n  end\nend')).toEqual({ cyc: 3, cog: 1 });
+    expect(rubyCog('def f\n  case a\n  when 1 then x\n  else y\n  end\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  case a\n  when 1, 2, 3 then x\n  end\nend')).toEqual({ cyc: 2, cog: 1 });
+  });
+  it('case/in (Ruby-3 pattern matching) is NOT counted (matches sonar-ruby)', () => {
+    expect(rubyCog('def f\n  case a\n  in [x] then p\n  in {y:} then q\n  end\nend')).toEqual({ cyc: undefined, cog: undefined });
+  });
+
+  // --- ternary: expression (+1) vs statement (+2), the isTernaryOperator distinction ---
+  it('ternary is +1 as an expression but +2 as a statement', () => {
+    expect(rubyCog('def f\n  v = a ? 1 : 2\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  foo(a ? 1 : 2)\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  a ? 1 : 2\nend')).toEqual({ cyc: 2, cog: 2 });
+    expect(rubyCog('def f\n  "#{a ? 1 : 2}"\nend')).toEqual({ cyc: 2, cog: 2 }); // interpolation = statement
+  });
+  it('a simple if-else used as an EXPRESSION is a ternary (else suppressed)', () => {
+    expect(rubyCog('def f\n  v = if a\n    x\n  else\n    y\n  end\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  arr.each { |k| if a then x else y end }\nend')).toEqual({ cyc: 2, cog: 1 });
+    // multi-statement branch → NOT a ternary (charge else); elsif-chain → NOT a ternary
+    expect(rubyCog('def f\n  v = if a\n    p\n    q\n  else\n    y\n  end\nend')).toEqual({ cyc: 2, cog: 2 });
+    expect(rubyCog('def f\n  v = if a\n    x\n  elsif b\n    y\n  else\n    z\n  end\nend')).toEqual({ cyc: 3, cog: 3 });
+    // an interpolation inside a branch makes it a BlockTree → NOT a ternary
+    expect(rubyCog('def f\n  v = if a\n    "#{p}"\n  else\n    q\n  end\nend')).toEqual({ cyc: 2, cog: 2 });
+  });
+
+  // --- booleans: &&/||/and/or, TEXT-based runs, no paren skip ---
+  it('boolean runs are text-based source-order, parens NOT skipped', () => {
+    expect(rubyCog('def f\n  a && b\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  a and b\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  a && b && c\nend')).toEqual({ cyc: 3, cog: 1 });
+    expect(rubyCog('def f\n  a && b || c\nend')).toEqual({ cyc: 3, cog: 2 });
+    expect(rubyCog('def f\n  a && b && (c || d) && (e || f)\nend')).toEqual({ cyc: 6, cog: 3 }); // no paren skip
+    expect(rubyCog('def f\n  (a && b) && c\nend')).toEqual({ cyc: 3, cog: 2 });
+    expect(rubyCog('def f\n  a && b and c\nend')).toEqual({ cyc: 3, cog: 2 }); // `&&` vs `and` = 2 runs (text)
+  });
+
+  // --- rescue: block IS cognitive (not cyclomatic); method-level/modifier NOT counted ---
+  it('block begin/rescue: cognitive +1, NOT cyclomatic; method-level rescue uncounted', () => {
+    expect(rubyCog('def f\n  begin\n    x\n  rescue E\n    y\n  end\nend')).toEqual({ cyc: undefined, cog: 1 });
+    expect(rubyCog('def f\n  x\nrescue E\n  y\nend')).toEqual({ cyc: undefined, cog: undefined }); // method-level
+    expect(rubyCog('def f\n  v = risky rescue 0\nend')).toEqual({ cyc: undefined, cog: undefined }); // modifier
+    expect(rubyCog('def f\n  begin\n    x\n  rescue A\n    y\n  rescue B\n    z\n  end\nend')).toEqual({ cyc: undefined, cog: 2 });
+  });
+
+  // --- safe-nav, recursion: NOT counted ---
+  it('safe-navigation (&.) and direct recursion are not counted', () => {
+    expect(rubyCog('def f\n  a&.b&.c\nend')).toEqual({ cyc: undefined, cog: undefined });
+    expect(rubyCog('def f\n  f()\nend')).toEqual({ cyc: undefined, cog: undefined });
+  });
+
+  // --- blocks are TRANSPARENT (no nesting) ---
+  it('blocks add no nesting; an if inside any depth of block stays at base nesting', () => {
+    expect(rubyCog('def f\n  arr.each { |i| if i\n    x\n  end }\nend')).toEqual({ cyc: 2, cog: 1 });
+    expect(rubyCog('def f\n  x.each { y.each { z.each { if a\n    w\n  end } } }\nend')).toEqual({ cyc: 2, cog: 1 });
+  });
+  it('nested if/loop DO nest, while the intervening block does not', () => {
+    expect(rubyCog('def f\n  if a\n    if b\n      x\n    end\n  end\nend')).toEqual({ cyc: 3, cog: 3 });
+    expect(rubyCog('def f\n  if a\n    while b\n      x.each { if c\n        w\n      end }\n    end\n  end\nend')).toEqual({ cyc: 4, cog: 6 });
+    // a loop nested inside a block inside an if: the block is transparent but the
+    // if + the loop nest (loop at nesting 1 → +2), so cog = if(1) + loop(2) = 3.
+    expect(rubyCog('def f\n  if a\n    x.each { while b\n      y\n    end }\n  end\nend')).toEqual({ cyc: 3, cog: 3 });
+  });
+
+  // --- review-found edge cases (all oracle-confirmed) ---
+  it('a BlockTree (interpolation/multi-stmt) anywhere in a branch — even a nested def — defeats the ternary', () => {
+    // The nested `def g` has a multi-statement body (a BlockTree), so the expression
+    // if-else is NOT a ternary → the `else` +1 is charged → cog 2. (cyc is 2 here, the
+    // documented nested-def-in-block per-symbol under-count vs the oracle's 3.)
+    expect(rubyCog('def f\n  v = if a\n    def g\n      x\n      y\n    end\n  else\n    z\n  end\nend')).toEqual({ cyc: 2, cog: 2 });
+    // a multi-statement BLOCK body in a branch is likewise a BlockTree → not a ternary
+    expect(rubyCog('def f\n  v = if a\n    helper { p; q }\n  else\n    z\n  end\nend')).toEqual({ cyc: 2, cog: 2 });
+  });
+  it('boolean runs mix `&&`/`||`/`and`/`or` by TEXT (kind-change starts a new run)', () => {
+    expect(rubyCog('def f\n  a and b || c and d\nend')).toEqual({ cyc: 4, cog: 3 });
+  });
+  it('catchPredicate: a method-level rescue is uncounted but a begin/rescue NESTED in it counts', () => {
+    expect(rubyCog('def f\n  x\nrescue E\n  begin\n    y\n  rescue B\n    z\n  end\nend')).toEqual({ cyc: undefined, cog: 1 });
+  });
+
+  it('a deeper method renders both metrics together', () => {
+    const src = `def f(a, b)
+  if a && b or c
+    x = a ? 1 : 2
+  elsif b
+    y unless a
+  else
+    z
+  end
+  while a; w; end
+  case a
+  when 1, 2 then p
+  else q
+  end
+end`;
+    expect(rubyCog(src)).toEqual({ cyc: 9, cog: 11 });
   });
 });
