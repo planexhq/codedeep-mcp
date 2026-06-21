@@ -17,6 +17,7 @@ describe('extractSymbols dispatcher', () => {
     ['python', 'x = 1'],
     ['csharp', 'class X { }'],
     ['php', '<?php class X { }'],
+    ['ruby', 'class X\nend\n'],
   ])('routes %s to its extractor without warning', (language, src) => {
     const tree = parseFile(src, language)!;
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -38,10 +39,10 @@ describe('extractSymbols dispatcher', () => {
     const tree = parseFile('const x = 1;', 'typescript')!;
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const result = extractSymbols(tree, 'const x = 1;', makeFileInfo('ruby'));
+      const result = extractSymbols(tree, 'const x = 1;', makeFileInfo('cobol'));
       expect(result).toEqual({ symbols: [], references: [], imports: [] });
       const warned = stderr.mock.calls.some((c) =>
-        String(c[0]).includes('unsupported language "ruby"'),
+        String(c[0]).includes('unsupported language "cobol"'),
       );
       expect(warned).toBe(true);
     } finally {

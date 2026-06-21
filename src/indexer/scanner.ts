@@ -24,6 +24,9 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   '.dart': 'dart',
   '.cs': 'csharp',
   '.php': 'php',
+  '.rb': 'ruby',
+  '.rake': 'ruby',
+  '.gemspec': 'ruby',
 };
 
 const BINARY_EXT = new Set([

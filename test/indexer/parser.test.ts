@@ -61,11 +61,11 @@ describe('parser', () => {
   it('returns null for an unsupported language and logs a warning', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const tree = parseFile('puts 1', 'ruby');
+      const tree = parseFile('IDENTIFICATION DIVISION.', 'cobol');
       expect(tree).toBeNull();
 
       const warned = stderr.mock.calls.some((c) =>
-        String(c[0]).includes('unsupported language "ruby"'),
+        String(c[0]).includes('unsupported language "cobol"'),
       );
       expect(warned).toBe(true);
     } finally {

@@ -26,6 +26,7 @@ const LANG_TO_WASM: Record<string, string> = {
   // @repomix ships this as tree-sitter-c_sharp.wasm (underscore), not -csharp.
   csharp: 'tree-sitter-c_sharp.wasm',
   php: 'tree-sitter-php.wasm',
+  ruby: 'tree-sitter-ruby.wasm',
 };
 
 const parsers = new Map<string, Parser>();

@@ -39,7 +39,7 @@ describe('scanner helpers', () => {
     });
 
     it('returns null for unknown or absent extensions', () => {
-      expect(detectLanguage('a.rb')).toBeNull();
+      expect(detectLanguage('a.xyz')).toBeNull();
       expect(detectLanguage('Makefile')).toBeNull();
       expect(detectLanguage('LICENSE')).toBeNull();
     });
@@ -191,14 +191,14 @@ describe('scanProject', () => {
       'a.ts': '',
       'Makefile': '',
       'README': '',
-      'lib.rb': '',
+      'lib.xyz': '',
     });
     const { files } = await scanProject(makeConfig(root));
     const byPath = new Map(files.map((f) => [f.path, f.language]));
     expect(byPath.get('a.ts')).toBe('typescript');
     expect(byPath.get('Makefile')).toBe('unknown');
     expect(byPath.get('README')).toBe('unknown');
-    expect(byPath.get('lib.rb')).toBe('unknown');
+    expect(byPath.get('lib.xyz')).toBe('unknown');
     expect(files).toHaveLength(4);
   });
 

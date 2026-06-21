@@ -10,6 +10,7 @@ import { extractGo } from './languages/go.js';
 import { extractJava } from './languages/java.js';
 import { extractKotlin } from './languages/kotlin.js';
 import { extractPHP } from './languages/php.js';
+import { extractRuby } from './languages/ruby.js';
 import { extractRust } from './languages/rust.js';
 import { extractSwift } from './languages/swift.js';
 import { extractPython } from './languages/python.js';
@@ -198,6 +199,8 @@ export function extractSymbols(
       return extractCSharp(tree, content, fileInfo);
     case 'php':
       return extractPHP(tree, content, fileInfo);
+    case 'ruby':
+      return extractRuby(tree, content, fileInfo);
     default:
       log.warn(`extractSymbols: unsupported language "${fileInfo.language}"`);
       return { symbols: [], references: [], imports: [] };
