@@ -1809,3 +1809,211 @@ end`;
     expect(rubyCog(src)).toEqual({ cyc: 9, cog: 11 });
   });
 });
+
+// ── C-family (cpp / c / objc) ──────────────────────────────────────────────────
+// BOTH metrics. Cyclomatic = McCabe decision-count; cognitive = the published SonarSource
+// Cognitive Complexity whitepaper (S3776). The increment shapes are behaviorally compatible
+// with SonarQube's C-family rules, verified against in-repo tools (rust-code-analysis for
+// cyclomatic; the public whitepaper fixtures for cognitive). The C-family rule is boolean-free cyclomatically (like Swift), counts each
+// `case` AND `default`, and counts each C++ lambda; cognitive == the whitepaper. The C-family rule's
+// raw cyclomatic is baseline-free, so Probe (`1 + decisions`) = McCabe + 1 (a documented
+// constant offset); cognitive has no baseline, so cog values match the whitepaper
+// EXACTLY. The cpp/c/objc grammars share one CFAMILY_* options set (AST-dump-confirmed:
+// objc reuses the C control-flow node names incl. `catch_clause` for `@catch`). All values
+// MEASURED from the real extractor.
+const cppCog = (src: string, name = 'f') => bothCx(src, name, 'cpp', 'src/test.cpp');
+const cCog = (src: string, name = 'f') => bothCx(src, name, 'c', 'src/test.c');
+// ObjC methods live in an `@implementation`; the body is wrapped. Pass the selector as
+// `name` (a `:`-suffixed selector for a method with args, e.g. `go:`).
+const objcCog = (body: string, name: string) =>
+  bothCx(`@implementation T\n${body}\n@end`, name, 'objc', 'src/test.m');
+
+describe('cyclomatic + cognitive complexity — C-family (cpp/c/objc, McCabe + whitepaper-pinned)', () => {
+  it('omits both metrics for a trivial function (cpp / c / objc)', () => {
+    expect(cppCog('void f(){ return; }')).toEqual({ cyc: undefined, cog: undefined });
+    // Also pin the trivial path for c (dispatch) and objc (method-selector keying), so a
+    // regression in symbol lookup surfaces as a clear omission, not a thrown helper.
+    expect(cCog('void f(void){ return; }')).toEqual({ cyc: undefined, cog: undefined });
+    expect(objcCog('- (void)go { return; }', 'go')).toEqual({ cyc: undefined, cog: undefined });
+  });
+
+  // --- cyclomatic: each construct +1 (Probe = McCabe + 1) ---
+  it('counts a single if', () => {
+    expect(cppCog('void f(int n){ if(n){g();} }')).toEqual({ cyc: 2, cog: 1 });
+  });
+  it('counts each loop form (for/while/do)', () => {
+    expect(cppCog('void f(int n){ for(int i=0;i<n;i++){ x(); } }')).toEqual({ cyc: 2, cog: 1 });
+    expect(cppCog('void f(int n){ while(n){ n--; } }')).toEqual({ cyc: 2, cog: 1 });
+    expect(cppCog('void f(int n){ do{ n--; }while(n); }')).toEqual({ cyc: 2, cog: 1 });
+  });
+  it('counts a C++ range-for', () => {
+    expect(cppCog('void f(){ for(auto x: v){ use(x); } }')).toEqual({ cyc: 2, cog: 1 });
+  });
+  it('counts a ternary', () => {
+    expect(cppCog('int f(int n){ return n>0?1:2; }')).toEqual({ cyc: 2, cog: 1 });
+  });
+  it('counts each case AND default (the Swift switch_entry precedent), but switch is 1 cognitively', () => {
+    // 2 cases + 1 default = 3 decision points → cyc 4 (C-family-equiv 3); cognitive = whole switch +1.
+    expect(
+      cppCog('void f(int n){ switch(n){ case 1: a(); break; case 2: b(); break; default: c(); } }'),
+    ).toEqual({ cyc: 4, cog: 1 });
+  });
+  it('is boolean-free cyclomatically (a&&b||c adds 0 to cyclomatic)', () => {
+    // The if is the only cyclomatic decision; the booleans add 2 to cognitive (a&&b||c → 2 runs).
+    expect(cppCog('void f(int a,int b,int c){ if(a&&b||c){g();} }')).toEqual({ cyc: 2, cog: 3 });
+  });
+  it('counts each C++ lambda (+1 and descends it)', () => {
+    // lambda +1 cyclomatically (no inner control flow) → cyc 2; cognitive nest-only → cog 0 (omitted).
+    expect(cppCog('void f(){ auto l=[](){ return 1; }; }')).toEqual({ cyc: 2, cog: undefined });
+    // lambda +1 AND its inner if +1 → cyc 3; cognitive: lambda nest-only, inner if at nesting 1 → cog 2.
+    expect(cppCog('void f(){ auto l=[](int z){ if(z){return 1;} return 0; }; }')).toEqual({
+      cyc: 3,
+      cog: 2,
+    });
+  });
+
+  // --- cognitive: SonarSource Cognitive Complexity whitepaper fixtures, asserted EXACTLY ---
+  it('nested if/else x2 = cog 8 (doc t1)', () => {
+    expect(
+      cppCog('void f(int a,int b){ if(a){ if(b){g();}else{h();} }else{ if(b){k();}else{m();} } }'),
+    ).toEqual({ cyc: 4, cog: 8 });
+  });
+  it('(a&&b)||(c>18) inside an if = cog 3 (doc t2)', () => {
+    expect(cppCog('bool f(int a,int b,int c){ if((a&&b)||(c>18)){ return true; } return false; }')).toEqual(
+      { cyc: 2, cog: 3 },
+    );
+  });
+  it('for > if(b&&c) > ?: = cog 7 (doc t4)', () => {
+    expect(cppCog('void f(int n,int b,int c){ for(int i=0;i<n;i++){ if(b&&c){ int y=n>0?1:2; } } }')).toEqual(
+      { cyc: 4, cog: 7 },
+    );
+  });
+  it('if/else-if/else chain: flat +1 per link', () => {
+    expect(cppCog('void f(int n){ if(n>0){a();}else if(n<0){b();}else{c();} }')).toEqual({
+      cyc: 3,
+      cog: 3,
+    });
+  });
+  it('nested loops surcharge by depth', () => {
+    expect(cppCog('void f(int n){ while(n){ for(int i=0;i<n;i++){ x(); } } }')).toEqual({
+      cyc: 3,
+      cog: 3, // while(1) + for(1+1)
+    });
+  });
+  it('catch surcharges (try is free)', () => {
+    expect(cppCog('void f(){ try{ risky(); }catch(const E&e){ if(e.bad()){recover();} } }')).toEqual({
+      cyc: 2, // only the inner if is a cyclomatic decision
+      cog: 3, // catch(1) + inner if(1+1)
+    });
+  });
+  it('goto is a FLAT +1 (diverges from C#) cognitively, 0 cyclomatically', () => {
+    expect(cppCog('void f(int n){ if(n){ goto e; } e: return; }')).toEqual({ cyc: 2, cog: 2 });
+  });
+  it('boolean runs: +1 per maximal same-kind source-order run (paren-transparent)', () => {
+    expect(cppCog('bool f(int a,int b){ return a&&b; }')).toEqual({ cyc: undefined, cog: 1 });
+    expect(cppCog('bool f(int a,int b,int c){ return a&&b||c; }')).toEqual({ cyc: undefined, cog: 2 });
+    // &&,&&,||,&&,|| → 4 runs (parens are transparent to the source-order chain).
+    expect(
+      cppCog('bool f(int a,int b,int c,int d,int e,int g){ return a&&b&&(c||d)&&(e||g); }'),
+    ).toEqual({ cyc: undefined, cog: 4 });
+  });
+  it('counts direct recursion per call-site (free function)', () => {
+    // 2 self-call sites → cog 2; no decision nodes → cyclomatic trivial (omitted).
+    expect(cppCog('int fib(int n){ return fib(n-1)+fib(n-2); }', 'fib')).toEqual({
+      cyc: undefined,
+      cog: 2,
+    });
+  });
+  it('does NOT count method self-recursion (eligibleKinds={function}; the safety property)', () => {
+    // A method m() calling bare m(n-1) is NOT recursion here (methods are excluded so a
+    // method calling a same-named free function can never false-positive). Only the `if`
+    // contributes → cog 1; if methods were eligible this would be cog 2.
+    expect(cppCog('struct S { int m(int n){ if(n){g();} return m(n-1); } };', 'm')).toEqual({
+      cyc: 2,
+      cog: 1,
+    });
+  });
+  it('does NOT surcharge MSVC SEH __except (a documented recall-only gap; __try/__finally free)', () => {
+    // the C-family cognitive model would surcharge SEHExceptStmt cognitively, but tree-sitter
+    // parses `__except` as a distinct `seh_except_clause` (not `catch_clause`), so it is
+    // NOT surcharged — its body's control flow still counts at the try's nesting. Here the
+    // inner `if` is the only increment → cog 1 (a catch would have made it cog 3).
+    expect(cppCog('void f(int n){ __try{ g(); }__except(1){ if(n){h();} } }')).toEqual({
+      cyc: 2, // the inner if; SEH adds 0 cyclomatically too (no SEH node in the cyclomatic set)
+      cog: 1,
+    });
+  });
+  it('over-counts #if/#else guarded control flow (both branches — the documented C# divergence)', () => {
+    // the C-family rule evaluates the preprocessor and counts only the active branch; a tree-sitter
+    // extractor descends both → 3 ifs counted (1 in #if + 2 in #else) → cyc 4.
+    const src = `void f(int n){
+#if FOO
+  if(n){a();}
+#else
+  if(n){b();} if(n){c();}
+#endif
+}`;
+    expect(cppCog(src)).toEqual({ cyc: 4, cog: 3 });
+  });
+
+  // --- C (dispatches to extractCpp; gets complexity for free) ---
+  it('computes complexity for a .c function (incl. recursion)', () => {
+    expect(cCog('int f(int n){ if(n>0){g();}else{h();} return f(n-1); }')).toEqual({
+      cyc: 2,
+      cog: 3, // if(1) + else(1) + recursion(1)
+    });
+  });
+  it('handles K&R-style C parameter declarations without breaking complexity', () => {
+    expect(cCog('int sum(a,b) int a; int b; { if(a){return a;} return b; }', 'sum')).toEqual({
+      cyc: 2,
+      cog: 1,
+    });
+  });
+  it('computes complexity for a file-scope static C function (the exported flag does not gate it)', () => {
+    expect(cCog('static int f(int n){ if(n){return 1;} return 0; }')).toEqual({ cyc: 2, cog: 1 });
+  });
+  it('counts if-condition booleans in C (parenthesized_expression condition, not condition_clause)', () => {
+    // C wraps the if condition in `parenthesized_expression` (cpp uses `condition_clause`);
+    // both descend so the condition booleans count uniformly → cog 3 (if + a&&b||c run of 2).
+    expect(cCog('void f(int a,int b,int c){ if(a&&b||c){g();} }')).toEqual({ cyc: 2, cog: 3 });
+  });
+
+  // --- Objective-C (method bodies; ^{} blocks; @catch; message-send recursion gap) ---
+  it('computes complexity for an @implementation method', () => {
+    expect(objcCog('- (void)go:(int)n { if(n){[self g];} }', 'go:')).toEqual({ cyc: 2, cog: 1 });
+  });
+  it('counts if-condition booleans in ObjC (parenthesized_expression condition)', () => {
+    expect(objcCog('- (void)go:(int)a b:(int)b c:(int)c { if(a&&b||c){[self g];} }', 'go:b:c:')).toEqual({
+      cyc: 2,
+      cog: 3,
+    });
+  });
+  it('treats an ObjC ^{} block as nest-only (like a C++ lambda)', () => {
+    expect(objcCog('- (void)go:(int)n { void(^blk)(void)=^{ if(n){[self inner];} }; }', 'go:')).toEqual({
+      cyc: 2, // the block's inner if is a cyclomatic decision; the block itself is not
+      cog: 2, // block nest-only → inner if at nesting 1
+    });
+  });
+  it('surcharges an ObjC @catch (a catch_clause, same node as cpp)', () => {
+    expect(
+      objcCog('- (void)go:(int)n { @try{ [self risky]; }@catch(NSException *e){ if(n){[self recover];} } }', 'go:'),
+    ).toEqual({ cyc: 2, cog: 3 });
+  });
+  it('does NOT count ObjC [self ...] message-send recursion (a documented gap)', () => {
+    // The [self rec:n-1] message is a message_expression, not a call_expression, so the
+    // recursion reader never matches it — only the `if` contributes.
+    expect(objcCog('- (int)rec:(int)n { if(n){[self g];} return [self rec:n-1]; }', 'rec:')).toEqual({
+      cyc: 2,
+      cog: 1,
+    });
+  });
+  it('combines if/else + block + @catch in one method (cog 7)', () => {
+    const body = `- (int)go:(int)n {
+  if(n>0){[self g];}else{[self h];}
+  void(^blk)(void)=^{ if(n){[self inner];} };
+  @try{ [self risky]; }@catch(NSException *e){ if(n){[self recover];} }
+  return [self go:n-1];
+}`;
+    expect(objcCog(body, 'go:')).toEqual({ cyc: 4, cog: 7 });
+  });
+});

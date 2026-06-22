@@ -1,6 +1,8 @@
 import type { Node, Tree } from 'web-tree-sitter';
 
 import { collectAmbiguousTypeNames } from '../extractor.js';
+import { cFamilyBooleanOperatorKind, computeComplexity } from '../complexity.js';
+import type { CognitiveOptions, ComplexityOptions } from '../complexity.js';
 import { RECEIVER_OPAQUE } from '../../types.js';
 import type { FileInfo, ImportInfo, Symbol, SymbolKind } from '../../types.js';
 import {
@@ -71,6 +73,144 @@ const CPP_SKIP_TYPES: ReadonlySet<string> = new Set([
   'template_declaration',
   ...PREPROC_GROUPS,
 ]);
+
+// ── complexity (cyclomatic + cognitive) ────────────────────────────────────────
+// Cyclomatic = McCabe's decision-count; cognitive = the published SonarSource
+// Cognitive Complexity whitepaper (a free spec, also implemented by gocognit,
+// eslint-plugin-sonarjs, rust-code-analysis). The increment shapes are behaviorally
+// compatible with SonarQube's C-family rules, verified against in-repo tools
+// (rust-code-analysis for cyclomatic; the public whitepaper fixtures for cognitive).
+// ONE shared options set drives cpp + c + objc (the AST dump confirmed
+// tree-sitter-objc reuses the C control-flow node names AND names its catch node
+// `catch_clause`, identical to cpp — so no objc fork and no engine change).
+
+// Cyclomatic decision nodes (McCabe decision-count). C-family is the 2nd boolean-free
+// language after Swift (the C-family cyclomatic convention counts no
+// `&&`/`||` cyclomatically), so there is NO `extraDecisionPredicate`. Each `case` AND `default` adds +1 (a
+// `default:` is a `case_statement` with no `value:` — verified — so one node type
+// covers both; the Swift `switch_entry` precedent, a deliberate divergence from the
+// Java/Go/TS default-EXCLUDED rule). Each C++ `lambda_expression` adds +1 AND is
+// descended (the Go func_literal rule — NOT in the cyclomatic skip set), so its inner
+// decisions also count toward the function. `for_range_loop` (C++ range-for) and
+// `lambda_expression` are inert on c/objc (absent); `case_statement` covers all three.
+// NOT counted: the `switch` container, try/catch, goto, break, continue, and `&&`/`||`.
+// ObjC `^{}` blocks (`block_literal`) are NOT counted cyclomatically (only LambdaExpr is).
+const CFAMILY_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'if_statement',
+  'for_statement',
+  'for_range_loop',
+  'while_statement',
+  'do_statement',
+  'case_statement',
+  'conditional_expression',
+  'lambda_expression',
+]);
+
+// The complexity boundary — a SEPARATE skip set from CPP_SKIP_TYPES (the resolveCalls
+// boundary). TWO deliberate differences:
+//  (1) function_definition / method_definition are ABSENT. The PendingBody.body for a
+//      cpp function IS the `function_definition` node and for an objc method IS the
+//      `method_definition` node (cpp.ts extractFunction / objc.ts extractMethod). The
+//      engine's root guards (computeComplexity's `skipTypes.has(body.type)` continue +
+//      computeCognitive's `visit` early-return) would SKIP the whole function if its own
+//      node type were in this set — zeroing every C-family function. (resolveCalls is
+//      unaffected: walkCalls skip-tests only CHILDREN, never the root body.) Local
+//      *type* bodies are still pruned (the `*_specifier` entries) so a local class's
+//      members don't leak in; a GNU nested function (a `function_definition` inside a
+//      body — a non-standard extension, absent from valid C/C++) then rolls INTO the
+//      enclosing function — a rare documented over-count, matching the C#/Dart per-member
+//      model for local functions.
+//  (2) PREPROC_GROUPS are ABSENT → preproc conditionals are DESCENDED, so control flow
+//      guarded by `#if`/`#else` IS counted (both branches → a syntactic over-count vs
+//      a preprocessor-evaluated active-branch count — the documented C# `#if`
+//      divergence, inherent to a tree-sitter extractor). resolveCalls prunes them (the
+//      spurious `#if FOO(3)`-as-call-expression edge), but for complexity a macro-call
+//      condition is not a decision node.
+// lambda_expression / block_literal stay ABSENT → DESCENDED (their inner flow counts).
+const CFAMILY_COMPLEXITY_SKIP_TYPES: ReadonlySet<string> = new Set([
+  'class_specifier',
+  'struct_specifier',
+  'union_specifier',
+  'enum_specifier',
+  'template_declaration',
+]);
+
+// Cognitive config (the C-family cognitive rule is the SonarSource Cognitive
+// Complexity whitepaper verbatim, so it maps onto
+// the EXISTING engine knobs with no additions). Surcharge+nest: head `if`, `?:`, the
+// whole `switch` once (cases FREE — the opposite of cyclomatic), the loops, and each
+// `catch` (cpp `catch_clause`; objc `@catch` is ALSO a `catch_clause`, so a single string
+// covers both — the predicted set-widening proved unnecessary). FLAT +1: else/else-if
+// (the `else_clause` chain — tree-sitter-c/cpp/objc all wrap the else in an `else_clause`,
+// the TS shape), `goto` (FLAT, DIVERGING from C#'s goto-surcharge), and each `&&`/`||`
+// operator-CHANGE in a source-order chain (paren-TRANSPARENT → unwrap). Nest-only (+0):
+// C++ lambdas + ObjC `^{}` blocks. Recursion: +1 per direct self-call SITE (the
+// whitepaper's per-call-site rule). The `try` container is free (only catches score). NO
+// baseline +1 in the C-family rule; Probe keeps its `1 + decisionPoints` (the documented constant offset).
+const CFAMILY_COGNITIVE_OPTIONS: CognitiveOptions = {
+  ifType: 'if_statement',
+  // cpp wraps the if condition in `condition_clause`, c/objc in `parenthesized_expression`
+  // — both are descended (so the condition's booleans count). The cpp `condition_clause`
+  // ALSO carries a C++17 `if (init; cond)` init_statement, which is descended here too (a
+  // decision in the init is counted) — so NO separate `initField` is needed.
+  conditionField: 'condition',
+  consequenceField: 'consequence',
+  alternativeField: 'alternative',
+  elseClauseType: 'else_clause', // the else/else-if wrapper (TS shape; verified on all three grammars)
+  loopTypes: new Set(['for_statement', 'for_range_loop', 'while_statement', 'do_statement']),
+  switchTypes: new Set(['switch_statement']), // whole-switch +1; case labels are free
+  ternaryType: 'conditional_expression',
+  // `catch_clause` contains its body → the generic catch branch (surcharge + nest). One
+  // string covers cpp AND objc `@catch` (both parse to `catch_clause`). DOCUMENTED GAP:
+  // the cognitive model would surcharge MSVC `__except`, but
+  // tree-sitter parses it as a DISTINCT `seh_except_clause` node, so a
+  // `__except` is NOT surcharged here (its body's control flow still counts, just at the
+  // try's nesting). A recall-only under-count, never wrong/over; `__try`/`__finally` are
+  // free (the spec ignores them too). MSVC SEH is a Windows-only non-standard extension
+  // absent from cross-platform corpora — documented (the macro-opacity precedent) rather
+  // than handled, to avoid widening the shared-engine single-string `catchType` for a
+  // ~0-frequency construct.
+  catchType: 'catch_clause',
+  nestOnlyTypes: new Set(['lambda_expression', 'block_literal']), // +0, deepen nesting
+  // `goto` = FLAT +1 (per the Cognitive Complexity whitepaper; diverges from C#'s surchargeTypes). A goto
+  // always targets a label, so hasLabel is unconditionally true.
+  labeledJumpTypes: new Set(['goto_statement']),
+  hasLabel: () => true,
+  booleanOperatorKind: cFamilyBooleanOperatorKind, // reads the binary_expression operator field
+  parenthesizedType: 'parenthesized_expression', // UNWRAP, source-order (the sonar-java default)
+  // Direct recursion (+1 per self-call SITE — the whitepaper recursion rule). eligibleKinds is {function} ONLY
+  // (the Go precedent): a name-only bare callee match has no arity guard (unlike C#'s
+  // isSelfCall), so admitting 'method' would risk a false positive when a method calls a
+  // same-named free function. ACCEPTED over-counts (name-only, no resolver — the Go
+  // name-shadowing precedent; rare, never a wrong-KIND edge): a free function that calls a
+  // same-named SIBLING OVERLOAD (`void f(int){} void f(double d){ f((int)d); }`, C++ only)
+  // OR a same-named local function-pointer that SHADOWS it (`void f(){ void(*f)()=g; f(); }`,
+  // valid in C too — so it is NOT strictly "exact for C"), where a full overload/type
+  // resolver would resolve away the self-match. Documented UNDER-counts (the bare-`identifier`-callee
+  // reader matches none of these): C++ method self-recursion (a method's bare self-call is
+  // excluded by eligibleKinds:{function}); ObjC `[self f]` (a `message_expression`, not a
+  // `call_expression`); and a QUALIFIED intra-namespace self-call (`N::f()` recursing via
+  // `N::f()` — a `qualified_identifier` callee, not an `identifier`, so it returns null).
+  recursion: {
+    callType: 'call_expression',
+    bareCalleeName: (n) => {
+      const f = n.childForFieldName('function');
+      return f?.type === 'identifier' ? f.text : null;
+    },
+    eligibleKinds: new Set(['function']),
+  },
+};
+
+// The assembled C-family ComplexityOptions — the SINGLE source of truth, used at BOTH
+// call sites (extractCpp here AND extractObjc in objc.ts; `c` reaches extractCpp via the
+// folded `case 'c'` dispatch). The C-family is the only extractor with two call sites, so
+// exporting the assembled object (rather than the three building-block consts above) keeps
+// cpp and objc provably in lock-step — a future tweak lands in one place.
+export const CFAMILY_COMPLEXITY_OPTS: ComplexityOptions = {
+  decisionNodeTypes: CFAMILY_DECISION_NODE_TYPES,
+  skipTypes: CFAMILY_COMPLEXITY_SKIP_TYPES,
+  cognitive: CFAMILY_COGNITIVE_OPTIONS,
+};
 
 // ── call resolution ──────────────────────────────────────────────────────────
 
@@ -269,6 +409,11 @@ export function extractCpp(tree: Tree, content: string, fileInfo: FileInfo): Ext
       ignoredMemberCallees: CPP_IGNORED_MEMBER_CALLEES,
     },
   );
+
+  // Cyclomatic + cognitive complexity (McCabe + whitepaper-pinned), computed while the tree is
+  // alive — the shared csharp.ts/swift.ts call-site pattern. `c` reaches this via the
+  // folded `case 'c'` dispatch (extractor.ts), so it gets complexity for free.
+  computeComplexity(ctx.bodies, ctx.symbols, CFAMILY_COMPLEXITY_OPTS);
 
   return { symbols: ctx.symbols, references, imports: ctx.imports };
 }

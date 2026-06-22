@@ -23,6 +23,17 @@ import type {
   SymbolKind,
 } from '../types.js';
 
+// v22: per-symbol CYCLOMATIC + COGNITIVE complexity now also computed for the
+// C-FAMILY extractors — cpp, c, AND objc (McCabe + whitepaper-pinned). The 3 shipped
+// extractor-only; this POPULATES the existing `Symbol.complexity?` /
+// `Symbol.cognitiveComplexity?` fields (added in v9/v10 for the prior languages)
+// on cpp/c/objc symbols for the first time. `isUnchanged` (mtime/size/language)
+// can't detect the extraction-logic change, so a bump is required. NOTE the bump
+// is GLOBAL: a SCHEMA_VERSION mismatch rejects the ENTIRE persisted index
+// (`isValidPersisted` checks `version === SCHEMA_VERSION` project-wide), so EVERY
+// project fully re-indexes on upgrade — even a Java/TS-only one with no C-family
+// files — the standard one-time cost of any schema bump. Closes the complexity
+// campaign across all 14 languages.
 // v21: file-scope `static` free functions/globals now extract `exported=false`
 // for C AND C++ (internal-linkage privacy; also correct for C++ file-scope free
 // functions). This is the C-extractor (13th language) slice: the new `.c`
@@ -194,7 +205,7 @@ import type {
 // (they must pass the version gate to reach the shape validators). Hardcoding
 // the number in tests silently neutered them on each bump — see the v9→v10
 // regression where version:9 fixtures began short-circuiting at the version check.
-export const SCHEMA_VERSION = 21;
+export const SCHEMA_VERSION = 22;
 
 // Below this length, names like `do`/`is`/`set` flood with false-positive
 // AST name matches across files. find_references and getCallerCount both

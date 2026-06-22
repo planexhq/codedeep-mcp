@@ -16,10 +16,12 @@ import {
   makeCppSymbol,
   memberFqn,
   topFqn,
+  CFAMILY_COMPLEXITY_OPTS,
   CPP_FUNCTION_BODY_SKIP_TYPES,
   CPP_SKIP_TYPES,
   PREPROC_GROUPS,
 } from './cpp.js';
+import { computeComplexity } from '../complexity.js';
 // `#import`/`#include` (preproc_include) is handled INTERNALLY by handleMember's own
 // dispatch — objc.ts never calls extractInclude directly, so it isn't imported here.
 import type { CppCtx, Enclosing, Visibility } from './cpp.js';
@@ -205,6 +207,13 @@ export function extractObjc(tree: Tree, content: string, fileInfo: FileInfo): Ex
       // message send (opaque), not a distinct construction node.
     },
   );
+
+  // Cyclomatic + cognitive complexity — the SAME shared `CFAMILY_COMPLEXITY_OPTS` as cpp/c
+  // (one source of truth in cpp.ts). The AST dump confirmed tree-sitter-objc reuses the C
+  // control-flow node names (incl. `catch_clause` for `@catch`), so the shared options apply
+  // unchanged; objc method bodies are `method_definition` PendingBodies (NOT in the skip set,
+  // so they're descended) and `block_literal` (`^{}`) nests +0 like a C++ lambda.
+  computeComplexity(ctx.bodies, ctx.symbols, CFAMILY_COMPLEXITY_OPTS);
 
   return { symbols: ctx.symbols, references, imports: ctx.imports };
 }
