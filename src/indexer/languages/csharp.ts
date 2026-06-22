@@ -159,7 +159,7 @@ const CSHARP_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
 
 // ── complexity (cyclomatic + cognitive) — pinned EXACT to SonarC# ───────────
 // (SonarAnalyzer.CSharp's CSharpCyclomaticComplexityMetric / CSharpCognitive-
-// ComplexityMetric, run as a per-method oracle; see CLAUDE.md "C# Complexity
+// ComplexityMetric, run as a per-method oracle; see the project docs' "C# Complexity
 // Rules"). Both metrics MEASURED against the real analyzer.
 
 // Cyclomatic decision nodes (each +1). Booleans/`??`, `??=`, and the constant-
@@ -302,7 +302,7 @@ const CSHARP_COGNITIVE_OPTIONS: CognitiveOptions = {
   // (e||f)` = cog 3 (one &&-spine + two ||s), NOT source-order's 4 — the slice's
   // surprise. The `parenthesizedType` SET below skips BOTH a parenthesized EXPRESSION
   // (`(c||d)`) and a parenthesized PATTERN (`(int and >0)`) so a same-kind combinator
-  // grouped by parens stays ONE run (`is (A and B) and C` = cog 2). See CLAUDE.md "C# Complexity Rules".
+  // grouped by parens stays ONE run (`is (A and B) and C` = cog 2). See the project docs' "C# Complexity Rules".
   booleanByTreeParent: true,
   // A SET (not a single string) so the tree-scoped ancestor walk treats BOTH a
   // parenthesized EXPRESSION (`(c||d)`) and a parenthesized PATTERN (`(int and >0)`)

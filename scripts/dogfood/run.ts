@@ -163,7 +163,7 @@ function detectGaps(
   // when extraction support lands instead of reporting stale claims.
   // (Constructors have no probe: they ARE extracted — a constructor is a
   // method_definition named 'constructor'. An earlier unverified claim here
-  // said otherwise; see DOGFOOD_FINDINGS.md G5 correction.)
+  // said otherwise; see the dogfood findings' G5 correction.)
   if (hasTS) {
     const kinds = stats.symbolsByKind;
     const enumsInSource = rgCount(dir, '^\\s*(export\\s+)?(declare\\s+)?(const\\s+)?enum\\s', '*.{ts,tsx}');

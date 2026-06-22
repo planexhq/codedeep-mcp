@@ -165,7 +165,7 @@ const PY_NO_PAREN_SENTINEL = '__py_no_paren__';
 // loopBodyField nests only the loop body (resolving the loop-header overbump). Nested
 // functions/lambdas/classes are EXCLUDED (PY_SKIP_TYPES is the cognitive boundary) — the
 // per-symbol-model under-count, like the Java anon-class / TS-arrow callback divergence;
-// see CLAUDE.md "Cognitive Complexity Rules".
+// see the project docs' "Cognitive Complexity Rules".
 const PY_COGNITIVE_OPTIONS: CognitiveOptions = {
   ifType: 'if_statement',
   conditionField: 'condition',

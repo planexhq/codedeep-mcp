@@ -68,7 +68,7 @@ import type {
 // run as a per-function Maven oracle — every value MEASURED against the real
 // analyzer. CYCLOMATIC: +1 per if/each loop (for/foreach/while/do)/ternary (incl
 // elvis `?:`)/switch `case` (NOT default)/`&&`/`||`/`and`/`or`; NOT one-word
-// `elseif` (3.38 quirk — see CLAUDE.md), `xor`, `??`, `|`, catch/try/finally, or
+// `elseif` (3.38 quirk — see the project docs), `xor`, `??`, `|`, catch/try/finally, or
 // `default`. COGNITIVE (SonarPHP 3.38): structural+1 + nesting surcharge per
 // if/ternary/switch/loop/catch; elseif/else +1 flat (two-word `else if` gets an
 // extra nesting bump); `&&`/`||` SOURCE-ORDER runs (paren-unwrap, NOT `and`/`or`);

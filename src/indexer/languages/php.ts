@@ -306,7 +306,7 @@ function innerVarName(vn: Node): string | null {
 
 // ── complexity (cyclomatic + cognitive) — pinned EXACT to SonarPHP 3.38.0.12239 ──
 // (php-frontend's ComplexityVisitor / CognitiveComplexityVisitor, run as a per-function
-// oracle; see CLAUDE.md "Cyclomatic/Cognitive Complexity Rules"). Both metrics MEASURED
+// oracle; see the project docs' "Cyclomatic/Cognitive Complexity Rules"). Both metrics MEASURED
 // against the real analyzer. TWO master-vs-3.38 divergences are pinned to the RELEASED
 // 3.38 (the runnable version users compare against): one-word `elseif` is NOT counted
 // cyclomatically (3.38's ComplexityVisitor has no visitElseifClause; master added it),

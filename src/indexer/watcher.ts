@@ -8,7 +8,7 @@
 // index (indexChanged heals on next start). The `watchFactory` seam is
 // the swap point for a chokidar backend if that ever bites in practice.
 //
-// Persistence: DESIGN.md suggested a 5-minute save timer; this saves once
+// Persistence: the design notes suggested a 5-minute save timer; this saves once
 // per debounced flush instead — data loss is bounded by one debounce
 // window rather than five minutes, there is no extra keep-alive timer to
 // manage, and saves are event-driven (no disk writes when idle).

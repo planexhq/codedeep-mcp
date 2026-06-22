@@ -227,7 +227,7 @@ describe('integration: end-to-end pipeline + tools', () => {
   });
 
   it('get_context symbol mode renders body, callees, and imports', async () => {
-    // PLAN.md:1064 calls extractToken a "caller" of authenticate, but in the
+    // An earlier note called extractToken a "caller" of authenticate, but in the
     // codebase's reference graph authenticate is the caller and extractToken
     // is the callee. Assertion follows the handler's actual output sections.
     const deps = await setup('small-ts');

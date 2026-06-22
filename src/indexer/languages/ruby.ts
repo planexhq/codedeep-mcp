@@ -173,7 +173,7 @@ function rubyMemberCallInfo(callee: Node): MemberCallInfo | null {
 // `org.sonarsource.slang` `CyclomaticComplexityVisitor` / `CognitiveComplexity`
 // score each function. The increments below were MEASURED against that oracle on a
 // per-construct battery + the sinatra/rack/liquid/devise corpus, never guessed —
-// the campaign standard (oracle the PIN). See PHASE3.md + CLAUDE.md "Cyclomatic /
+// the campaign standard (oracle the PIN). See the project docs' "Cyclomatic /
 // Cognitive Complexity Rules".
 
 // CYCLOMATIC (SLANG `CyclomaticComplexityVisitor`): base +1 per named function,
@@ -187,7 +187,7 @@ function rubyMemberCallInfo(callee: Node): MemberCallInfo | null {
 // rubocop, which DOES count rescue), `case/in` pattern matching (`case_match`/
 // `in_clause` map to an uncounted native tree — a converter limitation, rare in
 // real Ruby), and `&.` safe-navigation. These are deliberate pin-faithful
-// divergences from rubocop/McCabe, documented in CLAUDE.md.
+// divergences from rubocop/McCabe, documented in the project docs.
 const RUBY_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
   'if', 'elsif', 'unless', 'if_modifier', 'unless_modifier', // IfTree (+1 each)
   'while', 'until', 'for', 'while_modifier', 'until_modifier', // LoopTree (+1 each)

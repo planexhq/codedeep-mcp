@@ -210,7 +210,7 @@ export function formatComplexity(sym: Symbol): string | null {
 }
 
 // Tier tag for git-derived data: commit co-occurrence and history, not
-// code structure. Pairs with the DESIGN.md tier vocabulary
+// code structure. Pairs with the design-notes tier vocabulary
 // ([structural] / [approximate] / [behavioral]).
 export const BEHAVIORAL_TAG = '[behavioral]';
 

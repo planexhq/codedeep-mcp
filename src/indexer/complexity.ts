@@ -14,7 +14,7 @@ import type { PendingBody } from './extractor.js';
 // those, not this summary): TS/JS is SonarJS-exact (`&&`/`||`/`??`, and NOTABLY
 // NOT `throw`/`catch`/`&&=`/`||=`/`??=`); Python (radon-style) adds `and`/`or`/
 // `elif`/`except`/comprehension-`if`/`case`; Go (gocyclo-style) adds `&&`/`||`
-// and all three switch forms' cases. See each language file's comment + CLAUDE.md
+// and all three switch forms' cases. See each language file's comment + the project docs'
 // "Cyclomatic Complexity Rules" for the per-analyzer divergences.
 export interface ComplexityOptions {
   // Each node whose type is in this set adds +1 (one per `case` label, etc.).
@@ -110,7 +110,7 @@ export interface ComplexityOptions {
   // +1 for an if-with-else used as an expression) + `catchPredicate` (count `rescue` only in an
   // explicit `begin` block, not a method-level rescue) + `collectionIfType` as a SET
   // (`unless`/`elsif`) + a sentinel `parenthesizedType` (no-unwrap).
-  // See computeCognitive below + CLAUDE.md "Cognitive Complexity Rules".
+  // See computeCognitive below + the project docs' "Cognitive Complexity Rules".
   cognitive?: CognitiveOptions;
 }
 

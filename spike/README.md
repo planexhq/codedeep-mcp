@@ -52,7 +52,7 @@ SPIKE_0A_PASS
 ### Implications for Step 1
 
 - `src/indexer/parser.ts` should use the named-import form
-  (`import { Parser, Language } from "web-tree-sitter"`). PLAN.md Step 4's snippet
+  (`import { Parser, Language } from "web-tree-sitter"`). the plan's Step 4 snippet
   uses the older default-import shape — update it during Step 4 implementation.
 - `@repomix/tree-sitter-wasms` is the grammar source going forward. If it falls
   out of maintenance, fallback options: (a) Microsoft's `@vscode/tree-sitter-wasm`
@@ -119,7 +119,7 @@ SPIKE_0B_PASS
 
 ### Implications for Step 1
 
-- `src/server.ts` can adopt the snippet above directly. PLAN.md Step 1's snippet is
+- `src/server.ts` can adopt the snippet above directly. the plan's Step 1 snippet is
   correct as written (no changes needed to the planned API).
 - `package.json` deps (v1 SDK + Zod v4 + web-tree-sitter v0.26 + @repomix grammars)
   are proven; Step 1 just adds `minisearch`, `picomatch`, and `vitest`.

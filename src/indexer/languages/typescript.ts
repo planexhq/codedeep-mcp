@@ -108,7 +108,7 @@ const TS_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
 // `cjs/S3776/rule.js`, clean-room read + threshold-0 oracle), which differs
 // MATERIALLY from sonar-java (do not assume the Java config transfers): see the
 // boolean + JSX notes below. All node names AST-dumped against the bundled
-// grammars. See complexity.ts + CLAUDE.md "Cognitive Complexity Rules".
+// grammars. See complexity.ts + the project docs' "Cognitive Complexity Rules".
 const TS_COGNITIVE_OPTIONS: CognitiveOptions = {
   ifType: 'if_statement',
   conditionField: 'condition',
