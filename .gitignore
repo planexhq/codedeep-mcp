@@ -4,7 +4,7 @@ dist-spike/
 # Root-anchored: the regenerated grammars/ dir at the repo root is ignored, but
 # vendor/grammars/ (committed source wasms copied from there) must stay tracked.
 /grammars/
-.probe/
+.codedeep/
 *.log
 .DS_Store
 
