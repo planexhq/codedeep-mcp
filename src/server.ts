@@ -13,7 +13,7 @@ import { runGetContext } from "./tools/get-context.js";
 import { runImpact } from "./tools/impact.js";
 import { runOverview } from "./tools/overview.js";
 import { runSearchStructure } from "./tools/search-structure.js";
-import type { ProbeConfig } from "./types.js";
+import type { CodedeepConfig } from "./types.js";
 
 const SHARED_ANNOTATIONS = {
   readOnlyHint: true,
@@ -25,7 +25,7 @@ const SHARED_ANNOTATIONS = {
 export interface ServerDeps {
   index: CodeIndex;
   indexer: Indexer;
-  config: ProbeConfig;
+  config: CodedeepConfig;
   // Required, not optional: git unavailability lives INSIDE the service
   // (null/empty returns), so tools never branch on a missing dep.
   git: GitService;
@@ -33,7 +33,7 @@ export interface ServerDeps {
 
 export function createServer(deps: ServerDeps): McpServer {
   const server = new McpServer({
-    name: "probe-mcp",
+    name: "codedeep-mcp",
     version: "0.1.0",
   });
 

@@ -7,7 +7,7 @@ import {
 } from '../indexer/code-index.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
-import type { ProbeConfig, Symbol } from '../types.js';
+import type { CodedeepConfig, Symbol } from '../types.js';
 
 import {
   BEHAVIORAL_TAG,
@@ -40,7 +40,7 @@ export interface ImpactArgs {
 export interface ImpactDeps {
   index: CodeIndex;
   indexer: Pick<Indexer, 'ready'>;
-  config: ProbeConfig;
+  config: CodedeepConfig;
 }
 
 const DEFAULT_DEPTH = 3;

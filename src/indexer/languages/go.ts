@@ -116,7 +116,7 @@ function compositeLiteralCallee(node: Node): Node | null {
 // documented Go tradeoff. (Only <=3-char names are gated by SHORT_NAME_THRESHOLD.)
 const GO_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set<string>();
 
-// Cyclomatic decision nodes — Probe's convention, since Go is undocumented by
+// Cyclomatic decision nodes — codedeep-mcp's convention, since Go is undocumented by
 // SonarQube. `for_statement` is Go's ONLY loop node (covers 3-clause, range, and
 // infinite forms). All THREE switch arms count — `expression_case`, `type_case`,
 // AND `communication_case` (select) — while the switch CONTAINERS and
@@ -125,10 +125,10 @@ const GO_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set<string>();
 // (GO_SKIP_TYPES omits them), so a closure's branches count toward the enclosing
 // func. VERIFIED divergences from the two reference tools (which disagree with
 // each other): sonar-go DROPS select-`case`s (its Go→SLANG converter maps select
-// CommClauses to nil, so they never count) — Probe counts them as genuine
+// CommClauses to nil, so they never count) — codedeep-mcp counts them as genuine
 // branches, matching gocyclo. gocyclo, conversely, counts `default` and every
-// case incl. select — Probe excludes `default` (the SonarQube/McCabe convention),
-// matching sonar-go on that point. So Probe = "count each non-default case of all
+// case incl. select — codedeep-mcp excludes `default` (the SonarQube/McCabe convention),
+// matching sonar-go on that point. So codedeep-mcp = "count each non-default case of all
 // three switch forms," a deliberate hybrid of the two.
 const GO_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
   'if_statement',
@@ -157,7 +157,7 @@ const GO_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
 // cognitive/cyclomatic divergence, since GO_DECISION_NODE_TYPES counts each
 // case). `for_statement` is Go's only loop; `func_literal` raises nesting (+0),
 // matching the cyclomatic side which also descends closures (gocyclo-aligned).
-// RESIDUAL DIVERGENCE (rare, deferred — the only place Probe ≠ gocognit on Go):
+// RESIDUAL DIVERGENCE (rare, deferred — the only place codedeep-mcp ≠ gocognit on Go):
 // the engine's loop/switch branch bumps nesting for ALL children incl. the
 // HEADER, while gocognit walks a for-clause (init/cond/post) and a switch/select
 // init/tag at BASE nesting (incNesting runs only before the body). `initField`

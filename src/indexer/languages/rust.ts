@@ -48,7 +48,7 @@ const RUST_SKIP_TYPES: ReadonlySet<string> = RUST_FUNCTION_BODY_SKIP_TYPES;
 // `?` try operator (`try_expression`) COUNTS — rust-code-analysis treats each `?`
 // as a decision point (an implicit early-return-on-`Err`), sonar-rust does NOT;
 // pinned to count it (it's the dominant control construct in Result-heavy Rust,
-// and a McCabe-faithful branch — the Go precedent, where Probe pinned gocyclo
+// and a McCabe-faithful branch — the Go precedent, where codedeep-mcp pinned gocyclo
 // over sonar-go for counting select-cases sonar-go dropped). (2) EVERY `match_arm`
 // counts (incl. the wildcard `_`; an or-pattern `A | B =>` is ONE arm), where
 // sonar-rust filters empty-bodied arms. `if let`/`while let` are plain
@@ -74,17 +74,17 @@ const RUST_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
 // Cognitive-complexity config. The CYCLOMATIC side pins to rust-code-analysis;
 // the COGNITIVE side is whitepaper/sonar-rust-aligned and DELIBERATELY does NOT
 // replicate two rust-code-analysis BUGS the empirical oracle surfaced (both make
-// rca's cognitive number indefensible, so Probe stays whitepaper-correct — the
+// rca's cognitive number indefensible, so codedeep-mcp stays whitepaper-correct — the
 // SonarJS-ternary-bug precedent): (1) rca's Rust cognitive visitor OMITS
 // `loop_expression` entirely (it counts `while`/`for` but a bare `loop {}` adds
 // nothing and doesn't nest its body — an obvious omission, inconsistent with rca's
-// own cyclomatic which DOES count `Loop`); Probe counts all three loops. (2) rca's
+// own cyclomatic which DOES count `Loop`); codedeep-mcp counts all three loops. (2) rca's
 // boolean handling carries its run-state across the whole function (reset only on a
 // nesting bump, unlike rca's own Python impl which resets per clause), so it both
 // under-counts (merged else-if conditions: `if (c||d){} else if (e||f){}` scores 3
-// vs Probe's 4) and over-counts (`a && b && c || d || e` scores 3 vs Probe's 2,
+// vs codedeep-mcp's 4) and over-counts (`a && b && c || d || e` scores 3 vs codedeep-mcp's 2,
 // worse with `!`/longer chains);
-// Probe counts per maximal same-kind run per expression = 2 (the whitepaper rule).
+// codedeep-mcp counts per maximal same-kind run per expression = 2 (the whitepaper rule).
 // Where rca is NOT buggy the two agree. Also: `?` is NOT counted
 // cognitively (both analyzers agree — unlike cyclomatic), recursion is NOT counted,
 // a whole `match` is +1 with arms nesting (the cyc/cog divergence), closures raise
@@ -93,8 +93,8 @@ const RUST_DECISION_NODE_TYPES: ReadonlySet<string> = new Set([
 // node inherits the if's bumped nesting via the nesting_map). VERIFIED against
 // rust-code-analysis-cli on ripgrep + serde: every divergence decomposes into the
 // two rca bugs above, `let … else` (rca's grammar parses its `else` as a counted
-// node, Probe's as a plain block — documented gap), macro-internal control flow
-// (Probe's grammar treats macro token-trees as opaque — documented), and nested
+// node, codedeep-mcp's as a plain block — documented gap), macro-internal control flow
+// (codedeep-mcp's grammar treats macro token-trees as opaque — documented), and nested
 // fn/impl bodies (the per-symbol model, like Java anon-classes).
 const RUST_COGNITIVE_OPTIONS: CognitiveOptions = {
   ifType: 'if_expression',
@@ -154,7 +154,7 @@ const RUST_COGNITIVE_OPTIONS: CognitiveOptions = {
 // KNOWN RECALL GAP (safe under-count, grammar-driven, like macro-opacity): the
 // `&&`/`||` that join an `if let`/`while let` LET-CHAIN (`if let Some(x) = o && x > 0`)
 // are ANONYMOUS tokens inside the `let_chain` node, NOT `binary_expression` nodes, so
-// neither this predicate nor the DFS (which walks named children) sees them — Probe
+// neither this predicate nor the DFS (which walks named children) sees them — codedeep-mcp
 // under-counts such a chain by its `&&`/`||` count where rust-code-analysis (whose
 // grammar exposes them) counts each. The `if`/`while` itself is still counted, and
 // the cognitive side agrees (rca's cognitive boolean reader also misses let-chain

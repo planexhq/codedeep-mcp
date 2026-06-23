@@ -594,7 +594,7 @@ describe('scanProject', () => {
       'cache/index.json': '{"junk":true}\n',
       'cache/index.json.tmp.123.456': '{}\n',
     });
-    vi.stubEnv('PROBE_CACHE_DIR', 'cache');
+    vi.stubEnv('CODEDEEP_CACHE_DIR', 'cache');
     try {
       const cfg = makeConfig(root);
       const { files } = await scanProject(cfg);

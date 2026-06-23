@@ -8,7 +8,7 @@
 // non-call match) and reported only as info.
 
 import { SHORT_NAME_THRESHOLD } from '../../../src/indexer/code-index.js';
-import { RG_PROBE_EXCLUDES, tryExec } from './exec.js';
+import { RG_CODEDEEP_EXCLUDES, tryExec } from './exec.js';
 import type { OracleResult } from '../types.js';
 
 const CODE_GLOB = '*.{ts,tsx,js,jsx,mjs,cjs,py,java,go,rs,swift,kt,kts,dart,cs,php}';
@@ -21,7 +21,7 @@ const CODE_GLOB = '*.{ts,tsx,js,jsx,mjs,cjs,py,java,go,rs,swift,kt,kts,dart,cs,p
 // globs mirror probe's DEFAULT_EXCLUDES so the superset stays fair.
 function rgFiles(repoDir: string, name: string): string[] | null {
   const args = ['-l', '-w', '-F', name, '--hidden', '--no-ignore', '-g', CODE_GLOB];
-  for (const ex of RG_PROBE_EXCLUDES) args.push('-g', ex);
+  for (const ex of RG_CODEDEEP_EXCLUDES) args.push('-g', ex);
   args.push('.');
   const { stdout, status } = tryExec('rg', args, repoDir);
   if (status === 1) return []; // no matches

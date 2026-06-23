@@ -19,7 +19,7 @@ import { join, resolve } from 'node:path';
 
 import type { CodeIndex } from '../indexer/code-index.js';
 import { errMsg, log } from '../logger.js';
-import type { ProbeConfig } from '../types.js';
+import type { CodedeepConfig } from '../types.js';
 import { GIT_COMMIT_CAP, analyzeLog, buildLogArgs } from './analyzer.js';
 import { HeadWatcher } from './head-watcher.js';
 import { GitError, GitRunner, type GitRunOptions, type GitRunnerLike } from './runner.js';
@@ -65,7 +65,7 @@ const RECENT_COMMITS_DEFAULT = 5;
 const STARTUP_RETRY_BACKOFF_MS = 60_000;
 
 export class GitService {
-  private readonly config: ProbeConfig;
+  private readonly config: CodedeepConfig;
   private readonly index: CodeIndex;
   private readonly cachePath: string;
   private readonly runner: GitRunnerLike;
@@ -108,7 +108,7 @@ export class GitService {
   private closed = false;
 
   constructor(
-    config: ProbeConfig,
+    config: CodedeepConfig,
     index: CodeIndex,
     cachePath: string,
     runner?: GitRunnerLike,

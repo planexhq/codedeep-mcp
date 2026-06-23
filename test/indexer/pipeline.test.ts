@@ -23,7 +23,7 @@ import { CodeIndex } from '../../src/indexer/code-index.js';
 import * as extractorModule from '../../src/indexer/extractor.js';
 import * as parserModule from '../../src/indexer/parser.js';
 import { Indexer } from '../../src/indexer/pipeline.js';
-import type { ProbeConfig } from '../../src/types.js';
+import type { CodedeepConfig } from '../../src/types.js';
 import {
   makeConfig,
   makeProjectDir,
@@ -33,7 +33,7 @@ import {
 } from '../helpers.js';
 
 let root: string;
-let config: ProbeConfig;
+let config: CodedeepConfig;
 let index: CodeIndex;
 let indexer: Indexer;
 let cachePath: string;
@@ -44,8 +44,8 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  delete process.env.PROBE_CACHE_DIR;
-  delete process.env.PROBE_EXCLUDE;
+  delete process.env.CODEDEEP_CACHE_DIR;
+  delete process.env.CODEDEEP_EXCLUDE;
   root = makeProjectDir('probe-pipeline-');
   config = makeConfig(root);
   index = new CodeIndex(config.projectRoot);

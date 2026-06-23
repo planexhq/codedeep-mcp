@@ -1,5 +1,5 @@
 // The feedback loop: for an arbitrary repo we don't know symbol names a
-// priori, so we mine the index probe-mcp just built for high-value inputs
+// priori, so we mine the index codedeep-mcp just built for high-value inputs
 // and feed them back into the tools. Every selection carries provenance so
 // an empty result on a top-referenced symbol reads as a finding, not noise.
 

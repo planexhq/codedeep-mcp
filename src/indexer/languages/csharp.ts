@@ -262,7 +262,7 @@ function csharpIsSelfCall(callNode: Node, body: Node, sym: Symbol): boolean {
   return paramCount === argCount;
 }
 
-// Complexity body boundary: skip ONLY `attribute_list`. Probe measures each member's
+// Complexity body boundary: skip ONLY `attribute_list`. codedeep-mcp measures each member's
 // BODY (its PendingBody), not the declaration's attribute_lists (which sit OUTSIDE
 // the body for top-level members anyway); SonarC# walks the whole declaration and
 // DOES count control flow in attribute arguments — but that is a degenerate case
@@ -274,7 +274,7 @@ function csharpIsSelfCall(callNode: Node, body: Node, sym: Symbol): boolean {
 // from call attribution.) local_function_statement and lambda_expression are
 // DELIBERATELY ABSENT (descended) so they ROLL INTO the enclosing member with a
 // nesting bump — SonarC#'s per-member model for a NON-static local fn / lambda. A
-// STATIC local function is scored separately by SonarC# but rolled in here (no Probe
+// STATIC local function is scored separately by SonarC# but rolled in here (no codedeep-mcp
 // symbol exists for it) — the documented per-symbol-model divergence.
 const CSHARP_COMPLEXITY_SKIP_TYPES: ReadonlySet<string> = new Set(['attribute_list']);
 

@@ -42,10 +42,10 @@ export function tryExec(
 
 // Globs mirroring probe's DEFAULT_EXCLUDES (src/config.ts) so rg-based
 // source counts compare against the same file set probe indexes.
-export const RG_PROBE_EXCLUDES: readonly string[] = [
+export const RG_CODEDEEP_EXCLUDES: readonly string[] = [
   '!.git',
   '!node_modules',
-  '!.probe',
+  '!.symbols',
   '!__pycache__',
   '!.venv',
   '!dist',
@@ -69,7 +69,7 @@ export function rgCountLines(
   glob: string,
 ): number | null {
   const args = ['-c', '--hidden', '-g', glob];
-  for (const ex of RG_PROBE_EXCLUDES) args.push('-g', ex);
+  for (const ex of RG_CODEDEEP_EXCLUDES) args.push('-g', ex);
   args.push('-e', re, '.');
   const { stdout, status } = tryExec('rg', args, repoDir);
   if (status === 1) return 0; // ran fine, no matches

@@ -110,12 +110,12 @@ const PY_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
   'union', 'intersection', 'difference', 'discard',
 ]);
 
-// Cyclomatic decision nodes — Probe's convention (radon/McCabe-aligned), since
+// Cyclomatic decision nodes — codedeep-mcp's convention (radon/McCabe-aligned), since
 // Python is undocumented by SonarQube. Verified against the sonar-python source
 // (metrics/ComplexityVisitor): sonar-python counts only def/if/for/while/ternary/
 // (and|or)/comprehension-if and notably OMITS `elif`, `except`, and `match`/`case`
 // entirely (the visitor has no handler for them — the metric file predates 3.10).
-// Probe DELIBERATELY DIVERGES from those omissions and counts every genuine
+// codedeep-mcp DELIBERATELY DIVERGES from those omissions and counts every genuine
 // branch (radon-style): `elif_clause` (+1 each), `except_clause` (+1 per clause),
 // `case_clause` (each `match` arm incl. the wildcard `case _:`). `if_clause`
 // covers BOTH comprehension filters (`[x for x in y if c]` — counted by radon AND

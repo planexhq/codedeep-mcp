@@ -1,12 +1,12 @@
 {
-  "name": "probe-mcp",
+  "name": "codedeep-mcp",
   "version": "0.1.0",
   "description": "MCP server for structural codebase exploration",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "probe-mcp": "./dist/index.js"
+    "codedeep-mcp": "./dist/index.js"
   },
   "files": [
     "dist/",

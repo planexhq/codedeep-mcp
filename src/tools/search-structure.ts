@@ -3,7 +3,7 @@ import { initParser, parseFile } from '../indexer/parser.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { compareShallowFirst } from '../indexer/scanner.js';
 import { errMsg, log } from '../logger.js';
-import type { FileInfo, GitMeta, ProbeConfig, Symbol } from '../types.js';
+import type { FileInfo, GitMeta, CodedeepConfig, Symbol } from '../types.js';
 
 import {
   MODULE_LEVEL,
@@ -26,7 +26,7 @@ export interface SearchStructureArgs {
 export interface SearchStructureDeps {
   index: CodeIndex;
   indexer: Pick<Indexer, 'ready'>;
-  config: ProbeConfig;
+  config: CodedeepConfig;
 }
 
 const DEFAULT_LIMIT = 10;
@@ -340,7 +340,7 @@ async function scanPattern(
   targets: ReadonlyMap<string, AgLang>,
   files: FileInfo[],
   limit: number,
-  config: ProbeConfig,
+  config: CodedeepConfig,
 ): Promise<ScanResult> {
   const matches: PatternMatch[] = [];
   let scanned = 0;

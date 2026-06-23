@@ -59,7 +59,7 @@ export function fetchRepo(repo: RepoSpec, cacheRoot: string): FetchedRepo {
   return { dir, commit: git(['rev-parse', 'HEAD'], dir) };
 }
 
-export function probeMcpCommit(repoRoot: string): string {
+export function codedeepMcpCommit(repoRoot: string): string {
   try {
     return git(['rev-parse', 'HEAD'], repoRoot);
   } catch {

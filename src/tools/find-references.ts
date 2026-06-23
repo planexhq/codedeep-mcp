@@ -10,7 +10,7 @@ import {
 import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
 import { RECEIVER_OPAQUE } from '../types.js';
-import type { ImportInfo, ProbeConfig, Reference, Symbol } from '../types.js';
+import type { ImportInfo, CodedeepConfig, Reference, Symbol } from '../types.js';
 
 import {
   MEMBER_MATCH_TAG,
@@ -48,7 +48,7 @@ export interface FindReferencesArgs {
 export interface FindReferencesDeps {
   index: CodeIndex;
   indexer: Pick<Indexer, 'ready'>;
-  config: ProbeConfig;
+  config: CodedeepConfig;
 }
 
 const DEFAULT_LIMIT = 20;

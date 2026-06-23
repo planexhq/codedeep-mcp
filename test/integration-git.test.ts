@@ -15,7 +15,7 @@ import { Indexer } from '../src/indexer/pipeline.js';
 import { GitService } from '../src/git/git-service.js';
 import { runGetContext } from '../src/tools/get-context.js';
 import { runOverview } from '../src/tools/overview.js';
-import type { ProbeConfig } from '../src/types.js';
+import type { CodedeepConfig } from '../src/types.js';
 import { makeConfig, makeProjectDir, silenceStderr, writeTree } from './helpers.js';
 import { addCommits, gitAvailable, makeBranch, makeGitRepo } from './git-helpers.js';
 
@@ -41,7 +41,7 @@ async function copyFixture(root: string): Promise<Record<string, string>> {
 interface Env {
   index: CodeIndex;
   indexer: Indexer;
-  config: ProbeConfig;
+  config: CodedeepConfig;
   git: GitService;
 }
 
@@ -72,16 +72,16 @@ describe.skipIf(!gitAvailable)('integration: git enrichment end-to-end', () => {
   // utils churned 5x. Expected: utils 6 commits (top hotspot), auth and
   // service 5 each sharing 5 (incl. the init commit) -> 100% confidence.
   async function setupRepo(): Promise<Env> {
-    vi.stubEnv('PROBE_EXCLUDE', undefined);
-    vi.stubEnv('PROBE_CACHE_DIR', undefined);
+    vi.stubEnv('CODEDEEP_EXCLUDE', undefined);
+    vi.stubEnv('CODEDEEP_CACHE_DIR', undefined);
     root = makeProjectDir('probe-int-git-');
     const tree = await copyFixture(root);
 
     // Ignore the probe cache like a real project would — otherwise the
-    // helper's `git add -A` commits .probe/cache/index.json and pollutes
+    // helper's `git add -A` commits .codedeep/cache/index.json and pollutes
     // branch diffs and co-change pairs.
     makeGitRepo(root, [
-      { files: { '.gitignore': '.probe/\n' }, message: 'initial import' },
+      { files: { '.gitignore': '.codedeep/\n' }, message: 'initial import' },
     ]);
     addCommits(
       root,
@@ -195,9 +195,9 @@ describe.skipIf(!gitAvailable)('integration: git enrichment end-to-end', () => {
     expect(index2.getGitMeta()?.analyzedAt).toBe(analyzedAt); // skipped — fresh
   });
 
-  it('PROBE_GIT=0 disables enrichment even inside a repo', async () => {
+  it('CODEDEEP_GIT=0 disables enrichment even inside a repo', async () => {
     const env = await setupRepo();
-    const config = { ...env.config, gitEnabled: false } as ProbeConfig;
+    const config = { ...env.config, gitEnabled: false } as CodedeepConfig;
     const index2 = new CodeIndex(root);
     const git2 = new GitService(config, index2, join(root, 'alt-cache.json'));
     services.push(git2);
@@ -208,8 +208,8 @@ describe.skipIf(!gitAvailable)('integration: git enrichment end-to-end', () => {
   });
 
   it('negative twin: same fixture without .git -> zero git output anywhere', async () => {
-    vi.stubEnv('PROBE_EXCLUDE', undefined);
-    vi.stubEnv('PROBE_CACHE_DIR', undefined);
+    vi.stubEnv('CODEDEEP_EXCLUDE', undefined);
+    vi.stubEnv('CODEDEEP_CACHE_DIR', undefined);
     root = makeProjectDir('probe-int-nogit-');
     await copyFixture(root);
     const env = await indexAndStart();

@@ -11,7 +11,7 @@ import type {
   GitMeta,
   ImportedName,
   ImportInfo,
-  ProbeConfig,
+  CodedeepConfig,
   Reference,
   Symbol,
   SymbolKind,
@@ -58,8 +58,8 @@ export async function withChmod<T>(
 
 export function makeConfig(
   root: string,
-  overrides: Partial<ProbeConfig> = {},
-): ProbeConfig {
+  overrides: Partial<CodedeepConfig> = {},
+): CodedeepConfig {
   const base = loadConfig(root);
   return Object.freeze({
     projectRoot: overrides.projectRoot ?? base.projectRoot,
@@ -71,7 +71,7 @@ export function makeConfig(
     watch: overrides.watch ?? base.watch,
     gitEnabled: overrides.gitEnabled ?? base.gitEnabled,
     gitWindow: overrides.gitWindow ?? base.gitWindow,
-  }) as ProbeConfig;
+  }) as CodedeepConfig;
 }
 
 export interface SymOpts {

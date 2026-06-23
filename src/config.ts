@@ -3,14 +3,14 @@ import { constants as fsConstants, readFileSync } from 'node:fs';
 import { access, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import type { ProbeConfig } from './types.js';
+import type { CodedeepConfig } from './types.js';
 import { toPosix } from './indexer/scanner.js';
 import { errMsg, log } from './logger.js';
 
 const DEFAULT_EXCLUDES: readonly string[] = [
   'node_modules',
   '.git',
-  '.probe',
+  '.codedeep',
   '__pycache__',
   '.venv',
   'dist',
@@ -41,7 +41,7 @@ interface PartialFileConfig {
 }
 
 function readFileConfig(root: string): PartialFileConfig {
-  const path = join(root, '.probe', 'config.json');
+  const path = join(root, '.codedeep', 'config.json');
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');
@@ -102,17 +102,17 @@ function parseEnvBool(name: string): boolean | undefined {
 }
 
 function parseEnvGitWindow(): number | undefined {
-  const raw = process.env.PROBE_GIT_WINDOW?.trim();
+  const raw = process.env.CODEDEEP_GIT_WINDOW?.trim();
   if (raw === undefined || raw === '') return undefined;
   const parsed = asPositiveInt(Number(raw));
   if (parsed === undefined) {
-    log.warn(`config: PROBE_GIT_WINDOW=${raw} not recognized; expected a positive integer (days)`);
+    log.warn(`config: CODEDEEP_GIT_WINDOW=${raw} not recognized; expected a positive integer (days)`);
   }
   return parsed;
 }
 
 function parseEnvExclude(): string[] {
-  const raw = process.env.PROBE_EXCLUDE;
+  const raw = process.env.CODEDEEP_EXCLUDE;
   if (!raw) return [];
   return raw
     .split(',')
@@ -136,7 +136,7 @@ function computeCacheDirExcludes(root: string, cacheDir: string): string[] {
   return [posixRel, `${posixRel}/**`];
 }
 
-export function loadConfig(projectRoot: string = process.cwd()): ProbeConfig {
+export function loadConfig(projectRoot: string = process.cwd()): CodedeepConfig {
   const root = resolve(projectRoot);
   const fileCfg = readFileConfig(root);
 
@@ -146,10 +146,10 @@ export function loadConfig(projectRoot: string = process.cwd()): ProbeConfig {
   const fileMaxFileSize = asNonNegativeInt(fileCfg.maxFileSize);
   const fileCacheDir = asNonBlankString(fileCfg.cacheDir);
 
-  const envCacheDir = asNonBlankString(process.env.PROBE_CACHE_DIR);
+  const envCacheDir = asNonBlankString(process.env.CODEDEEP_CACHE_DIR);
   const envExclude = parseEnvExclude();
 
-  const cacheDirRaw = envCacheDir ?? fileCacheDir ?? join(root, '.probe', 'cache');
+  const cacheDirRaw = envCacheDir ?? fileCacheDir ?? join(root, '.codedeep', 'cache');
   const resolvedCacheDir = resolve(root, cacheDirRaw);
 
   // cacheDir === root produces no excludes, so <root>/index.json is admitted
@@ -159,7 +159,7 @@ export function loadConfig(projectRoot: string = process.cwd()): ProbeConfig {
   if ((envCacheDir ?? fileCacheDir) && relative(root, resolvedCacheDir) === '') {
     throw new Error(
       `cacheDir resolves to the project root (${resolvedCacheDir}); ` +
-        `set PROBE_CACHE_DIR or .probe/config.json "cacheDir" to a subdirectory or external path`,
+        `set CODEDEEP_CACHE_DIR or .codedeep/config.json "cacheDir" to a subdirectory or external path`,
     );
   }
 
@@ -175,36 +175,36 @@ export function loadConfig(projectRoot: string = process.cwd()): ProbeConfig {
     .filter(Boolean);
   const exclude = Array.from(new Set(merged));
 
-  const cfg: ProbeConfig = {
+  const cfg: CodedeepConfig = {
     projectRoot: root,
     exclude: Object.freeze(exclude),
     languages: Object.freeze(fileLanguages ?? [...DEFAULT_LANGUAGES]),
     maxFiles: fileMaxFiles ?? DEFAULT_MAX_FILES,
     maxFileSize: fileMaxFileSize ?? DEFAULT_MAX_FILE_SIZE,
     cacheDir: resolvedCacheDir,
-    watch: parseEnvBool('PROBE_WATCH') ?? asBoolean(fileCfg.watch) ?? true,
-    gitEnabled: parseEnvBool('PROBE_GIT') ?? asBoolean(fileCfg.gitEnabled) ?? true,
+    watch: parseEnvBool('CODEDEEP_WATCH') ?? asBoolean(fileCfg.watch) ?? true,
+    gitEnabled: parseEnvBool('CODEDEEP_GIT') ?? asBoolean(fileCfg.gitEnabled) ?? true,
     gitWindow: parseEnvGitWindow() ?? asPositiveInt(fileCfg.gitWindow) ?? DEFAULT_GIT_WINDOW,
   };
   return Object.freeze(cfg);
 }
 
 export function defaultCacheDir(projectRoot: string): string {
-  return resolve(projectRoot, '.probe', 'cache');
+  return resolve(projectRoot, '.codedeep', 'cache');
 }
 
 export function fallbackCacheDir(projectRoot: string): string {
   const hash = createHash('sha1').update(projectRoot).digest('hex').slice(0, 16);
-  return join(homedir(), '.cache', 'probe', hash);
+  return join(homedir(), '.cache', 'codedeep', hash);
 }
 
 // Ensures the configured cacheDir is writable. When the path equals the
 // project-default and is not usable (read-only repo, EROFS mount, or a
-// `.probe`-is-a-file FS conflict), falls back silently to
-// ~/.cache/probe/<sha1(projectRoot)>/. Explicit user overrides fail loudly
-// so they know their PROBE_CACHE_DIR / cacheDir is broken instead of being
+// `.codedeep`-is-a-file FS conflict), falls back silently to
+// ~/.cache/codedeep/<sha1(projectRoot)>/. Explicit user overrides fail loudly
+// so they know their CODEDEEP_CACHE_DIR / cacheDir is broken instead of being
 // silently ignored.
-export async function resolveCacheDir(config: ProbeConfig): Promise<string> {
+export async function resolveCacheDir(config: CodedeepConfig): Promise<string> {
   const isDefault = config.cacheDir === defaultCacheDir(config.projectRoot);
 
   try {
@@ -217,7 +217,7 @@ export async function resolveCacheDir(config: ProbeConfig): Promise<string> {
     return config.cacheDir;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
-    // ENOTDIR/EEXIST cover default-path FS conflicts (e.g. `.probe` is a
+    // ENOTDIR/EEXIST cover default-path FS conflicts (e.g. `.codedeep` is a
     // regular file). Explicit overrides still throw so misconfig surfaces.
     const canFallback =
       code === 'EACCES' ||
@@ -237,7 +237,7 @@ export async function resolveCacheDir(config: ProbeConfig): Promise<string> {
     } catch (fallbackErr) {
       const wrapped = new Error(
         `Cache fallback ${fallback} is also not writable: ${errMsg(fallbackErr)}. ` +
-          `Set PROBE_CACHE_DIR to a writable directory.`,
+          `Set CODEDEEP_CACHE_DIR to a writable directory.`,
       ) as NodeJS.ErrnoException;
       wrapped.code = (fallbackErr as NodeJS.ErrnoException)?.code;
       wrapped.cause = fallbackErr;

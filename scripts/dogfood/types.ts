@@ -78,7 +78,7 @@ export interface RunRecord {
   finishedAt: string;
   seed: number;
   node: string;
-  probeMcpCommit: string;
+  codedeepMcpCommit: string;
   cleanCache: boolean;
   repos: RepoResult[];
 }

@@ -2,7 +2,7 @@ import type { CodeIndex } from '../indexer/code-index.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { depthOf } from '../indexer/scanner.js';
 import { errMsg } from '../logger.js';
-import type { ProbeConfig, Symbol, SymbolKind } from '../types.js';
+import type { CodedeepConfig, Symbol, SymbolKind } from '../types.js';
 
 import {
   formatComplexity,
@@ -22,7 +22,7 @@ export interface FindSymbolArgs {
 export interface FindSymbolDeps {
   index: CodeIndex;
   indexer: Pick<Indexer, 'ready'>;
-  config: ProbeConfig;
+  config: CodedeepConfig;
 }
 
 const DEFAULT_LIMIT = 10;

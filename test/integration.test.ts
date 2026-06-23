@@ -19,7 +19,7 @@ import { runGetContext } from '../src/tools/get-context.js';
 import { runImpact } from '../src/tools/impact.js';
 import { runOverview } from '../src/tools/overview.js';
 import { runSearchStructure } from '../src/tools/search-structure.js';
-import type { ProbeConfig } from '../src/types.js';
+import type { CodedeepConfig } from '../src/types.js';
 import {
   makeConfig,
   makeGitStub,
@@ -103,13 +103,13 @@ describe('integration: end-to-end pipeline + tools', () => {
   async function setup(fixture: FixtureName): Promise<{
     index: CodeIndex;
     indexer: Indexer;
-    config: ProbeConfig;
+    config: CodedeepConfig;
     git: ReturnType<typeof makeGitStub>;
   }> {
-    // loadConfig (config.ts:81,115) reads PROBE_EXCLUDE and PROBE_CACHE_DIR.
+    // loadConfig (config.ts:81,115) reads CODEDEEP_EXCLUDE and CODEDEEP_CACHE_DIR.
     // Unset them so a developer's shell can't perturb the fixture's index.
-    vi.stubEnv('PROBE_EXCLUDE', undefined);
-    vi.stubEnv('PROBE_CACHE_DIR', undefined);
+    vi.stubEnv('CODEDEEP_EXCLUDE', undefined);
+    vi.stubEnv('CODEDEEP_CACHE_DIR', undefined);
     root = await copyFixtureToTmp(fixture);
     const config = makeConfig(root);
     const index = new CodeIndex(root);

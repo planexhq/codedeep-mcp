@@ -6,7 +6,7 @@ import {
   runSearchStructure,
   type SearchStructureDeps,
 } from '../../src/tools/search-structure.js';
-import type { ProbeConfig } from '../../src/types.js';
+import type { CodedeepConfig } from '../../src/types.js';
 import {
   makeConfig,
   makeFileInfo,
@@ -31,7 +31,7 @@ afterEach(() => {
 function makeDeps(
   index: CodeIndex,
   ready = true,
-  configOverrides: Partial<ProbeConfig> = {},
+  configOverrides: Partial<CodedeepConfig> = {},
 ): SearchStructureDeps {
   return {
     index,

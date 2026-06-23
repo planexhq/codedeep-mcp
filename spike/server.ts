@@ -12,7 +12,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 const server = new McpServer({
-  name: "probe-mcp-spike",
+  name: "codedeep-mcp-spike",
   version: "0.0.0",
 });
 

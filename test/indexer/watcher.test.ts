@@ -14,7 +14,7 @@ import { CodeIndex } from '../../src/indexer/code-index.js';
 import * as parserModule from '../../src/indexer/parser.js';
 import { Indexer } from '../../src/indexer/pipeline.js';
 import { Watcher, type WatchFactory } from '../../src/indexer/watcher.js';
-import type { ProbeConfig } from '../../src/types.js';
+import type { CodedeepConfig } from '../../src/types.js';
 import {
   makeConfig,
   makeFileInfo,
@@ -27,7 +27,7 @@ const DEBOUNCE = 100;
 const RETRY = 250;
 
 let root: string;
-let config: ProbeConfig;
+let config: CodedeepConfig;
 
 beforeAll(async () => {
   await parserModule.initParser();
@@ -62,7 +62,7 @@ function stubIndexer(opts: IndexerStubOpts = {}): Indexer {
     isIndexing: opts.isIndexing ?? false,
     ready: opts.ready ?? true,
     lastScanComplete: true,
-    cachePath: join(root, '.probe', 'cache', 'index.json'),
+    cachePath: join(root, '.codedeep', 'cache', 'index.json'),
     indexFile: opts.indexFile ?? vi.fn().mockResolvedValue('indexed'),
     indexChanged: opts.indexChanged ?? vi.fn().mockResolvedValue(true),
   } as unknown as Indexer;
@@ -172,7 +172,7 @@ describe('Watcher — event filtering', () => {
     );
 
     watcher.handleEvent('change', 'node_modules/pkg/index.js');
-    watcher.handleEvent('change', '.probe/cache/index.json');
+    watcher.handleEvent('change', '.codedeep/cache/index.json');
     watcher.handleEvent('rename', 'assets/logo.png');
 
     await advanceAndSettle(watcher, DEBOUNCE);

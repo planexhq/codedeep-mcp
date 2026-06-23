@@ -19,7 +19,7 @@ import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { errMsg, log } from '../logger.js';
-import type { ProbeConfig } from '../types.js';
+import type { CodedeepConfig } from '../types.js';
 import type { CodeIndex } from './code-index.js';
 import type { Indexer } from './pipeline.js';
 import { compileExcludeMatcher, isBinaryByExtension, toPosix } from './scanner.js';
@@ -89,7 +89,7 @@ export class Watcher {
   constructor(
     private readonly indexer: Indexer,
     private readonly index: CodeIndex,
-    private readonly config: ProbeConfig,
+    private readonly config: CodedeepConfig,
     options: WatcherOptions = {},
   ) {
     this.matchExclude = compileExcludeMatcher(config.exclude);

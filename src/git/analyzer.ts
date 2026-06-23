@@ -62,7 +62,7 @@ export function buildLogArgs(windowDays: number, now: number = Date.now()): stri
 export interface GitAnalysis {
   // EVERY path seen in kept commits, including non-indexed ones — those
   // are needed as confidence denominators for partner values like
-  // config/auth.yaml that probe doesn't index.
+  // config/auth.yaml that codedeep-mcp doesn't index.
   counts: Map<string, number>;
   // Keyed by indexed paths only; partner values unrestricted.
   cochanges: Map<string, CoChange[]>;

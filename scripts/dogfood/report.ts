@@ -63,9 +63,9 @@ function oracleLines(oracles: OracleResult[]): string[] {
 
 function renderMarkdown(run: RunRecord): string {
   const L: string[] = [];
-  L.push('# probe-mcp dogfooding report', '');
+  L.push('# codedeep-mcp dogfooding report', '');
   L.push(
-    `harness ${run.harnessVersion} · seed ${run.seed} · node ${run.node} · probe-mcp \`${run.probeMcpCommit.slice(0, 10)}\``,
+    `harness ${run.harnessVersion} · seed ${run.seed} · node ${run.node} · codedeep-mcp \`${run.codedeepMcpCommit.slice(0, 10)}\``,
     `started ${run.startedAt} · finished ${run.finishedAt} · cleanCache=${run.cleanCache}`,
     '',
   );

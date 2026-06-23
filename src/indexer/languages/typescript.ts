@@ -157,7 +157,7 @@ function tsBooleanRunExcluded(root: Node): boolean {
   // SonarJS runs on ESTree, which has no paren nodes, so a WHOLE-expression-
   // parenthesized short-circuit (`{(cond && <X/>)}`, a common conditional-render
   // idiom) sits DIRECTLY under the JSX container there and IS excluded. tree-sitter
-  // keeps the paren node between them, so without this walk Probe would over-count.
+  // keeps the paren node between them, so without this walk codedeep-mcp would over-count.
   let container = root.parent;
   while (container?.type === 'parenthesized_expression') container = container.parent;
   if (container?.type !== 'jsx_expression') return false;

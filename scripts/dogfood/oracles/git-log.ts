@@ -94,7 +94,7 @@ export function gitLogOracle(env: HarnessEnv, repoDir: string): OracleResult[] {
       probeHot.length === 0
         ? 'probe reported no hotspots'
         : `${overlap.length}/${probeTop5.length} probe top-5 hotspots are in raw indexed top-15; top hotspot count probe=${topProbe?.commits} raw=${topRaw}`,
-    data: { probeTop5, rawTop10: rawRankedIndexed.slice(0, 10), topProbeCount: topProbe?.commits, topRawCount: topRaw },
+    data: { probeTop5, rawTop10: rawRankedIndexed.slice(0, 10), topCodedeepCount: topProbe?.commits, topRawCount: topRaw },
   });
 
   // --- Co-change of the top hotspot ---

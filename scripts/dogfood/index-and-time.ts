@@ -1,4 +1,4 @@
-// Times indexing and git analysis and samples peak memory — probe-mcp has
+// Times indexing and git analysis and samples peak memory — codedeep-mcp has
 // no built-in instrumentation, so the harness wraps it here.
 
 import { promises as fs } from 'node:fs';

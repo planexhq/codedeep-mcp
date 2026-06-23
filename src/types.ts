@@ -1,4 +1,4 @@
-// Shared types for probe-mcp.
+// Shared types for codedeep-mcp.
 //
 // Note: the `Symbol` interface name shadows the global `Symbol` constructor
 // when imported, but only as a *type* — the runtime `Symbol(...)` value is
@@ -219,21 +219,21 @@ export interface IndexStats {
   entryPoints: Array<{ file: string; symbol: string; line: number }>;
 }
 
-export interface ProbeConfig {
+export interface CodedeepConfig {
   readonly projectRoot: string;
   readonly exclude: readonly string[];
   readonly languages: readonly string[];
   readonly maxFiles: number;
   readonly maxFileSize: number;
   readonly cacheDir: string;
-  // Live re-indexing via fs.watch. Env PROBE_WATCH overrides the config
+  // Live re-indexing via fs.watch. Env CODEDEEP_WATCH overrides the config
   // file's `watch`; defaults to true.
   readonly watch: boolean;
-  // Git enrichment kill switch. Env PROBE_GIT overrides the config file's
+  // Git enrichment kill switch. Env CODEDEEP_GIT overrides the config file's
   // `gitEnabled`; defaults to true (actual availability is still detected
   // at runtime — true just means "try").
   readonly gitEnabled: boolean;
-  // Git analysis window in days (hotspots + co-change). Env PROBE_GIT_WINDOW
+  // Git analysis window in days (hotspots + co-change). Env CODEDEEP_GIT_WINDOW
   // overrides the config file's `gitWindow`; defaults to 180.
   readonly gitWindow: number;
 }

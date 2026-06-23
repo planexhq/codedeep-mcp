@@ -8,7 +8,7 @@ import type { GitService } from '../git/git-service.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
 import { classNameFromFqn } from '../types.js';
-import type { ImportInfo, ProbeConfig, Symbol } from '../types.js';
+import type { ImportInfo, CodedeepConfig, Symbol } from '../types.js';
 
 import {
   BEHAVIORAL_TAG,
@@ -43,7 +43,7 @@ export interface GetContextArgs {
 export interface GetContextDeps {
   index: CodeIndex;
   indexer: Pick<Indexer, 'ready'>;
-  config: ProbeConfig;
+  config: CodedeepConfig;
   git: Pick<GitService, 'recentCommits'>;
 }
 
@@ -313,7 +313,7 @@ async function renderRecentChanges(
 
 async function renderBody(
   target: Symbol,
-  config: ProbeConfig,
+  config: CodedeepConfig,
 ): Promise<string> {
   let content: string;
   try {

@@ -14,7 +14,7 @@ import {
   type GitRunOptions,
   type GitRunnerLike,
 } from '../../src/git/runner.js';
-import type { ProbeConfig } from '../../src/types.js';
+import type { CodedeepConfig } from '../../src/types.js';
 import {
   makeConfig,
   makeFileInfo,
@@ -100,7 +100,7 @@ function makeIndex(): CodeIndex {
   return idx;
 }
 
-function cfg(overrides: Partial<ProbeConfig> = {}): ProbeConfig {
+function cfg(overrides: Partial<CodedeepConfig> = {}): CodedeepConfig {
   return makeConfig(tmp, overrides);
 }
 
@@ -353,7 +353,7 @@ describe.skipIf(!gitAvailable)('GitService against real repos', () => {
     services = [];
   });
 
-  function realService(config?: ProbeConfig) {
+  function realService(config?: CodedeepConfig) {
     const index = makeIndex();
     const service = new GitService(config ?? cfg(), index, cachePath);
     services.push(service);

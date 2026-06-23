@@ -66,7 +66,7 @@ SPIKE_0A_PASS
 
 ```
 [server] SPIKE_0B_READY
-[test] initialize OK — server=probe-mcp-spike@0.0.0
+[test] initialize OK — server=codedeep-mcp-spike@0.0.0
 [test] tools/list OK — found 1 tool(s), 'overview' present with annotations
 [test] tools/call OK — got text: "## Overview\nSpike stub response."
 SPIKE_0B_PASS

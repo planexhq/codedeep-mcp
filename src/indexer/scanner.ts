@@ -2,7 +2,7 @@ import { open, readdir, stat } from 'node:fs/promises';
 import { join, relative, sep, posix } from 'node:path';
 import picomatch from 'picomatch';
 
-import { LANGUAGE_UNKNOWN, type FileInfo, type ProbeConfig } from '../types.js';
+import { LANGUAGE_UNKNOWN, type FileInfo, type CodedeepConfig } from '../types.js';
 import { log } from '../logger.js';
 
 const BYTE_CHECK_BUF_SIZE = 8192;
@@ -230,7 +230,7 @@ export interface ScanResult {
   complete: boolean;
 }
 
-export async function scanProject(config: ProbeConfig): Promise<ScanResult> {
+export async function scanProject(config: CodedeepConfig): Promise<ScanResult> {
   const matchExclude = compileExcludeMatcher(config.exclude);
   const langSet = new Set(config.languages);
   const root = config.projectRoot;

@@ -146,7 +146,7 @@ const CFAMILY_COMPLEXITY_SKIP_TYPES: ReadonlySet<string> = new Set([
 // operator-CHANGE in a source-order chain (paren-TRANSPARENT → unwrap). Nest-only (+0):
 // C++ lambdas + ObjC `^{}` blocks. Recursion: +1 per direct self-call SITE (the
 // whitepaper's per-call-site rule). The `try` container is free (only catches score). NO
-// baseline +1 in the C-family rule; Probe keeps its `1 + decisionPoints` (the documented constant offset).
+// baseline +1 in the C-family cognitive model; codedeep-mcp keeps its `1 + decisionPoints` (the documented constant offset).
 const CFAMILY_COGNITIVE_OPTIONS: CognitiveOptions = {
   ifType: 'if_statement',
   // cpp wraps the if condition in `condition_clause`, c/objc in `parenthesized_expression`

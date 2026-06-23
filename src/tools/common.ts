@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 
 import { partnerOf } from '../git/analyzer.js';
-import type { CoChange, ProbeConfig, Symbol } from '../types.js';
+import type { CoChange, CodedeepConfig, Symbol } from '../types.js';
 
 // Index signature required to satisfy the MCP SDK's CallToolResult shape.
 export interface ToolResponse {
@@ -42,7 +42,7 @@ async function realProjectRoot(projectRoot: string): Promise<string> {
 // bypass the indexer's contract.
 export async function safeReadIndexedFile(
   relPath: string,
-  config: ProbeConfig,
+  config: CodedeepConfig,
 ): Promise<string> {
   const abs = join(config.projectRoot, relPath);
   const stats = await fs.lstat(abs);

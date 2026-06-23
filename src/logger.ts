@@ -1,9 +1,9 @@
 // stderr-only logging. console.log would corrupt stdio JSON-RPC.
 
-const DEBUG_ENABLED = process.env.PROBE_DEBUG === '1';
+const DEBUG_ENABLED = process.env.CODEDEEP_DEBUG === '1';
 
 function write(level: 'error' | 'warn' | 'debug', msg: string): void {
-  process.stderr.write(`[probe-mcp ${level}] ${msg}\n`);
+  process.stderr.write(`[codedeep-mcp ${level}] ${msg}\n`);
 }
 
 export const log = {

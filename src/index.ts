@@ -8,20 +8,20 @@ import { Indexer } from "./indexer/pipeline.js";
 import { Watcher } from "./indexer/watcher.js";
 import { errMsg, log } from "./logger.js";
 import { createServer } from "./server.js";
-import type { ProbeConfig } from "./types.js";
+import type { CodedeepConfig } from "./types.js";
 
-let initial: ProbeConfig;
+let initial: CodedeepConfig;
 try {
   initial = loadConfig();
 } catch (err) {
-  log.error(`probe-mcp: invalid config: ${errMsg(err)}`);
+  log.error(`codedeep-mcp: invalid config: ${errMsg(err)}`);
   process.exit(1);
 }
 let cacheDir: string;
 try {
   cacheDir = await resolveCacheDir(initial);
 } catch (err) {
-  log.error(`probe-mcp: failed to resolve cache directory: ${errMsg(err)}`);
+  log.error(`codedeep-mcp: failed to resolve cache directory: ${errMsg(err)}`);
   process.exit(1);
 }
 const config = Object.freeze({ ...initial, cacheDir });
@@ -93,13 +93,13 @@ function shutdown(
 ): void {
   if (shuttingDown) {
     if (escalateIfShuttingDown) {
-      log.debug("probe-mcp: signal during shutdown; exiting immediately");
+      log.debug("codedeep-mcp: signal during shutdown; exiting immediately");
       process.exit(1);
     }
     return;
   }
   shuttingDown = true;
-  log.debug(`probe-mcp: ${reason}; flushing watcher before exit`);
+  log.debug(`codedeep-mcp: ${reason}; flushing watcher before exit`);
   void (async () => {
     let code = 1;
     try {
@@ -122,9 +122,9 @@ function shutdown(
         watchdog,
       ]);
       if (outcome === "done") code = 0;
-      else log.warn("probe-mcp: shutdown watchdog fired; exiting with flush incomplete");
+      else log.warn("codedeep-mcp: shutdown watchdog fired; exiting with flush incomplete");
     } catch (err) {
-      log.warn(`probe-mcp: shutdown flush failed: ${errMsg(err)}`);
+      log.warn(`codedeep-mcp: shutdown flush failed: ${errMsg(err)}`);
     } finally {
       process.exit(code);
     }

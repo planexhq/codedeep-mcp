@@ -136,7 +136,7 @@ import type {
 // pinned to SwiftLint's `cyclomatic_complexity` (the open, runnable oracle — the
 // gocyclo/rust-code-analysis precedent of pinning the community tool; SwiftLint counts `guard`/`catch`/the 3
 // loops/every switch case incl. `default`, `fallthrough` −1, and skips nested
-// func/init; it does NOT count `&&`/`||`/ternary/`??`, so Swift is the only Probe
+// func/init; it does NOT count `&&`/`||`/ternary/`??`, so Swift is the only codedeep-mcp
 // language without cyclomatic booleans). COGNITIVE is SonarSource-whitepaper-aligned
 // (no published cognitive spec for Swift exists, so there is no
 // tool oracle; validated against
@@ -151,11 +151,11 @@ import type {
 // CYCLOMATIC is pinned to Mozilla's `rust-code-analysis` (the `rust-code-analysis-cli`
 // oracle): the `?` try operator, every match arm, match-arm guards, closures, and
 // the 3 loops all count (McCabe-complete; verified exact on ripgrep + serde modulo
-// macro-internal control flow, which Probe's grammar treats as opaque token-trees,
+// macro-internal control flow, which codedeep-mcp's grammar treats as opaque token-trees,
 // and nested fn/impl bodies, the per-symbol model). COGNITIVE is SonarSource-
 // whitepaper/sonar-rust-aligned and DELIBERATELY does NOT replicate two
 // rust-code-analysis cognitive bugs the oracle surfaced (it omits `loop` entirely,
-// and carries boolean-run state across the whole function) — Probe counts all 3
+// and carries boolean-run state across the whole function) — codedeep-mcp counts all 3
 // loops and per-expression boolean runs, the defensible number. Adding the fields to
 // Rust symbols is an extraction-logic change `isUnchanged` (mtime/size/language)
 // can't detect, so the bump force-invalidates warm caches.
@@ -689,7 +689,7 @@ export class CodeIndex {
     return this.gitMetaState;
   }
 
-  // Kill-switch / repo-gone path: when git is disabled (PROBE_GIT=0) or
+  // Kill-switch / repo-gone path: when git is disabled (CODEDEEP_GIT=0) or
   // the repo disappeared, persisted enrichment from an earlier enabled
   // session must not keep rendering forever — it could never refresh.
   // No-op when no git data is present.

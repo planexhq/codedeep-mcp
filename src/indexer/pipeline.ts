@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 
 import { errMsg, log } from '../logger.js';
-import { LANGUAGE_UNKNOWN, type FileInfo, type ProbeConfig } from '../types.js';
+import { LANGUAGE_UNKNOWN, type FileInfo, type CodedeepConfig } from '../types.js';
 import { CodeIndex } from './code-index.js';
 import { extractSymbols } from './extractor.js';
 import { initParser, parseFile, type Tree } from './parser.js';
@@ -82,7 +82,7 @@ export class Indexer {
   }
 
   constructor(
-    private readonly config: ProbeConfig,
+    private readonly config: CodedeepConfig,
     private readonly index: CodeIndex,
   ) {
     this.cachePath = join(config.cacheDir, 'index.json');

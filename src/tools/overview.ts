@@ -15,7 +15,7 @@ import { errMsg, log } from '../logger.js';
 import {
   LANGUAGE_UNKNOWN,
   type FileInfo,
-  type ProbeConfig,
+  type CodedeepConfig,
   type Symbol,
   type SymbolKind,
 } from '../types.js';
@@ -36,7 +36,7 @@ export interface OverviewArgs {
 export interface OverviewDeps {
   index: CodeIndex;
   indexer: Pick<Indexer, 'ready'>;
-  config: ProbeConfig;
+  config: CodedeepConfig;
   git: Pick<GitService, 'branchSummary'>;
 }
 

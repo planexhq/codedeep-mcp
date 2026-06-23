@@ -17,12 +17,12 @@ import {
   withChmod,
 } from './helpers.js';
 
-// The last two entries (`.probe/cache`, `.probe/cache/**`) are derived by
+// The last two entries (`.codedeep/cache`, `.codedeep/cache/**`) are derived by
 // loadConfig from the default cacheDir, not hard-coded in DEFAULT_EXCLUDES.
 const EXPECTED_DEFAULT_EXCLUDES = [
   'node_modules',
   '.git',
-  '.probe',
+  '.codedeep',
   '__pycache__',
   '.venv',
   'dist',
@@ -34,22 +34,22 @@ const EXPECTED_DEFAULT_EXCLUDES = [
   '__generated__',
   '*.min.js',
   '*.bundle.js',
-  '.probe/cache',
-  '.probe/cache/**',
+  '.codedeep/cache',
+  '.codedeep/cache/**',
 ];
 
 const EXPECTED_DEFAULT_LANGUAGES = ['typescript', 'tsx', 'javascript', 'python', 'java', 'go', 'rust', 'swift', 'kotlin', 'dart', 'csharp', 'php', 'ruby', 'cpp', 'c', 'objc'];
 
 function writeConfig(root: string, contents: string): void {
-  mkdirSync(join(root, '.probe'), { recursive: true });
-  writeFileSync(join(root, '.probe', 'config.json'), contents, 'utf8');
+  mkdirSync(join(root, '.codedeep'), { recursive: true });
+  writeFileSync(join(root, '.codedeep', 'config.json'), contents, 'utf8');
 }
 
 describe('loadConfig', () => {
   let root: string;
 
   beforeEach(() => {
-    root = makeProjectDir('probe-config-test-');
+    root = makeProjectDir('codedeep-config-test-');
   });
 
   afterEach(() => {
@@ -66,7 +66,7 @@ describe('loadConfig', () => {
     expect(cfg.languages).toEqual(EXPECTED_DEFAULT_LANGUAGES);
     expect(cfg.maxFiles).toBe(100_000);
     expect(cfg.maxFileSize).toBe(1_048_576);
-    expect(cfg.cacheDir).toBe(resolve(root, '.probe', 'cache'));
+    expect(cfg.cacheDir).toBe(resolve(root, '.codedeep', 'cache'));
     expect(cfg.watch).toBe(true);
     expect(cfg.gitEnabled).toBe(true);
     expect(cfg.gitWindow).toBe(180);
@@ -90,23 +90,23 @@ describe('loadConfig', () => {
     ['false', false],
     ['1', true],
     ['true', true],
-  ])('PROBE_WATCH=%s sets watch to %s', (raw, expected) => {
-    vi.stubEnv('PROBE_WATCH', raw);
+  ])('CODEDEEP_WATCH=%s sets watch to %s', (raw, expected) => {
+    vi.stubEnv('CODEDEEP_WATCH', raw);
     expect(loadConfig(root).watch).toBe(expected);
   });
 
-  it('PROBE_WATCH overrides the file watch flag', () => {
+  it('CODEDEEP_WATCH overrides the file watch flag', () => {
     writeConfig(root, JSON.stringify({ watch: false }));
-    vi.stubEnv('PROBE_WATCH', '1');
+    vi.stubEnv('CODEDEEP_WATCH', '1');
     expect(loadConfig(root).watch).toBe(true);
   });
 
-  it('warns and keeps the default for an unrecognized PROBE_WATCH', () => {
+  it('warns and keeps the default for an unrecognized CODEDEEP_WATCH', () => {
     const spy = silenceStderr();
-    vi.stubEnv('PROBE_WATCH', 'maybe');
+    vi.stubEnv('CODEDEEP_WATCH', 'maybe');
     expect(loadConfig(root).watch).toBe(true);
     expect(spy).toHaveBeenCalled();
-    expect(String(spy.mock.calls[0]?.[0])).toContain('PROBE_WATCH');
+    expect(String(spy.mock.calls[0]?.[0])).toContain('CODEDEEP_WATCH');
   });
 
   it('file gitEnabled flag overrides the default', () => {
@@ -127,25 +127,25 @@ describe('loadConfig', () => {
     ['false', false],
     ['1', true],
     ['true', true],
-  ])('PROBE_GIT=%s sets gitEnabled to %s', (raw, expected) => {
-    vi.stubEnv('PROBE_GIT', raw);
+  ])('CODEDEEP_GIT=%s sets gitEnabled to %s', (raw, expected) => {
+    vi.stubEnv('CODEDEEP_GIT', raw);
     expect(loadConfig(root).gitEnabled).toBe(expected);
   });
 
-  it('PROBE_GIT overrides the file gitEnabled flag', () => {
+  it('CODEDEEP_GIT overrides the file gitEnabled flag', () => {
     writeConfig(root, JSON.stringify({ gitEnabled: false }));
-    vi.stubEnv('PROBE_GIT', '1');
+    vi.stubEnv('CODEDEEP_GIT', '1');
     expect(loadConfig(root).gitEnabled).toBe(true);
   });
 
-  it('warns and keeps the default for an unrecognized PROBE_GIT', () => {
+  it('warns and keeps the default for an unrecognized CODEDEEP_GIT', () => {
     // The stderr spy accumulates across tests (afterEach unstubs envs, not
     // mocks), so scan all calls instead of asserting on calls[0].
     const spy = silenceStderr();
-    vi.stubEnv('PROBE_GIT', 'maybe');
+    vi.stubEnv('CODEDEEP_GIT', 'maybe');
     expect(loadConfig(root).gitEnabled).toBe(true);
     expect(
-      spy.mock.calls.some((c) => String(c[0]).includes('PROBE_GIT=maybe')),
+      spy.mock.calls.some((c) => String(c[0]).includes('CODEDEEP_GIT=maybe')),
     ).toBe(true);
   });
 
@@ -165,18 +165,18 @@ describe('loadConfig', () => {
     expect(loadConfig(root).gitWindow).toBe(180);
   });
 
-  it('PROBE_GIT_WINDOW overrides the file gitWindow', () => {
+  it('CODEDEEP_GIT_WINDOW overrides the file gitWindow', () => {
     writeConfig(root, JSON.stringify({ gitWindow: 30 }));
-    vi.stubEnv('PROBE_GIT_WINDOW', '365');
+    vi.stubEnv('CODEDEEP_GIT_WINDOW', '365');
     expect(loadConfig(root).gitWindow).toBe(365);
   });
 
-  it('warns and keeps the default for an invalid PROBE_GIT_WINDOW', () => {
+  it('warns and keeps the default for an invalid CODEDEEP_GIT_WINDOW', () => {
     const spy = silenceStderr();
-    vi.stubEnv('PROBE_GIT_WINDOW', 'soon');
+    vi.stubEnv('CODEDEEP_GIT_WINDOW', 'soon');
     expect(loadConfig(root).gitWindow).toBe(180);
     expect(
-      spy.mock.calls.some((c) => String(c[0]).includes('PROBE_GIT_WINDOW=soon')),
+      spy.mock.calls.some((c) => String(c[0]).includes('CODEDEEP_GIT_WINDOW=soon')),
     ).toBe(true);
   });
 
@@ -214,9 +214,9 @@ describe('loadConfig', () => {
     expect(cfg.exclude).toContain('node_modules');
   });
 
-  it('PROBE_EXCLUDE appends to default + file excludes', () => {
+  it('CODEDEEP_EXCLUDE appends to default + file excludes', () => {
     writeConfig(root, JSON.stringify({ exclude: ['file-pattern/**'] }));
-    vi.stubEnv('PROBE_EXCLUDE', 'foo,bar,baz');
+    vi.stubEnv('CODEDEEP_EXCLUDE', 'foo,bar,baz');
 
     const cfg = loadConfig(root);
 
@@ -227,9 +227,9 @@ describe('loadConfig', () => {
     expect(cfg.exclude).toContain('baz');
   });
 
-  it('PROBE_CACHE_DIR overrides config-file cacheDir', () => {
+  it('CODEDEEP_CACHE_DIR overrides config-file cacheDir', () => {
     writeConfig(root, JSON.stringify({ cacheDir: '/from-file' }));
-    vi.stubEnv('PROBE_CACHE_DIR', '/from-env');
+    vi.stubEnv('CODEDEEP_CACHE_DIR', '/from-env');
 
     const cfg = loadConfig(root);
 
@@ -264,8 +264,8 @@ describe('loadConfig', () => {
     stderr.mockRestore();
   });
 
-  it('empty PROBE_EXCLUDE is treated as no value', () => {
-    vi.stubEnv('PROBE_EXCLUDE', '');
+  it('empty CODEDEEP_EXCLUDE is treated as no value', () => {
+    vi.stubEnv('CODEDEEP_EXCLUDE', '');
 
     const cfg = loadConfig(root);
 
@@ -338,21 +338,21 @@ describe('loadConfig', () => {
     expect(cfg.exclude).toEqual(EXPECTED_DEFAULT_EXCLUDES);
   });
 
-  it('empty PROBE_CACHE_DIR falls back to file or default', () => {
+  it('empty CODEDEEP_CACHE_DIR falls back to file or default', () => {
     writeConfig(root, JSON.stringify({ cacheDir: '/from-file' }));
-    vi.stubEnv('PROBE_CACHE_DIR', '');
+    vi.stubEnv('CODEDEEP_CACHE_DIR', '');
 
     const cfg = loadConfig(root);
 
     expect(cfg.cacheDir).toBe(resolve('/from-file'));
   });
 
-  it('whitespace-only PROBE_CACHE_DIR falls back to default', () => {
-    vi.stubEnv('PROBE_CACHE_DIR', '   ');
+  it('whitespace-only CODEDEEP_CACHE_DIR falls back to default', () => {
+    vi.stubEnv('CODEDEEP_CACHE_DIR', '   ');
 
     const cfg = loadConfig(root);
 
-    expect(cfg.cacheDir).toBe(resolve(root, '.probe', 'cache'));
+    expect(cfg.cacheDir).toBe(resolve(root, '.codedeep', 'cache'));
   });
 
   it('empty cacheDir in config file falls back to default', () => {
@@ -360,41 +360,41 @@ describe('loadConfig', () => {
 
     const cfg = loadConfig(root);
 
-    expect(cfg.cacheDir).toBe(resolve(root, '.probe', 'cache'));
+    expect(cfg.cacheDir).toBe(resolve(root, '.codedeep', 'cache'));
   });
 
-  it('PROBE_CACHE_DIR with surrounding whitespace is trimmed', () => {
-    vi.stubEnv('PROBE_CACHE_DIR', '  /custom/cache  ');
+  it('CODEDEEP_CACHE_DIR with surrounding whitespace is trimmed', () => {
+    vi.stubEnv('CODEDEEP_CACHE_DIR', '  /custom/cache  ');
 
     const cfg = loadConfig(root);
 
     expect(cfg.cacheDir).toBe(resolve('/custom/cache'));
   });
 
-  it('PROBE_CACHE_DIR inside projectRoot is added to the exclude list', () => {
-    vi.stubEnv('PROBE_CACHE_DIR', 'cache');
+  it('CODEDEEP_CACHE_DIR inside projectRoot is added to the exclude list', () => {
+    vi.stubEnv('CODEDEEP_CACHE_DIR', 'cache');
     const cfg = loadConfig(root);
     expect(cfg.exclude).toContain('cache');
     expect(cfg.exclude).toContain('cache/**');
   });
 
   it('nested in-project cacheDir produces both literal and /** patterns', () => {
-    vi.stubEnv('PROBE_CACHE_DIR', 'tmp/probe-cache');
+    vi.stubEnv('CODEDEEP_CACHE_DIR', 'tmp/codedeep-cache');
     const cfg = loadConfig(root);
-    expect(cfg.exclude).toContain('tmp/probe-cache');
-    expect(cfg.exclude).toContain('tmp/probe-cache/**');
+    expect(cfg.exclude).toContain('tmp/codedeep-cache');
+    expect(cfg.exclude).toContain('tmp/codedeep-cache/**');
   });
 
   it('outside-root cacheDir does not pollute the exclude list', () => {
-    vi.stubEnv('PROBE_CACHE_DIR', '/tmp/elsewhere');
+    vi.stubEnv('CODEDEEP_CACHE_DIR', '/tmp/elsewhere');
     const cfg = loadConfig(root);
     expect(cfg.exclude).not.toContain('/tmp/elsewhere');
     expect(cfg.exclude).not.toContain('/tmp/elsewhere/**');
     expect(cfg.exclude.filter((e) => e.startsWith('/'))).toEqual([]);
   });
 
-  it('throws when PROBE_CACHE_DIR resolves to projectRoot', () => {
-    vi.stubEnv('PROBE_CACHE_DIR', '.');
+  it('throws when CODEDEEP_CACHE_DIR resolves to projectRoot', () => {
+    vi.stubEnv('CODEDEEP_CACHE_DIR', '.');
     expect(() => loadConfig(root)).toThrow(/resolves to the project root/);
   });
 
@@ -409,7 +409,7 @@ describe('resolveCacheDir', () => {
   let createdFallbacks: string[] = [];
 
   beforeEach(() => {
-    root = makeProjectDir('probe-resolvecache-');
+    root = makeProjectDir('codedeep-resolvecache-');
     createdFallbacks = [];
   });
 
@@ -432,21 +432,21 @@ describe('resolveCacheDir', () => {
     const expected = join(
       homedir(),
       '.cache',
-      'probe',
+      'codedeep',
       createHash('sha1').update(resolve(root)).digest('hex').slice(0, 16),
     );
     expect(fallbackCacheDir(resolve(root))).toBe(expected);
   });
 
   it.skipIf(skipOnWindows)(
-    'falls back to ~/.cache/probe/<hash>/ when the default path is not writable',
+    'falls back to ~/.cache/codedeep/<hash>/ when the default path is not writable',
     async () => {
-      const probeDir = join(root, '.probe');
-      mkdirSync(probeDir, { recursive: true });
+      const codedeepDir = join(root, '.codedeep');
+      mkdirSync(codedeepDir, { recursive: true });
       silenceStderr();
 
       // Read+execute but NOT write — mkdir of cache/ subdir will fail.
-      await withChmod(probeDir, 0o500, async () => {
+      await withChmod(codedeepDir, 0o500, async () => {
         const cfg = loadConfig(root);
         expect(cfg.cacheDir).toBe(defaultCacheDir(resolve(root)));
 
@@ -461,11 +461,11 @@ describe('resolveCacheDir', () => {
   );
 
   it.skipIf(skipOnWindows)(
-    'throws when an explicit PROBE_CACHE_DIR override is not writable',
+    'throws when an explicit CODEDEEP_CACHE_DIR override is not writable',
     async () => {
       const blocked = join(root, 'blocked');
       mkdirSync(blocked, { recursive: true });
-      vi.stubEnv('PROBE_CACHE_DIR', join(blocked, 'cache'));
+      vi.stubEnv('CODEDEEP_CACHE_DIR', join(blocked, 'cache'));
       silenceStderr();
 
       await withChmod(blocked, 0o500, async () => {
@@ -479,11 +479,11 @@ describe('resolveCacheDir', () => {
 
   it('rethrows non-permission errors unchanged for explicit overrides', async () => {
     // Pointing cacheDir at a path under an existing FILE makes mkdir fail
-    // with ENOTDIR. For an explicit PROBE_CACHE_DIR override, this must
+    // with ENOTDIR. For an explicit CODEDEEP_CACHE_DIR override, this must
     // surface so the user notices their misconfig — not silently fall back.
     const blockingFile = join(root, 'not-a-dir');
     writeFileSync(blockingFile, 'x', 'utf8');
-    vi.stubEnv('PROBE_CACHE_DIR', join(blockingFile, 'cache'));
+    vi.stubEnv('CODEDEEP_CACHE_DIR', join(blockingFile, 'cache'));
 
     const cfg = loadConfig(root);
     await expect(resolveCacheDir(cfg)).rejects.toMatchObject({
@@ -491,10 +491,10 @@ describe('resolveCacheDir', () => {
     });
   });
 
-  it('falls back when the default .probe path is a regular file (ENOTDIR)', async () => {
-    // `.probe` as a regular file produces ENOTDIR; default-path policy
+  it('falls back when the default .codedeep path is a regular file (ENOTDIR)', async () => {
+    // `.symbols` as a regular file produces ENOTDIR; default-path policy
     // is to fall back rather than die.
-    writeFileSync(join(root, '.probe'), 'i-am-a-file', 'utf8');
+    writeFileSync(join(root, '.codedeep'), 'i-am-a-file', 'utf8');
     silenceStderr();
 
     const cfg = loadConfig(root);
@@ -555,15 +555,15 @@ describe('resolveCacheDir', () => {
   it.skipIf(skipOnWindows)(
     'wraps the error when the fallback path exists but is not writable',
     async () => {
-      const probeDir = join(root, '.probe');
-      mkdirSync(probeDir, { recursive: true });
+      const codedeepDir = join(root, '.codedeep');
+      mkdirSync(codedeepDir, { recursive: true });
 
       const fallback = fallbackCacheDir(resolve(root));
       mkdirSync(fallback, { recursive: true });
       createdFallbacks.push(fallback);
       silenceStderr();
 
-      await withChmod(probeDir, 0o500, async () => {
+      await withChmod(codedeepDir, 0o500, async () => {
         await withChmod(fallback, 0o500, async () => {
           const cfg = loadConfig(root);
           await expect(resolveCacheDir(cfg)).rejects.toMatchObject({

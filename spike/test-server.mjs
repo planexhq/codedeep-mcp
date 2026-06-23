@@ -84,10 +84,10 @@ try {
   const initRes = await send("initialize", {
     protocolVersion: "2025-06-18",
     capabilities: {},
-    clientInfo: { name: "probe-spike-tester", version: "0.0.0" },
+    clientInfo: { name: "codedeep-spike-tester", version: "0.0.0" },
   });
   assert(initRes.result, "initialize: no result");
-  assert(initRes.result.serverInfo?.name === "probe-mcp-spike", "initialize: wrong server name");
+  assert(initRes.result.serverInfo?.name === "codedeep-mcp-spike", "initialize: wrong server name");
   process.stderr.write(`[test] initialize OK — server=${initRes.result.serverInfo.name}@${initRes.result.serverInfo.version}\n`);
 
   // 2. notifications/initialized

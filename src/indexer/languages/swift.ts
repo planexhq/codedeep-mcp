@@ -188,7 +188,7 @@ const SWIFT_IGNORED_MEMBER_CALLEES: ReadonlySet<string> = new Set([
 // precedent of pinning the community tool rather than a closed analyzer). Each
 // node here adds +1: `if`/`else if` (if_statement), the three loops, `guard`, each
 // `catch_block`, and EVERY switch case INCL. `default` (switch_entry covers both).
-// SwiftLint does NOT count `&&`/`||`, ternary, or `??` — so Swift is the only Probe
+// SwiftLint does NOT count `&&`/`||`, ternary, or `??` — so Swift is the only codedeep-mcp
 // language without cyclomatic booleans (cognitive still counts them). A `fallthrough`
 // subtracts 1 (cancelling the case it falls through from) via `cyclomaticDecrement`
 // at the call site. Nested funcs are skipped (SWIFT_SKIP_TYPES); closures

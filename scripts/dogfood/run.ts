@@ -14,7 +14,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { initParser } from '../../src/indexer/parser.js';
-import { createEnv, isolateProbeEnv, type HarnessEnv } from './harness-env.js';
+import { createEnv, isolateCodedeepEnv, type HarnessEnv } from './harness-env.js';
 import { indexWithTiming, timeWarmReload } from './index-and-time.js';
 import { selectInputs, type Selection } from './input-selection.js';
 import { fileSliceOracle } from './oracles/file-slice.js';
@@ -24,7 +24,7 @@ import { resolvedEdgeOracle } from './oracles/resolved-edge.js';
 import { ripgrepCallerOracle } from './oracles/ripgrep.js';
 import { symbolSanityOracle } from './oracles/symbol-sanity.js';
 import { rgCountLines } from './oracles/exec.js';
-import { fetchRepo, probeMcpCommit } from './repo-fetch.js';
+import { fetchRepo, codedeepMcpCommit } from './repo-fetch.js';
 import { writeReport } from './report.js';
 import { REPOS, reposByName, type RepoSpec } from './repos.js';
 import { runFindReferencesSuite } from './runners/find-references.js';
@@ -139,7 +139,7 @@ function detectGaps(
   if (probeOnly.length) gaps.push(`🟠 P1: ${probeOnly.length} find_references caller set(s) name files ripgrep never sees (possible false-positive callers)`);
 
   const blind = oracles.filter(
-    (o) => o.oracle === 'ripgrep' && o.data && (o.data as { probe?: number }).probe === 0 && ((o.data as { rg?: number }).rg ?? 0) >= 5,
+    (o) => o.oracle === 'ripgrep' && o.data && (o.data as { probe?: number }).symbols === 0 && ((o.data as { rg?: number }).rg ?? 0) >= 5,
   );
   if (blind.length) {
     gaps.push(
@@ -314,7 +314,7 @@ function detectGaps(
 }
 
 async function runOneRepo(repo: RepoSpec, cli: Cli): Promise<RepoResult> {
-  const restore = isolateProbeEnv();
+  const restore = isolateCodedeepEnv();
   try {
     console.error(`\n[${repo.name}] fetching…`);
     const { dir, commit } = fetchRepo(repo, cli.cacheRoot);
@@ -410,16 +410,16 @@ async function runOneRepo(repo: RepoSpec, cli: Cli): Promise<RepoResult> {
 // real repo. Needs `dist/` built.
 async function runProtocolSmoke(repoDir: string, scratch: string): Promise<void> {
   console.error(`\n[smoke] spawning node dist/index.js (cwd=${repoDir})…`);
-  // Strip ALL ambient PROBE_* vars (not just the three we set) — a shell
-  // PROBE_EXCLUDE would otherwise gut the spawned server's index, same
-  // hazard isolateProbeEnv() guards the in-process path against.
+  // Strip ALL ambient CODEDEEP_* vars (not just the three we set) — a shell
+  // CODEDEEP_EXCLUDE would otherwise gut the spawned server's index, same
+  // hazard isolateCodedeepEnv() guards the in-process path against.
   const childEnv: NodeJS.ProcessEnv = { ...process.env };
   for (const k of Object.keys(childEnv)) {
-    if (k.startsWith('PROBE_')) delete childEnv[k];
+    if (k.startsWith('CODEDEEP_')) delete childEnv[k];
   }
-  childEnv.PROBE_CACHE_DIR = scratch;
-  childEnv.PROBE_WATCH = '0';
-  childEnv.PROBE_GIT = '0';
+  childEnv.CODEDEEP_CACHE_DIR = scratch;
+  childEnv.CODEDEEP_WATCH = '0';
+  childEnv.CODEDEEP_GIT = '0';
   const child = spawn('node', [join(REPO_ROOT, 'dist', 'index.js')], {
     cwd: repoDir,
     env: childEnv,
@@ -481,7 +481,7 @@ async function runProtocolSmoke(repoDir: string, scratch: string): Promise<void>
 async function main(): Promise<void> {
   const cli = parseCli(process.argv.slice(2));
   console.error(
-    `probe-mcp dogfood: ${cli.repos.length} repo(s), seed=${cli.seed}, warm=${cli.warm}` +
+    `codedeep-mcp dogfood: ${cli.repos.length} repo(s), seed=${cli.seed}, warm=${cli.warm}` +
       (cli.smoke ? `, smoke=${cli.smoke}` : ''),
   );
   await initParser();
@@ -512,7 +512,7 @@ async function main(): Promise<void> {
     finishedAt: new Date().toISOString(),
     seed: cli.seed,
     node: process.version,
-    probeMcpCommit: probeMcpCommit(REPO_ROOT),
+    codedeepMcpCommit: codedeepMcpCommit(REPO_ROOT),
     cleanCache: true,
     repos,
   };
