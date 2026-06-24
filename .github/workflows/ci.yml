@@ -1,4 +1,4 @@
-# Test matrix across the three platforms probe-mcp ships to. npm ci runs
+# Test matrix across the three platforms codedeep-mcp ships to. npm ci runs
 # the prepare lifecycle (tsc build + grammar copy from the
 # @repomix/tree-sitter-wasms devDep into the gitignored grammars/ dir),
 # so no extra setup precedes `npm test`. ~16 tests self-skip on Windows

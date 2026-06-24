@@ -84,39 +84,46 @@ cross-file edges today are AST name-matches.
 
 ## Example
 
-```
+````
 > find_symbol({ name: "authenticate" })
 
 src/auth/middleware.ts:42-67 | function | exported
 async function authenticate(req: Request, res: Response, next: NextFunction): Promise<void>
-/** Validates the JWT token and attaches user to request */
+Validates the JWT token and attaches user to request
 References: ~5
-Complexity: cyc 3 / cog 1
+Fan-out: 2
+Complexity: cyc 3 / cog 1 [structural]
 
 > get_context({ file: "src/auth/middleware.ts", symbol: "authenticate" })
 
-## Symbol: authenticate
 src/auth/middleware.ts:42-67 | function | exported
+async function authenticate(req: Request, res: Response, next: NextFunction): Promise<void>
+Validates the JWT token and attaches user to request
 
+### Body
+```typescript
 async function authenticate(req: Request, res: Response, next: NextFunction): Promise<void> {
   const token = extractToken(req);
   const payload = verify(token);
   req.user = payload as User;
   next();
 }
+```
 
-## Callers (2 structural)
-- src/routes/api.ts:67         handleRequest()        [structural]
-- src/routes/webhook.ts:23     verifyWebhook()        [structural]
+### Callers
+- src/routes/api.ts:67 — handleRequest() [structural]
+- src/routes/webhook.ts:23 — verifyWebhook() [structural]
 
-## Imports
+(get_context also emits ### Callees and ### Coupling sections here, omitted for brevity)
+
+### Imports
 - jsonwebtoken: verify, decode
 - ./types: User, AuthToken
 
-## Co-change Partners (behavioral coupling from git)
-- src/auth/types.ts (78% confidence, 9 shared commits)
-- tests/auth.test.ts (64% confidence, 7 shared commits)
-```
+### Co-change Partners (2 behavioral)
+- src/auth/types.ts  78% confidence (9 shared commits)
+- tests/auth.test.ts  64% confidence (7 shared commits)
+````
 
 ## Supported Languages
 

@@ -1,7 +1,20 @@
 {
   "name": "codedeep-mcp",
   "version": "0.1.0",
-  "description": "MCP server for structural codebase exploration",
+  "description": "MCP server that gives AI coding agents structural understanding of a codebase — symbols, references, blast radius, cyclomatic/cognitive complexity, and behavioral-git signals across 14 languages (tree-sitter).",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "tree-sitter",
+    "code-intelligence",
+    "code-analysis",
+    "static-analysis",
+    "ast",
+    "cyclomatic-complexity",
+    "cognitive-complexity",
+    "ai-agents",
+    "developer-tools"
+  ],
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -12,6 +25,14 @@
     "dist/",
     "grammars/"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/planexhq/codedeep-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/planexhq/codedeep-mcp/issues"
+  },
+  "homepage": "https://github.com/planexhq/codedeep-mcp#readme",
   "engines": {
     "node": ">=20.0.0"
   },
