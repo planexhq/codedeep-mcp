@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/planexhq/codedeep-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/planexhq/codedeep-mcp/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/codedeep-mcp.svg)](https://www.npmjs.com/package/codedeep-mcp)
+[![MCP spec](https://img.shields.io/badge/MCP_spec-2025--11--25-0a7ea4.svg)](https://modelcontextprotocol.io/specification/2025-11-25)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](https://nodejs.org)
 
