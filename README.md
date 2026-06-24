@@ -1,5 +1,10 @@
 # codedeep-mcp
 
+[![CI](https://github.com/planexhq/codedeep-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/planexhq/codedeep-mcp/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/codedeep-mcp.svg)](https://www.npmjs.com/package/codedeep-mcp)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](https://nodejs.org)
+
 An MCP server that gives AI coding agents structural understanding of codebases.
 
 **One tool call replaces 5-10 Grep-Read cycles.**
