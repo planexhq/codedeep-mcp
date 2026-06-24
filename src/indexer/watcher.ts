@@ -14,7 +14,7 @@
 // manage, and saves are event-driven (no disk writes when idle).
 // CodeIndex.save is mutexed and atomic, so per-flush saves are safe.
 
-import { watch as fsWatch } from 'node:fs';
+import { realpathSync, watch as fsWatch } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -36,8 +36,34 @@ export type WatchFactory = (
   onError: (err: unknown) => void,
 ) => WatchBackend;
 
+// On Windows, fs.watch (ReadDirectoryChangesW) aborts the whole PROCESS with a
+// libuv assertion (`!_wcsnicmp(filename, dir, dirlen)`, src/win/fs-event.c)
+// when the watched directory is opened through a non-canonical path — most
+// commonly an 8.3 short name like C:\Users\ADMINI~1\... that os.tmpdir() can
+// hand back, but any case/junction-spelling mismatch trips it: libuv compares
+// the kernel-reported filename against the watched-dir prefix and asserts on
+// the difference. Resolving to the real on-disk path first keeps the two
+// consistent. POSIX has no such bug, so leave its paths (and symlinks) alone.
+export function canonicalWatchPath(dir: string): string {
+  if (process.platform !== 'win32') return dir;
+  try {
+    return realpathSync.native(dir);
+  } catch (err) {
+    // MUST NOT fall back to the raw `dir` here: if it is an 8.3 short name
+    // (or case/junction mismatch) and is still PRESENT — which a transient
+    // realpath failure like EMFILE/EACCES leaves it — fs.watch SUCCEEDS, then
+    // aborts the whole process via the libuv `!_wcsnicmp` assertion on the
+    // first event. That abort bypasses the start() try/catch (it is not a JS
+    // throw) and kills the stdio server. Throwing instead lets start() degrade
+    // to "no live updates", which is strictly better than a process abort.
+    // (When the dir is genuinely gone, fs.watch would have failed catchably
+    // anyway — so nothing is lost in that case either.)
+    throw new Error(`cannot canonicalize watch path ${dir}: ${errMsg(err)}`);
+  }
+}
+
 const defaultWatchFactory: WatchFactory = (root, onEvent, onError) => {
-  const w = fsWatch(root, { recursive: true });
+  const w = fsWatch(canonicalWatchPath(root), { recursive: true });
   w.on('change', onEvent);
   w.on('error', onError);
   // The stdio transport governs process lifetime. Without unref, the

@@ -23,6 +23,7 @@ import { CodeIndex } from '../../src/indexer/code-index.js';
 import * as extractorModule from '../../src/indexer/extractor.js';
 import * as parserModule from '../../src/indexer/parser.js';
 import { Indexer } from '../../src/indexer/pipeline.js';
+import { toPosix } from '../../src/indexer/scanner.js';
 import type { CodedeepConfig } from '../../src/types.js';
 import {
   makeConfig,
@@ -332,7 +333,10 @@ describe('Indexer concurrency and resilience', () => {
     const stderr = silenceStderr();
     const realRead = fs.readFile;
     vi.spyOn(fs, 'readFile').mockImplementation((path, ...rest) => {
-      if (typeof path === 'string' && path.endsWith('src/b.ts')) {
+      // The indexer joins paths with the platform separator, so on Windows
+      // the absolute path ends with `src\b.ts` — normalize via the canonical
+      // toPosix helper before matching.
+      if (typeof path === 'string' && toPosix(path).endsWith('src/b.ts')) {
         return Promise.reject(
           Object.assign(new Error('forced read failure'), { code: 'EACCES' }),
         );

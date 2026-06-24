@@ -200,7 +200,7 @@ describe('loadConfig', () => {
     expect(cfg.languages).toEqual(['go', 'rust']);
     expect(cfg.maxFiles).toBe(42);
     expect(cfg.maxFileSize).toBe(1024);
-    expect(cfg.cacheDir).toBe(resolve('/custom/cache'));
+    expect(cfg.cacheDir).toBe(resolve(root, '/custom/cache'));
   });
 
   it('partial config — only maxFiles set; other fields use defaults', () => {
@@ -233,7 +233,7 @@ describe('loadConfig', () => {
 
     const cfg = loadConfig(root);
 
-    expect(cfg.cacheDir).toBe(resolve('/from-env'));
+    expect(cfg.cacheDir).toBe(resolve(root, '/from-env'));
   });
 
   it('returns a frozen config; arrays are also frozen', () => {
@@ -344,7 +344,7 @@ describe('loadConfig', () => {
 
     const cfg = loadConfig(root);
 
-    expect(cfg.cacheDir).toBe(resolve('/from-file'));
+    expect(cfg.cacheDir).toBe(resolve(root, '/from-file'));
   });
 
   it('whitespace-only CODEDEEP_CACHE_DIR falls back to default', () => {
@@ -368,7 +368,7 @@ describe('loadConfig', () => {
 
     const cfg = loadConfig(root);
 
-    expect(cfg.cacheDir).toBe(resolve('/custom/cache'));
+    expect(cfg.cacheDir).toBe(resolve(root, '/custom/cache'));
   });
 
   it('CODEDEEP_CACHE_DIR inside projectRoot is added to the exclude list', () => {

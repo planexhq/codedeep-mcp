@@ -15,6 +15,7 @@ import { watch as fsWatch } from 'node:fs';
 import { dirname, basename } from 'node:path';
 
 import type { WatchBackend, WatchFactory } from '../indexer/watcher.js';
+import { canonicalWatchPath } from '../indexer/watcher.js';
 import { errMsg, log } from '../logger.js';
 
 // Same backend/factory shape as the source watcher — single-sourced from
@@ -24,7 +25,9 @@ export type HeadWatchBackend = WatchBackend;
 export type HeadWatchFactory = WatchFactory;
 
 const defaultFactory: HeadWatchFactory = (dir, onEvent, onError) => {
-  const w = fsWatch(dir, { recursive: false });
+  // canonicalWatchPath: avoid the Windows 8.3-short-name libuv abort. See
+  // its definition in watcher.ts for the full failure mode.
+  const w = fsWatch(canonicalWatchPath(dir), { recursive: false });
   w.on('change', onEvent);
   w.on('error', onError);
   // The stdio transport governs process lifetime, never this watcher.

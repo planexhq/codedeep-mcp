@@ -1,13 +1,16 @@
 // get_context Body oracle — the one EXACT check. The Body section renders
-// content.split('\n').slice(startLine-1, endLine).join('\n') of the real
-// file. We independently re-read and re-slice; the result must appear
-// verbatim inside the output. A mismatch means disk-vs-index drift or
-// render-pipeline corruption (wrong file read, dropped lines, truncation
-// cutting the body). Coverage limitation: the slice formula here is
-// deliberately IDENTICAL to renderBody's, so a systematic off-by-one in
-// that shared formula would pass — this oracle checks the pipeline, not
-// the formula. (Body is never dropped by the token budget, so it's always
-// fully present when the file was readable.)
+// content.split('\n').slice(startLine-1, endLine), strips each line's
+// trailing CR, then joins on '\n'. We independently re-read and re-slice
+// the SAME way; the result must appear verbatim inside the output. A
+// mismatch means disk-vs-index drift or render-pipeline corruption (wrong
+// file read, dropped lines, truncation cutting the body). Coverage
+// limitation: the slice formula here is deliberately IDENTICAL to
+// renderBody's, so a systematic off-by-one in that shared formula would
+// pass — this oracle checks the pipeline, not the formula. The trailing-CR
+// strip MUST mirror renderBody: without it a CRLF-authored source slices to
+// '\r'-laden lines that renderBody no longer emits, fabricating a mismatch.
+// (Body is never dropped by the token budget, so it's always fully present
+// when the file was readable.)
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -61,8 +64,14 @@ export function fileSliceOracle(
   const lines = content.split('\n');
   const start = Math.max(0, startLine - 1);
   const end = Math.min(lines.length, endLine);
-  const slice = lines.slice(start, end).join('\n');
+  // Mirror renderBody's per-line trailing-CR strip (see header comment).
+  const sliceLines = lines
+    .slice(start, end)
+    .map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
+  const slice = sliceLines.join('\n');
   const contained = outputText.includes(slice);
+  // A trailing-CR strip already ran, so a surviving '\r' is an embedded or
+  // lone (non-CRLF) carriage return, never a normal CRLF line ending.
   const hasCR = slice.includes('\r');
   if (!contained) {
     return {
@@ -70,7 +79,9 @@ export function fileSliceOracle(
       target,
       verdict: 'mismatch',
       detail: 'rendered Body does not match the file slice at the symbol range (line drift?)',
-      data: { sliceFirstLine: lines[start] ?? '', sliceLen: slice.length },
+      // Report the first line of the COMPARED (stripped) slice, not the raw
+      // line — otherwise a CRLF source shows a phantom '\r' the check never used.
+      data: { sliceFirstLine: sliceLines[0] ?? '', sliceLen: slice.length },
     };
   }
   return {
@@ -78,7 +89,7 @@ export function fileSliceOracle(
     target,
     verdict: hasCR ? 'info' : 'clean',
     detail: hasCR
-      ? 'Body matches the file slice but carries CRLF \\r — stray carriage returns in output'
+      ? 'Body matches the file slice but carries an embedded/lone \\r (non-CRLF carriage return) in output'
       : 'Body matches the file slice exactly',
   };
 }

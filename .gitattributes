@@ -1,0 +1,13 @@
+# Normalize line endings: store text as LF and check it out as LF on every
+# platform. Without this, git-for-windows' default core.autocrlf=true rewrites
+# checked-out files to CRLF, which can leak a stray '\r' into byte-exact test
+# assertions and tool output on the windows-latest CI job.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending normalized.
+*.wasm binary
+*.node binary
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary

@@ -11,7 +11,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { devNull, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { writeTree } from './helpers.js';
@@ -32,11 +32,28 @@ export const gitAvailable: boolean = probeGit();
 // gits too (one dir for the whole test process is fine — it stays empty).
 const HERMETIC_HOME = mkdtempSync(join(tmpdir(), 'probe-git-home-'));
 
+// An empty real file is the portable "no config" sentinel. os.devNull works
+// on POSIX, but git for Windows cannot open `\\.\nul` for GIT_CONFIG_GLOBAL
+// and aborts every invocation with "fatal: unable to access '\\.\nul':
+// Invalid argument" (GIT_CONFIG_SYSTEM is shielded by GIT_CONFIG_NOSYSTEM,
+// but GIT_CONFIG_GLOBAL has no such guard). An empty file is read as zero
+// settings on all platforms.
+const EMPTY_GIT_CONFIG = join(HERMETIC_HOME, 'empty.gitconfig');
+writeFileSync(EMPTY_GIT_CONFIG, '');
+// Read-only: this one file is shared as GIT_CONFIG_GLOBAL/SYSTEM by every git()
+// call in the process. devNull silently discarded writes; a plain file would
+// PERSIST a stray `git config --global ...` and leak it into later calls
+// (order-dependent flakiness). Read-only makes such a write fail loudly so the
+// leak surfaces — git only ever reads this file in the current fixtures. (Best
+// effort: enforced on Windows regardless of privilege and for any non-root
+// POSIX owner; root bypasses the bits, but no fixture writes global config.)
+chmodSync(EMPTY_GIT_CONFIG, 0o444);
+
 const HERMETIC_ENV: Record<string, string> = {
   HOME: HERMETIC_HOME,
   XDG_CONFIG_HOME: HERMETIC_HOME,
-  GIT_CONFIG_GLOBAL: devNull,
-  GIT_CONFIG_SYSTEM: devNull,
+  GIT_CONFIG_GLOBAL: EMPTY_GIT_CONFIG,
+  GIT_CONFIG_SYSTEM: EMPTY_GIT_CONFIG,
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_AUTHOR_NAME: 'Probe Test',
   GIT_AUTHOR_EMAIL: 'probe@test.invalid',

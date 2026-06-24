@@ -233,8 +233,8 @@ describe('runSearchStructure — pattern mode', () => {
   // Lines:            1                 2                  3  4 (fn start)        5                       6                      7
   const ROUTES_SRC = `import './cors';\napp.use(cors());\n\nexport function setupRoutes(app) {\n  app.use(errorHandler);\n  app.use(requestLogger);\n}\n`;
 
-  function indexRoutesFixture(idx: CodeIndex): void {
-    writeTree(tmpRoot, { 'src/routes.ts': ROUTES_SRC });
+  function indexRoutesFixture(idx: CodeIndex, src: string = ROUTES_SRC): void {
+    writeTree(tmpRoot, { 'src/routes.ts': src });
     idx.addFile(
       makeFileInfo('typescript', 'src/routes.ts'),
       [
@@ -266,6 +266,21 @@ describe('runSearchStructure — pattern mode', () => {
     expect(out).toContain('match :6  app.use(requestLogger)');
     expect(out).toContain('src/routes.ts (module-level)');
     expect(out).toContain('match :2  app.use(cors())');
+  });
+
+  it('strips the carriage return from snippets of CRLF-authored source', async () => {
+    // A match node spanning multiple CRLF lines: the rendered snippet takes
+    // only the first line, which must not retain the '\r' of the '\r\n' pair.
+    // writeTree writes raw bytes, so the CRLF survives to the reader.
+    const idx = new CodeIndex(tmpRoot);
+    indexRoutesFixture(idx, ROUTES_SRC.replace(/\n/g, '\r\n'));
+
+    const out = text(
+      await runSearchStructure({ pattern: 'function $F($$$P) { $$$B }' }, makeDeps(idx)),
+    );
+    expect(out).toContain('match :4  function setupRoutes(app) {');
+    // The regression guard: without the CR strip the line above keeps a '\r'.
+    expect(out).not.toContain('\r');
   });
 
   it('truncates at the limit with a note', async () => {

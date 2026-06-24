@@ -337,6 +337,40 @@ describe('runGetContext — symbol mode body extraction', () => {
     expect(text).toContain('### Body\n```typescript\nline two\nline three\nline four\n```');
   });
 
+  it('strips the carriage return from body lines of CRLF-authored source', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    // CRLF line endings (a Windows-saved source file). writeTree writes raw
+    // bytes, so the '\r' survives to the reader. tree-sitter counts '\r\n' as
+    // one row, so the symbol's line range is unchanged — only the rendered
+    // body could leak a stray '\r' onto every line.
+    const source = ['line one', 'line two', 'line three', 'line four', 'line five'].join('\r\n');
+    writeTree(tmpRoot, { 'src/a.ts': source });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [
+        mkSym({
+          name: 'foo',
+          file: 'src/a.ts',
+          signature: 'function foo()',
+          startLine: 2,
+          endLine: 4,
+        }),
+      ],
+      [],
+      [],
+    );
+
+    const result = await runGetContext(
+      { file: 'src/a.ts', symbol: 'foo' },
+      makeDeps(idx),
+    );
+    const text = result.content[0].text;
+
+    expect(text).toContain('### Body\n```typescript\nline two\nline three\nline four\n```');
+    // The regression guard: without the CR strip each body line keeps a '\r'.
+    expect(text).not.toContain('\r');
+  });
+
   it('reports an in-band body error when the file is missing on disk', async () => {
     const idx = new CodeIndex(tmpRoot);
     // No writeTree — the indexed symbol references a file that does not exist.

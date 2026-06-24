@@ -375,8 +375,12 @@ async function scanPattern(
 }
 
 function firstLine(text: string): string {
-  const nl = text.indexOf('\n');
-  const line = nl === -1 ? text : text.slice(0, nl);
+  // First visual line only, line-ending agnostic: cut at the first CR or LF.
+  // A CRLF- or lone-CR-authored source file (common on Windows) would
+  // otherwise leave a stray '\r' on the rendered snippet — slicing at '\n'
+  // alone keeps the '\r' of a '\r\n' pair, and a lone '\r' has no '\n' at all.
+  const end = text.search(/[\r\n]/);
+  const line = end === -1 ? text : text.slice(0, end);
   return line.length > MATCH_TEXT_CAP ? `${line.slice(0, MATCH_TEXT_CAP)}…` : line;
 }
 

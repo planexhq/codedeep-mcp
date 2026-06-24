@@ -266,9 +266,11 @@ describe.skipIf(!gitAvailable)('analyzeLog against real git output', () => {
 
   it('round-trips non-ASCII paths unescaped (core.quotepath=false) and parses real records', async () => {
     makeGitRepo(tmp, [
-      { files: { 'src/héllo.ts': 'a', 'src/aux.ts': 'b' }, message: 'add files' },
+      // `world` (not `aux`): a Windows reserved device name like aux/con/nul
+      // cannot be created as a real file, so git add fails to stat it.
+      { files: { 'src/héllo.ts': 'a', 'src/world.ts': 'b' }, message: 'add files' },
       { files: { 'src/héllo.ts': 'a2' }, message: 'touch héllo' },
-      { files: { 'src/héllo.ts': 'a3', 'src/aux.ts': 'b2' }, message: 'touch both' },
+      { files: { 'src/héllo.ts': 'a3', 'src/world.ts': 'b2' }, message: 'touch both' },
     ]);
     const runner = new GitRunner(tmp);
     const stdout = await runner.run(buildLogArgs(365));
@@ -276,7 +278,7 @@ describe.skipIf(!gitAvailable)('analyzeLog against real git output', () => {
     const result = analyzeLog(stdout, anyIndexed);
     expect(result.commitCount).toBe(3);
     expect(result.counts.get('src/héllo.ts')).toBe(3);
-    expect(result.counts.get('src/aux.ts')).toBe(2);
+    expect(result.counts.get('src/world.ts')).toBe(2);
     // Without quotepath=false this key would be "src/h\303\251llo.ts".
     expect([...result.counts.keys()].some((k) => k.includes('\\303'))).toBe(false);
   });

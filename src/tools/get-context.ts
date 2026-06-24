@@ -324,7 +324,15 @@ async function renderBody(
   const lines = content.split('\n');
   const start = Math.max(0, target.startLine - 1);
   const end = Math.min(lines.length, target.endLine);
-  const slice = lines.slice(start, end).join('\n');
+  // Strip the trailing CR of each CRLF pair so a Windows-authored source file
+  // doesn't leak a stray '\r' onto every rendered body line (the same class of
+  // bug fixed for search_structure's snippet renderer). The split stays on
+  // '\n' to keep line indices aligned with tree-sitter's row numbering, which
+  // treats '\r\n' as a single row — so only a trailing '\r' can remain.
+  const slice = lines
+    .slice(start, end)
+    .map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l))
+    .join('\n');
   return `### Body\n\`\`\`${target.language}\n${slice}\n\`\`\``;
 }
 
