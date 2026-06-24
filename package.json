@@ -17,9 +17,9 @@
   ],
   "license": "MIT",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "dist/index.js",
   "bin": {
-    "codedeep-mcp": "./dist/index.js"
+    "codedeep-mcp": "dist/index.js"
   },
   "files": [
     "dist/",
