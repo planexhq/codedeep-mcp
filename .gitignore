@@ -1,6 +1,5 @@
 node_modules/
 dist/
-dist-spike/
 # Root-anchored: the regenerated grammars/ dir at the repo root is ignored, but
 # vendor/grammars/ (committed source wasms copied from there) must stay tracked.
 /grammars/

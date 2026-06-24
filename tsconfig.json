@@ -12,5 +12,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "dist-spike", "spike", "scripts"]
+  "exclude": ["node_modules", "dist", "scripts"]
 }
