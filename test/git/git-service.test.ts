@@ -112,7 +112,11 @@ beforeEach(() => {
 
 afterEach(() => {
   stderrSpy.mockRestore();
-  rmSync(tmp, { recursive: true, force: true });
+  // Retry on Windows: a real HEAD-watcher's fs.watch handle (or a debounce
+  // timer that re-touches .git/logs) can briefly hold the temp dir open even
+  // after service.close(), so an immediate rmdir hits ENOTEMPTY/EBUSY. The
+  // maxRetries/retryDelay backoff lets the handle release. No-op on POSIX.
+  rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 describe('GitService detection', () => {
