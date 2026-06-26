@@ -34,7 +34,7 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  root = makeProjectDir('probe-watcher-');
+  root = makeProjectDir('codedeep-watcher-');
   config = makeConfig(root);
   // Date is faked alongside the timers so scheduleDebounced's max-wait
   // deadline math follows the fake clock — otherwise a >1s real-time

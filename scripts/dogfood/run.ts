@@ -85,7 +85,7 @@ function parseCli(argv: string[]): Cli {
   return { repos, seed, warm, smoke, cacheRoot, outDir };
 }
 
-// Shared rg counter (oracles/exec.ts) — mirrors probe's exclude set and
+// Shared rg counter (oracles/exec.ts) — mirrors codedeep's exclude set and
 // returns null when rg itself is unusable, so probes skip instead of
 // silently reporting "no declarations" on machines without ripgrep.
 const rgCount = rgCountLines;
@@ -135,15 +135,15 @@ function detectGaps(
   const rt = oracles.find((o) => o.oracle === 'symbol-sanity' && o.target.includes('round-trip') && o.verdict === 'mismatch');
   if (rt) gaps.push(`🔴 P0: re-findability — ${rt.detail}`);
 
-  const probeOnly = oracles.filter((o) => o.oracle === 'ripgrep' && o.verdict === 'suspicious');
-  if (probeOnly.length) gaps.push(`🟠 P1: ${probeOnly.length} find_references caller set(s) name files ripgrep never sees (possible false-positive callers)`);
+  const codedeepOnly = oracles.filter((o) => o.oracle === 'ripgrep' && o.verdict === 'suspicious');
+  if (codedeepOnly.length) gaps.push(`🟠 P1: ${codedeepOnly.length} find_references caller set(s) name files ripgrep never sees (possible false-positive callers)`);
 
   const blind = oracles.filter(
-    (o) => o.oracle === 'ripgrep' && o.data && (o.data as { probe?: number }).symbols === 0 && ((o.data as { rg?: number }).rg ?? 0) >= 5,
+    (o) => o.oracle === 'ripgrep' && o.data && (o.data as { codedeep?: number }).symbols === 0 && ((o.data as { rg?: number }).rg ?? 0) >= 5,
   );
   if (blind.length) {
     gaps.push(
-      `🟠 P1: ${blind.length} top-referenced symbol(s) with 0 probe callers but ripgrep sees the name in ≥5 files — likely chained/member/optional-chaining blind spot`,
+      `🟠 P1: ${blind.length} top-referenced symbol(s) with 0 codedeep callers but ripgrep sees the name in ≥5 files — likely chained/member/optional-chaining blind spot`,
     );
   }
 

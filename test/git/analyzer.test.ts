@@ -255,7 +255,7 @@ describe.skipIf(!gitAvailable)('analyzeLog against real git output', () => {
   let stderrSpy: ReturnType<typeof silenceStderr>;
 
   beforeEach(() => {
-    tmp = makeProjectDir('probe-git-analyzer-');
+    tmp = makeProjectDir('codedeep-git-analyzer-');
     stderrSpy = silenceStderr();
   });
 

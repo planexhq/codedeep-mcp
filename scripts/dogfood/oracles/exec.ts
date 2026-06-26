@@ -40,8 +40,8 @@ export function tryExec(
   }
 }
 
-// Globs mirroring probe's DEFAULT_EXCLUDES (src/config.ts) so rg-based
-// source counts compare against the same file set probe indexes.
+// Globs mirroring codedeep's DEFAULT_EXCLUDES (src/config.ts) so rg-based
+// source counts compare against the same file set codedeep indexes.
 export const RG_CODEDEEP_EXCLUDES: readonly string[] = [
   '!.git',
   '!node_modules',
@@ -62,7 +62,7 @@ export const RG_CODEDEEP_EXCLUDES: readonly string[] = [
 // Sum of per-file match counts for `re` across files matching `glob`.
 // Returns null when rg itself is unusable (not installed, exit 2 parse
 // error) — callers must treat null as "unknown", NOT as zero, or every
-// probe built on this silently evaporates on machines without rg.
+// codedeep built on this silently evaporates on machines without rg.
 export function rgCountLines(
   repoDir: string,
   re: string,

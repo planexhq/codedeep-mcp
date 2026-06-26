@@ -105,7 +105,7 @@ function cfg(overrides: Partial<CodedeepConfig> = {}): CodedeepConfig {
 }
 
 beforeEach(() => {
-  tmp = makeProjectDir('probe-git-service-');
+  tmp = makeProjectDir('codedeep-git-service-');
   cachePath = join(tmp, 'git-service-cache.json');
   stderrSpy = silenceStderr();
 });

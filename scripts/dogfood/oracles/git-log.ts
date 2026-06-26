@@ -1,6 +1,6 @@
-// Behavioral oracle: probe's hotspots and co-change partners come from a
+// Behavioral oracle: codedeep's hotspots and co-change partners come from a
 // git-log analysis; here we re-derive the same signals from raw `git log`
-// and check bounded agreement. probe filters to indexed paths and skips
+// and check bounded agreement. codedeep filters to indexed paths and skips
 // >30-file commits, so we mirror those filters and compare rankings/subsets
 // rather than demanding equality.
 
@@ -19,7 +19,7 @@ interface RawCommit {
 // (core.quotepath would octal-escape non-ASCII paths so they never match
 // index keys; log.showSignature would inject gpg lines this parser would
 // count as file paths) and the same commit cap — without the cap, a
-// >10k-commit window would make the oracle count history probe never saw.
+// >10k-commit window would make the oracle count history codedeep never saw.
 function rawCommits(repoDir: string, windowDays: number): RawCommit[] | null {
   const { stdout, status } = tryExec(
     'git',
@@ -80,25 +80,25 @@ export function gitLogOracle(env: HarnessEnv, repoDir: string): OracleResult[] {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([f]) => f);
   const rawTop15 = new Set(rawRankedIndexed.slice(0, 15));
-  const probeHot = env.index.getHotspots(10);
-  const probeTop5 = probeHot.slice(0, 5).map((h) => h.path);
-  const overlap = probeTop5.filter((p) => rawTop15.has(p));
+  const codedeepHot = env.index.getHotspots(10);
+  const codedeepTop5 = codedeepHot.slice(0, 5).map((h) => h.path);
+  const overlap = codedeepTop5.filter((p) => rawTop15.has(p));
   // Count agreement on the single top hotspot.
-  const topProbe = probeHot[0];
-  const topRaw = topProbe ? counts.get(topProbe.path) ?? 0 : 0;
+  const topCodedeep = codedeepHot[0];
+  const topRaw = topCodedeep ? counts.get(topCodedeep.path) ?? 0 : 0;
   out.push({
     oracle: 'git-log',
     target: 'overview hotspots',
-    verdict: probeHot.length === 0 ? 'info' : overlap.length >= Math.min(3, probeTop5.length) ? 'clean' : 'suspicious',
+    verdict: codedeepHot.length === 0 ? 'info' : overlap.length >= Math.min(3, codedeepTop5.length) ? 'clean' : 'suspicious',
     detail:
-      probeHot.length === 0
-        ? 'probe reported no hotspots'
-        : `${overlap.length}/${probeTop5.length} probe top-5 hotspots are in raw indexed top-15; top hotspot count probe=${topProbe?.commits} raw=${topRaw}`,
-    data: { probeTop5, rawTop10: rawRankedIndexed.slice(0, 10), topCodedeepCount: topProbe?.commits, topRawCount: topRaw },
+      codedeepHot.length === 0
+        ? 'codedeep reported no hotspots'
+        : `${overlap.length}/${codedeepTop5.length} codedeep top-5 hotspots are in raw indexed top-15; top hotspot count codedeep=${topCodedeep?.commits} raw=${topRaw}`,
+    data: { codedeepTop5, rawTop10: rawRankedIndexed.slice(0, 10), topCodedeepCount: topCodedeep?.commits, topRawCount: topRaw },
   });
 
   // --- Co-change of the top hotspot ---
-  const hub = probeHot[0]?.path;
+  const hub = codedeepHot[0]?.path;
   if (hub) {
     const shared = new Map<string, number>();
     for (const c of commits) {
@@ -110,17 +110,17 @@ export function gitLogOracle(env: HarnessEnv, repoDir: string): OracleResult[] {
       }
     }
     const rawPartners = new Set([...shared.entries()].filter(([, n]) => n >= 3).map(([f]) => f));
-    const probePartners = env.index.getCoChanges(hub).map((cc) => (cc.fileA === hub ? cc.fileB : cc.fileA));
-    const notInRaw = probePartners.filter((p) => !rawPartners.has(p));
+    const codedeepPartners = env.index.getCoChanges(hub).map((cc) => (cc.fileA === hub ? cc.fileB : cc.fileA));
+    const notInRaw = codedeepPartners.filter((p) => !rawPartners.has(p));
     out.push({
       oracle: 'git-log',
       target: `co-change partners of ${hub}`,
-      verdict: probePartners.length === 0 ? 'info' : notInRaw.length === 0 ? 'clean' : 'suspicious',
+      verdict: codedeepPartners.length === 0 ? 'info' : notInRaw.length === 0 ? 'clean' : 'suspicious',
       detail:
-        probePartners.length === 0
-          ? 'probe found no co-change partners for the top hotspot'
-          : `${probePartners.length} probe partners; ${notInRaw.length} not in raw (>=3 shared) set of ${rawPartners.size}`,
-      data: { probePartners, notInRaw, rawPartnerCount: rawPartners.size },
+        codedeepPartners.length === 0
+          ? 'codedeep found no co-change partners for the top hotspot'
+          : `${codedeepPartners.length} codedeep partners; ${notInRaw.length} not in raw (>=3 shared) set of ${rawPartners.size}`,
+      data: { codedeepPartners, notInRaw, rawPartnerCount: rawPartners.size },
     });
   }
 

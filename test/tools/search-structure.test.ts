@@ -20,7 +20,7 @@ import {
 let tmpRoot: string;
 
 beforeEach(() => {
-  tmpRoot = makeProjectDir('probe-search-structure-');
+  tmpRoot = makeProjectDir('codedeep-search-structure-');
 });
 
 afterEach(() => {

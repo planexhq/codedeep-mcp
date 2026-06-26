@@ -6,9 +6,9 @@
 //       id collisions (a collided symbol still finds *a* symbol), but two
 //       symbols sharing an id merge their reference graphs (JG1: capped-
 //       signature hashing collided long overloads), so check ids directly.
-//   (3) coarse extraction density — per language, compare probe's symbol
+//   (3) coarse extraction density — per language, compare codedeep's symbol
 //       count against a naive declaration grep. Exactness is impossible
-//       (probe skips nested defs, counts arrow-consts, etc.), so this only
+//       (codedeep skips nested defs, counts arrow-consts, etc.), so this only
 //       flags CATASTROPHIC under-extraction (a grammar that silently
 //       failed) and otherwise reports the ratio as info.
 
@@ -37,25 +37,25 @@ const DECL_RE: Record<string, string> = {
   tsx: '^\\s*(export\\s+)?(default\\s+)?(declare\\s+)?(abstract\\s+)?(async\\s+)?(function|class|interface|type|enum)\\s',
   javascript: '^\\s*(export\\s+)?(default\\s+)?(async\\s+)?(function|class)\\s',
   python: '^\\s*(async\\s+)?(def|class)\\s',
-  // Type declarations only — probe also extracts methods/fields, so the
-  // probe/naive ratio runs well above 1 for Java (info-only, same accepted
+  // Type declarations only — codedeep also extracts methods/fields, so the
+  // codedeep/naive ratio runs well above 1 for Java (info-only, same accepted
   // skew as TS; suspicious fires only on symbols === 0).
   java: '^\\s*((public|protected|private|abstract|final|static|sealed|non-sealed|strictfp)\\s+)*(class|interface|enum|record|@interface)\\s',
-  // Top-level decl keywords only — probe also extracts struct fields and
+  // Top-level decl keywords only — codedeep also extracts struct fields and
   // interface members (one symbol per NAME in grouped specs), so the ratio
   // runs above 1 like Java's; suspicious fires only on symbols === 0.
   go: '^\\s*(func|type|const|var)\\s',
-  // Top-level decl keywords only — probe also extracts struct/union fields,
+  // Top-level decl keywords only — codedeep also extracts struct/union fields,
   // trait/impl members, and recurses modules, so the ratio runs above 1 like
   // Java's/Go's; suspicious fires only on symbols === 0.
   rust: '^\\s*(pub(\\([^)]*\\))?\\s+)?(async\\s+)?(unsafe\\s+)?(fn|struct|enum|trait|impl|type|const|static|union|mod|macro_rules!)\\s',
-  // Top-level decl keywords only — probe also extracts members (methods,
+  // Top-level decl keywords only — codedeep also extracts members (methods,
   // properties, extension methods keyed apart), so the ratio runs above 1
   // like Java's/Go's/Rust's; suspicious fires only on symbols === 0.
   swift: '^\\s*((public|private|internal|fileprivate|open|final|indirect)\\s+)*(class|struct|actor|enum|protocol|extension|func|typealias)\\s',
   // Top-level type/function decl keywords only — `val`/`var` are excluded
-  // because they overwhelmingly match LOCAL variables (which probe never
-  // extracts), which would invert the ratio. probe also extracts members
+  // because they overwhelmingly match LOCAL variables (which codedeep never
+  // extracts), which would invert the ratio. codedeep also extracts members
   // (methods, properties, primary-ctor val/var, extension methods keyed
   // apart), so the ratio runs above 1 like Java's/Go's/Swift's; suspicious
   // fires only on symbols === 0.
@@ -64,11 +64,11 @@ const DECL_RE: Record<string, string> = {
   // excluded (overwhelmingly LOCAL variables/fields, which would invert the
   // ratio), and `import`/`part` directives are excluded. Top-level FUNCTIONS
   // have no leading keyword (they start with a return type) so they're
-  // intentionally unmatched. probe also extracts methods/fields/named-ctors and
+  // intentionally unmatched. codedeep also extracts methods/fields/named-ctors and
   // mixin/extension-merged members, so the ratio runs above 1 like the others;
   // suspicious fires only on symbols === 0.
   dart: '^\\s*(abstract\\s+|base\\s+|final\\s+|sealed\\s+|interface\\s+)*(mixin\\s+)?(class|mixin|extension|enum|typedef)\\s',
-  // Top-level type-decl keywords only — probe also extracts methods/properties/
+  // Top-level type-decl keywords only — codedeep also extracts methods/properties/
   // fields/ctors and extension methods keyed apart, so the ratio runs above 1
   // like Java's/Kotlin's; suspicious fires only on symbols === 0. `record` is
   // matched bare and as `record struct`/`record class`.
@@ -175,7 +175,7 @@ export function symbolSanityOracle(
       verdict,
       detail:
         `${symbols} symbols across ${files} files; naive decl grep ~${naive}` +
-        (ratio !== null ? ` (probe/naive=${ratio.toFixed(2)})` : ''),
+        (ratio !== null ? ` (codedeep/naive=${ratio.toFixed(2)})` : ''),
       data: { symbols, files, naive },
     });
   }

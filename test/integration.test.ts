@@ -78,7 +78,7 @@ const FIXTURE_FILES: Record<FixtureName, readonly string[]> = {
 async function copyFixtureToTmp(
   name: FixtureName,
 ): Promise<string> {
-  const root = makeProjectDir(`probe-int-${name}-`);
+  const root = makeProjectDir(`codedeep-int-${name}-`);
   const tree: Record<string, string> = {};
   for (const rel of FIXTURE_FILES[name]) {
     tree[rel] = await fsp.readFile(join(FIXTURES_ROOT, name, rel), 'utf8');
@@ -263,7 +263,7 @@ describe('integration: end-to-end pipeline + tools', () => {
   });
 
   it('renders cyclomatic + cognitive complexity on find_symbol and get_context', async () => {
-    const proj = makeProjectDir('probe-int-cyclo-');
+    const proj = makeProjectDir('codedeep-int-cyclo-');
     try {
       writeTree(proj, {
         // 3 decision points (two ifs + a ternary) → cyclomatic 4; cognitive 3

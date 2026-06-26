@@ -30,7 +30,7 @@ export const gitAvailable: boolean = probeGit();
 // GIT_CONFIG_GLOBAL is only honored by git >= 2.32; pointing HOME and
 // XDG_CONFIG_HOME at an empty scratch dir seals ~/.gitconfig on older
 // gits too (one dir for the whole test process is fine — it stays empty).
-const HERMETIC_HOME = mkdtempSync(join(tmpdir(), 'probe-git-home-'));
+const HERMETIC_HOME = mkdtempSync(join(tmpdir(), 'codedeep-git-home-'));
 
 // An empty real file is the portable "no config" sentinel. os.devNull works
 // on POSIX, but git for Windows cannot open `\\.\nul` for GIT_CONFIG_GLOBAL
@@ -55,10 +55,10 @@ const HERMETIC_ENV: Record<string, string> = {
   GIT_CONFIG_GLOBAL: EMPTY_GIT_CONFIG,
   GIT_CONFIG_SYSTEM: EMPTY_GIT_CONFIG,
   GIT_CONFIG_NOSYSTEM: '1',
-  GIT_AUTHOR_NAME: 'Probe Test',
-  GIT_AUTHOR_EMAIL: 'probe@test.invalid',
-  GIT_COMMITTER_NAME: 'Probe Test',
-  GIT_COMMITTER_EMAIL: 'probe@test.invalid',
+  GIT_AUTHOR_NAME: 'Codedeep Test',
+  GIT_AUTHOR_EMAIL: 'codedeep@test.invalid',
+  GIT_COMMITTER_NAME: 'Codedeep Test',
+  GIT_COMMITTER_EMAIL: 'codedeep@test.invalid',
 };
 
 export function git(

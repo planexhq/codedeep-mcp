@@ -27,7 +27,7 @@ let tmpRoot: string;
 let cachePath: string;
 
 beforeEach(() => {
-  tmpRoot = makeProjectDir('probe-codeindex-');
+  tmpRoot = makeProjectDir('codedeep-codeindex-');
   cachePath = join(tmpRoot, 'index.json');
 });
 

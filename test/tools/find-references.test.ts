@@ -22,7 +22,7 @@ import {
 let tmpRoot: string;
 
 beforeEach(() => {
-  tmpRoot = makeProjectDir('probe-find-refs-');
+  tmpRoot = makeProjectDir('codedeep-find-refs-');
 });
 
 afterEach(() => {

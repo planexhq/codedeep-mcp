@@ -28,7 +28,7 @@ import {
 let tmpRoot: string;
 
 beforeEach(() => {
-  tmpRoot = makeProjectDir('probe-get-context-');
+  tmpRoot = makeProjectDir('codedeep-get-context-');
 });
 
 afterEach(() => {

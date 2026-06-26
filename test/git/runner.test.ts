@@ -62,7 +62,7 @@ describe('GitRunner', () => {
   let stderrSpy: ReturnType<typeof silenceStderr>;
 
   beforeEach(() => {
-    tmp = makeProjectDir('probe-git-runner-');
+    tmp = makeProjectDir('codedeep-git-runner-');
     stderrSpy = silenceStderr();
   });
 
@@ -199,7 +199,7 @@ describe('GitRunner', () => {
 
 describe.skipIf(!gitAvailable)('config injection prefix', () => {
   it('forces log.showSignature=false for every invocation', async () => {
-    const repo = makeProjectDir('probe-git-sig-');
+    const repo = makeProjectDir('codedeep-git-sig-');
     try {
       makeGitRepo(repo, [{ files: { 'a.txt': 'a' }, message: 'init' }]);
       // A repo-local showSignature=true (stand-in for a user gitconfig)
@@ -222,7 +222,7 @@ describe.skipIf(!gitAvailable)('config injection prefix', () => {
 
 describe.skipIf(skipOnWindows)('spawn-failure classification', () => {
   it('classifies a non-executable binary as "spawn-failed", never "exit", without disabling', async () => {
-    const tmp2 = makeProjectDir('probe-git-spawnfail-');
+    const tmp2 = makeProjectDir('codedeep-git-spawnfail-');
     try {
       const stub = writeStubGit(tmp2, 'exit 0');
       chmodSync(stub, 0o644); // not executable -> spawn EACCES (string code)

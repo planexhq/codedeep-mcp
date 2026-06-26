@@ -74,10 +74,10 @@ describe.skipIf(!gitAvailable)('integration: git enrichment end-to-end', () => {
   async function setupRepo(): Promise<Env> {
     vi.stubEnv('CODEDEEP_EXCLUDE', undefined);
     vi.stubEnv('CODEDEEP_CACHE_DIR', undefined);
-    root = makeProjectDir('probe-int-git-');
+    root = makeProjectDir('codedeep-int-git-');
     const tree = await copyFixture(root);
 
-    // Ignore the probe cache like a real project would — otherwise the
+    // Ignore the codedeep cache like a real project would — otherwise the
     // helper's `git add -A` commits .codedeep/cache/index.json and pollutes
     // branch diffs and co-change pairs.
     makeGitRepo(root, [
@@ -210,7 +210,7 @@ describe.skipIf(!gitAvailable)('integration: git enrichment end-to-end', () => {
   it('negative twin: same fixture without .git -> zero git output anywhere', async () => {
     vi.stubEnv('CODEDEEP_EXCLUDE', undefined);
     vi.stubEnv('CODEDEEP_CACHE_DIR', undefined);
-    root = makeProjectDir('probe-int-nogit-');
+    root = makeProjectDir('codedeep-int-nogit-');
     await copyFixture(root);
     const env = await indexAndStart();
 

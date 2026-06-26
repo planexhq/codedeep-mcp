@@ -196,7 +196,7 @@ export function selectInputs(index: CodeIndex, stats: IndexStats, seed: number):
   const findRefTargets = topReferenced.slice(0, 10);
   // Pattern synthesis needs a plain identifier — private names (#x) and
   // other non-identifier tokens don't parse as a standalone ast-grep
-  // pattern, which probe (correctly) rejects; that's not a probe finding.
+  // pattern, which codedeep (correctly) rejects; that's not a codedeep finding.
   const identRe = /^[A-Za-z_$][\w$]*$/;
   const patternSymbols = topReferenced
     .filter((s) => TS_LANGS.has(s.language) && identRe.test(s.name))

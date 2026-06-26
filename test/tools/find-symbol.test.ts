@@ -12,7 +12,7 @@ import { makeConfig, makeFileInfo, makeProjectDir, mkMemberRef, mkRef, mkSym } f
 let tmpRoot: string;
 
 beforeEach(() => {
-  tmpRoot = makeProjectDir('probe-find-symbol-');
+  tmpRoot = makeProjectDir('codedeep-find-symbol-');
 });
 
 afterEach(() => {

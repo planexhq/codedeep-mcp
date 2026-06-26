@@ -19,7 +19,7 @@ import {
 let tmpRoot: string;
 
 beforeEach(() => {
-  tmpRoot = makeProjectDir('probe-impact-');
+  tmpRoot = makeProjectDir('codedeep-impact-');
 });
 
 afterEach(() => {

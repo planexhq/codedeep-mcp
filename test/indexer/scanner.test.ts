@@ -74,7 +74,7 @@ describe('scanner helpers', () => {
     let root: string;
 
     beforeEach(() => {
-      root = makeProjectDir('probe-isbinary-test-');
+      root = makeProjectDir('codedeep-isbinary-test-');
     });
 
     afterEach(() => {
@@ -110,7 +110,7 @@ describe('scanner helpers', () => {
     const OBJC_ENABLED = new Set(['cpp', 'objc']);
 
     beforeEach(() => {
-      root = makeProjectDir('probe-objc-sniff-test-');
+      root = makeProjectDir('codedeep-objc-sniff-test-');
     });
     afterEach(() => {
       rmSync(root, { recursive: true, force: true });
@@ -239,7 +239,7 @@ describe('scanProject', () => {
   let root: string;
 
   beforeEach(() => {
-    root = makeProjectDir('probe-scanner-test-');
+    root = makeProjectDir('codedeep-scanner-test-');
   });
 
   afterEach(() => {

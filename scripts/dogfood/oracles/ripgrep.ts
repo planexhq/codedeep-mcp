@@ -1,10 +1,10 @@
-// find_references caller oracle. probe's caller list is an APPROXIMATE
+// find_references caller oracle. codedeep's caller list is an APPROXIMATE
 // name match (rows tagged [unverified]); ripgrep with a word-boundary
 // fixed-string search yields a SUPERSET of call sites (it also hits
 // definitions, comments, strings, type positions, homonyms). So the sound
-// relationship is containment: probe's caller FILES should be a subset of
-// rg's. A file probe reports that rg never sees is the red flag worth
-// surfacing; an rg file probe omits is expected (import-scoped out, or a
+// relationship is containment: codedeep's caller FILES should be a subset of
+// rg's. A file codedeep reports that rg never sees is the red flag worth
+// surfacing; an rg file codedeep omits is expected (import-scoped out, or a
 // non-call match) and reported only as info.
 
 import { SHORT_NAME_THRESHOLD } from '../../../src/indexer/code-index.js';
@@ -13,12 +13,12 @@ import type { OracleResult } from '../types.js';
 
 const CODE_GLOB = '*.{ts,tsx,js,jsx,mjs,cjs,py,java,go,rs,swift,kt,kts,dart,cs,php}';
 
-// rg's file set must be a SUPERSET of probe's or containment is unsound:
-// --hidden (probe indexes hidden dirs like trpc's examples/.test) and
-// --no-ignore (probe never reads .gitignore/.ignore/global ignores — a
+// rg's file set must be a SUPERSET of codedeep's or containment is unsound:
+// --hidden (codedeep indexes hidden dirs like trpc's examples/.test) and
+// --no-ignore (codedeep never reads .gitignore/.ignore/global ignores — a
 // tracked-but-ignored source file would otherwise be invisible to rg and
-// flag probe's legitimate caller as a false positive). The shared exclude
-// globs mirror probe's DEFAULT_EXCLUDES so the superset stays fair.
+// flag codedeep's legitimate caller as a false positive). The shared exclude
+// globs mirror codedeep's DEFAULT_EXCLUDES so the superset stays fair.
 function rgFiles(repoDir: string, name: string): string[] | null {
   const args = ['-l', '-w', '-F', name, '--hidden', '--no-ignore', '-g', CODE_GLOB];
   for (const ex of RG_CODEDEEP_EXCLUDES) args.push('-g', ex);
@@ -75,37 +75,37 @@ export function ripgrepCallerOracle(
         : 'output has no ### Callers section',
     };
   }
-  const probeFiles = parseCallerFiles(outputText);
+  const codedeepFiles = parseCallerFiles(outputText);
   const rg = rgFiles(repoDir, symbolName);
   if (rg === null) {
     return { oracle: 'ripgrep', target, verdict: 'skipped', detail: 'ripgrep invocation failed' };
   }
   const rgSet = new Set(rg);
-  const probeOnly = [...probeFiles].filter((f) => !rgSet.has(f));
-  const rgOnly = [...rgSet].filter((f) => !probeFiles.has(f));
+  const codedeepOnly = [...codedeepFiles].filter((f) => !rgSet.has(f));
+  const rgOnly = [...rgSet].filter((f) => !codedeepFiles.has(f));
 
-  if (probeFiles.size === 0) {
+  if (codedeepFiles.size === 0) {
     return {
       oracle: 'ripgrep',
       target,
       verdict: 'info',
-      detail: `probe reported 0 caller files; rg sees the name in ${rgSet.size} file(s)`,
-      data: { probe: 0, rg: rgSet.size, rgOnlySample: rgOnly.slice(0, 8) },
+      detail: `codedeep reported 0 caller files; rg sees the name in ${rgSet.size} file(s)`,
+      data: { codedeep: 0, rg: rgSet.size, rgOnlySample: rgOnly.slice(0, 8) },
     };
   }
-  const verdict = probeOnly.length > 0 ? 'suspicious' : 'clean';
+  const verdict = codedeepOnly.length > 0 ? 'suspicious' : 'clean';
   return {
     oracle: 'ripgrep',
     target,
     verdict,
     detail:
       verdict === 'clean'
-        ? `all ${probeFiles.size} probe caller files are within rg's ${rgSet.size}; ${rgOnly.length} rg-only (expected: non-call/scoped-out)`
-        : `${probeOnly.length} probe caller file(s) NOT seen by rg — investigate`,
+        ? `all ${codedeepFiles.size} codedeep caller files are within rg's ${rgSet.size}; ${rgOnly.length} rg-only (expected: non-call/scoped-out)`
+        : `${codedeepOnly.length} codedeep caller file(s) NOT seen by rg — investigate`,
     data: {
-      probeFiles: probeFiles.size,
+      codedeepFiles: codedeepFiles.size,
       rgFiles: rgSet.size,
-      probeOnly,
+      codedeepOnly,
       rgOnlyCount: rgOnly.length,
     },
   };

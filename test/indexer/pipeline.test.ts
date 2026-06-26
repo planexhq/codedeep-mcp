@@ -47,7 +47,7 @@ beforeAll(async () => {
 beforeEach(() => {
   delete process.env.CODEDEEP_CACHE_DIR;
   delete process.env.CODEDEEP_EXCLUDE;
-  root = makeProjectDir('probe-pipeline-');
+  root = makeProjectDir('codedeep-pipeline-');
   config = makeConfig(root);
   index = new CodeIndex(config.projectRoot);
   indexer = new Indexer(config, index);

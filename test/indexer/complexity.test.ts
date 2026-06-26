@@ -173,7 +173,7 @@ describe('cyclomatic complexity — TypeScript/JS (SonarJS-faithful)', () => {
   });
 });
 
-describe('cyclomatic complexity — Python (Probe convention / radon-grounded)', () => {
+describe('cyclomatic complexity — Python (Codedeep convention / radon-grounded)', () => {
   it('omits the trivial value (=1)', () => {
     expect(py('def f():\n  return 1')).toBeUndefined();
   });
@@ -200,7 +200,7 @@ describe('cyclomatic complexity — Python (Probe convention / radon-grounded)',
     expect(py('def f(a,b,c):\n  return a and b or c')).toBe(3);
   });
 
-  it('+1 per match case, including the wildcard case _ (Probe convention)', () => {
+  it('+1 per match case, including the wildcard case _ (Codedeep convention)', () => {
     expect(
       py('def f(v):\n  match v:\n    case 1:\n      pass\n    case 2:\n      pass\n    case _:\n      pass'),
     ).toBe(4);
@@ -219,7 +219,7 @@ describe('cyclomatic complexity — Python (Probe convention / radon-grounded)',
   });
 });
 
-describe('cyclomatic complexity — Go (Probe convention / gocyclo-grounded)', () => {
+describe('cyclomatic complexity — Go (Codedeep convention / gocyclo-grounded)', () => {
   it('omits the trivial value (=1)', () => {
     expect(go('func f() {}')).toBeUndefined();
   });
@@ -420,7 +420,7 @@ describe('Java — cyclomatic (sonar-java ComplexityVisitor) + cognitive (Cognit
   it('boolean runs linearize in SOURCE order, not by left-spine (sonar flatten)', () => {
     // a && b && (c||d) && (e||f) → operator sequence [&&,&&,||,&&,||] = 4 runs.
     // A left-spine-only flatten would merge the &&s split by the parenthesized ||
-    // and give 3; sonar (and Probe) descend both operands through parens → 4.
+    // and give 3; sonar (and Codedeep) descend both operands through parens → 4.
     const src =
       'boolean m(boolean a,boolean b,boolean c,boolean d,boolean e,boolean f){' +
       ' return a && b && (c || d) && (e || f); }';
@@ -515,7 +515,7 @@ describe('cognitive complexity — TypeScript/JS (SonarJS S3776)', () => {
 
   // --- Per-symbol model: nested functions reported separately (== SonarJS) ---
   it('a nested function/callback does NOT fold into the enclosing symbol', () => {
-    // SonarJS reports outer=1 and inner=3 separately; Probe extracts only `outer`
+    // SonarJS reports outer=1 and inner=3 separately; Codedeep extracts only `outer`
     // and its cognitive (1, just its own if) matches SonarJS's outer report.
     expect(tsCog('function outer(a){ if(a){} function inner(b,c){ if(b){ if(c){} } } }', 'outer').cog).toBe(1);
     // A callback arrow's branches count toward nobody (the cyclomatic gap, mirrored).
@@ -549,15 +549,15 @@ describe('cognitive complexity — TypeScript/JS (SonarJS S3776)', () => {
     expect(bothCx('function f(a){ if(a){} else {} }', 'f', 'javascript', 'src/test.js').cog).toBe(2);
   });
 
-  // DOCUMENTED DIVERGENCE (Probe is whitepaper-correct; the ONLY mismatch in an
+  // DOCUMENTED DIVERGENCE (Codedeep is whitepaper-correct; the ONLY mismatch in an
   // 800-fn ky/zod/recharts/express oracle run): when a ternary's branch is a
   // FUNCTION expression and control flow follows it in the same function, SonarJS
   // OVER-counts via a visitor-ordering artifact — the nesting-node enter-bump hits
   // the enclosing function's nesting counter but the exit-unbump hits the inner
   // function's, permanently elevating the encloser's nesting (compounds per such
-  // ternary). The whitepaper scopes nesting; Probe does too. Here SonarJS reports
-  // 3 (ternary 1 + if at a leaked nesting 1 = 2), Probe the correct 2.
-  it('does NOT reproduce the SonarJS ternary-function-branch nesting leak (Probe = whitepaper)', () => {
+  // ternary). The whitepaper scopes nesting; Codedeep does too. Here SonarJS reports
+  // 3 (ternary 1 + if at a leaked nesting 1 = 2), Codedeep the correct 2.
+  it('does NOT reproduce the SonarJS ternary-function-branch nesting leak (Codedeep = whitepaper)', () => {
     const src = 'function f(x){ const d = { fn: typeof x === "function" ? x : (v) => x(v) }; if (x) {} }';
     expect(tsCog(src).cog).toBe(2); // ternary +1, if +1 — SonarJS's quirk gives 3
   });
@@ -747,7 +747,7 @@ describe('cognitive complexity — Python (sonar-python-faithful)', () => {
   });
 
   it('booleans count EVERYWHERE (bare-call statement, comprehension filter)', () => {
-    // bare expression statement — complexipy skips this; sonar-python (and Probe) count it.
+    // bare expression statement — complexipy skips this; sonar-python (and Codedeep) count it.
     expect(pyCog('def f(a,b):\n  foo(a and b)').cog).toBe(1);
     // comprehension filter — complexipy skips; sonar-python counts.
     expect(pyCog('def f(xs):\n  return [x for x in xs if x and ok(x)]').cog).toBe(1);
@@ -802,7 +802,7 @@ describe('cognitive complexity — Python (sonar-python-faithful)', () => {
 
 // DOCUMENTED DIVERGENCE (the only one vs sonar-python): nested functions, lambdas,
 // and nested classes are EXCLUDED from the enclosing symbol's cognitive number,
-// because PY_SKIP_TYPES is the cognitive boundary and Probe does not extract them as
+// because PY_SKIP_TYPES is the cognitive boundary and Codedeep does not extract them as
 // symbols. sonar-python ROLLS them into the encloser (+1 nesting, with a decorator-
 // wrapper exception). This is the per-symbol model — identical to the Java anon-class
 // and TS-arrow callback under-counts. Magnitude on flask/django: ~2% of functions.
@@ -819,7 +819,7 @@ describe('cognitive complexity — Python nested-scope exclusion (documented div
 
   it('a nested class`s method control flow is excluded from the enclosing function', () => {
     // outer if(1); the nested class method`s if is EXCLUDED (the method isn`t even a
-    // Probe symbol — Probe extracts top-level-class methods only).
+    // Codedeep symbol — Codedeep extracts top-level-class methods only).
     expect(
       pyCog('def f(a):\n  class C:\n    def m(self, b):\n      if b:\n        pass\n  if a:\n    pass').cog,
     ).toBe(1);
@@ -829,7 +829,7 @@ describe('cognitive complexity — Python nested-scope exclusion (documented div
 // Rust — CYCLOMATIC pinned to Mozilla's rust-code-analysis (the rust-code-analysis-cli
 // oracle), COGNITIVE whitepaper/sonar-rust-aligned. Every value below is
 // oracle-confirmed against rust-code-analysis-cli on the same snippet EXCEPT the
-// loop-cognitive cases, where Probe is whitepaper-correct and rust-code-analysis is
+// loop-cognitive cases, where Codedeep is whitepaper-correct and rust-code-analysis is
 // buggy (its cognitive visitor omits `loop` — those rca values are noted inline).
 describe('complexity — Rust (rust-code-analysis cyclomatic / whitepaper cognitive)', () => {
   // --- cyclomatic ---
@@ -963,7 +963,7 @@ describe('complexity — Rust (rust-code-analysis cyclomatic / whitepaper cognit
 // Swift — CYCLOMATIC pinned to SwiftLint's `cyclomatic_complexity` (the only EXACT
 // runnable oracle; its ComplexityVisitor counts if/else-if, the 3 loops, guard, each
 // catch, every switch case incl. default, `fallthrough` −1; it does NOT count
-// `&&`/`||`/ternary/`??`). Every cyc value below is what SwiftLint reports + 1 (Probe's
+// `&&`/`||`/ternary/`??`). Every cyc value below is what SwiftLint reports + 1 (Codedeep's
 // base; SwiftLint's visitor starts at 0). COGNITIVE is SonarSource-whitepaper-aligned
 // (no published cognitive spec for Swift — no tool oracle; values hand-computed from the
 // whitepaper). Each `it` notes the derivation.
@@ -1038,7 +1038,7 @@ describe('cyclomatic complexity — Swift (SwiftLint cyclomatic_complexity)', ()
 
   it('all method-kind decls (func/method/init/deinit/subscript) ARE measured; computed properties are NOT', () => {
     // init + method + subscript + deinit are all 'method'-kind → measured by the
-    // {function,method} gate. NOTE: only func+init match SwiftLint's rule scope; Probe
+    // {function,method} gate. NOTE: only func+init match SwiftLint's rule scope; Codedeep
     // ADDITIONALLY measures subscripts/deinit (same algorithm, extra coverage beyond
     // SwiftLint — NOT an oracle divergence on the NUMBER, just on which decls report).
     expect(swiftCog('struct S { init(a: Int) { if a > 0 { x() } } }', 'init').cyc).toBe(2);
@@ -1672,7 +1672,7 @@ describe('cyclomatic + cognitive complexity — PHP (SonarPHP 3.38-pinned)', () 
   });
 
   it('DOCUMENTED divergence: nested NAMED function under-counts cognitive (rare, per-symbol model)', () => {
-    // SonarPHP rolls the inner named fn in with a nesting bump (cog 2); Probe descends it
+    // SonarPHP rolls the inner named fn in with a nesting bump (cog 2); Codedeep descends it
     // pass-through (cog 1) because the body IS a function_definition (can't be nestOnly
     // without nest-bumping the root). Cyclomatic still excludes it. Vanishingly rare in PHP.
     expect(phpCog('function f($a){ function inner(){ if($a){} } }')).toEqual({ cyc: undefined, cog: 1 });
@@ -1816,7 +1816,7 @@ end`;
 // with SonarQube's C-family rules, verified against in-repo tools (rust-code-analysis for
 // cyclomatic; the public whitepaper fixtures for cognitive). The C-family rule is boolean-free cyclomatically (like Swift), counts each
 // `case` AND `default`, and counts each C++ lambda; cognitive == the whitepaper. The C-family rule's
-// raw cyclomatic is baseline-free, so Probe (`1 + decisions`) = McCabe + 1 (a documented
+// raw cyclomatic is baseline-free, so Codedeep (`1 + decisions`) = McCabe + 1 (a documented
 // constant offset); cognitive has no baseline, so cog values match the whitepaper
 // EXACTLY. The cpp/c/objc grammars share one CFAMILY_* options set (AST-dump-confirmed:
 // objc reuses the C control-flow node names incl. `catch_clause` for `@catch`). All values
@@ -1837,7 +1837,7 @@ describe('cyclomatic + cognitive complexity — C-family (cpp/c/objc, McCabe + w
     expect(objcCog('- (void)go { return; }', 'go')).toEqual({ cyc: undefined, cog: undefined });
   });
 
-  // --- cyclomatic: each construct +1 (Probe = McCabe + 1) ---
+  // --- cyclomatic: each construct +1 (Codedeep = McCabe + 1) ---
   it('counts a single if', () => {
     expect(cppCog('void f(int n){ if(n){g();} }')).toEqual({ cyc: 2, cog: 1 });
   });
