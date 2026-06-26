@@ -8,7 +8,6 @@
     "tree-sitter",
     "code-intelligence",
     "code-analysis",
-    "static-analysis",
     "ast",
     "cyclomatic-complexity",
     "cognitive-complexity",
