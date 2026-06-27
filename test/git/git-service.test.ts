@@ -22,7 +22,14 @@ import {
   mkSym,
   silenceStderr,
 } from '../helpers.js';
-import { addCommits, git, gitAvailable, makeBranch, makeGitRepo } from '../git-helpers.js';
+import {
+  addCommits,
+  git,
+  gitAvailable,
+  makeBranch,
+  makeGitRepo,
+  REAL_GIT_SUITE_TIMEOUT,
+} from '../git-helpers.js';
 
 // Scripted runner: every call is logged; responses are routed through a
 // handler keyed on the first "interesting" git arg (skipping the -c
@@ -347,7 +354,7 @@ describe('GitService memoization', () => {
   });
 });
 
-describe.skipIf(!gitAvailable)('GitService against real repos', () => {
+describe.skipIf(!gitAvailable)('GitService against real repos', { timeout: REAL_GIT_SUITE_TIMEOUT }, () => {
   // Real repos attach real fs.watch HeadWatchers — close them so timers
   // can't fire against the rmSync'd repo after the test ends.
   let services: GitService[] = [];
@@ -484,10 +491,10 @@ describe.skipIf(!gitAvailable)('GitService against real repos', () => {
   });
 });
 
-describe.skipIf(!gitAvailable)('GitService live refresh (real fs.watch)', () => {
-  // Explicit timeouts: the internal 8s poll deadline must fit inside the
-  // test budget (vitest's default is 5s).
-  it('a new commit triggers a debounced re-analysis via the HEAD watcher', { timeout: 15_000 }, async () => {
+// The internal 8s FSEvents poll below sits comfortably inside the suite's
+// REAL_GIT_SUITE_TIMEOUT budget (well over vitest's 5s default).
+describe.skipIf(!gitAvailable)('GitService live refresh (real fs.watch)', { timeout: REAL_GIT_SUITE_TIMEOUT }, () => {
+  it('a new commit triggers a debounced re-analysis via the HEAD watcher', async () => {
     makeGitRepo(tmp, [
       { files: { 'src/a.ts': 'export const a = 1;' }, message: 'init' },
     ]);
@@ -518,7 +525,7 @@ describe.skipIf(!gitAvailable)('GitService live refresh (real fs.watch)', () => 
     }
   });
 
-  it('close() detaches the watcher — later commits no longer refresh', { timeout: 15_000 }, async () => {
+  it('close() detaches the watcher — later commits no longer refresh', async () => {
     makeGitRepo(tmp, [
       { files: { 'src/a.ts': 'export const a = 1;' }, message: 'init' },
     ]);
@@ -606,7 +613,7 @@ describe('GitService review hardening', () => {
   });
 });
 
-describe.skipIf(!gitAvailable)('GitService in a monorepo subdirectory', () => {
+describe.skipIf(!gitAvailable)('GitService in a monorepo subdirectory', { timeout: REAL_GIT_SUITE_TIMEOUT }, () => {
   it('maps repo-relative log paths onto project-relative index keys', async () => {
     // The git toplevel is tmp; the probed project is tmp/packages/app.
     makeGitRepo(tmp, [
