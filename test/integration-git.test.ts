@@ -17,7 +17,7 @@ import { runGetContext } from '../src/tools/get-context.js';
 import { runOverview } from '../src/tools/overview.js';
 import type { CodedeepConfig } from '../src/types.js';
 import { makeConfig, makeProjectDir, silenceStderr, writeTree } from './helpers.js';
-import { addCommits, gitAvailable, makeBranch, makeGitRepo } from './git-helpers.js';
+import { addCommits, gitAvailable, makeBranch, makeGitRepo, REAL_GIT_SUITE_TIMEOUT } from './git-helpers.js';
 
 const FIXTURES_ROOT = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
 
@@ -49,7 +49,7 @@ beforeAll(async () => {
   await parserModule.initParser();
 });
 
-describe.skipIf(!gitAvailable)('integration: git enrichment end-to-end', () => {
+describe.skipIf(!gitAvailable)('integration: git enrichment end-to-end', { timeout: REAL_GIT_SUITE_TIMEOUT }, () => {
   let root = '';
   // Every GitService created in a test registers here so afterEach can
   // close it — otherwise real fs.watch HeadWatchers and their debounce
@@ -62,7 +62,11 @@ describe.skipIf(!gitAvailable)('integration: git enrichment end-to-end', () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     if (root) {
-      rmSync(root, { recursive: true, force: true });
+      // Retry on Windows: a closed HEAD-watcher's fs.watch handle (or a
+      // debounce timer re-touching .git/logs) can briefly hold root open after
+      // s.close(), so an immediate rmdir hits ENOTEMPTY/EBUSY. The backoff lets
+      // the handle release; mirrors git-service.test.ts. No-op on POSIX.
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       root = '';
     }
   });

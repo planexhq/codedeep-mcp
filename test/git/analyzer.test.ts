@@ -16,7 +16,7 @@ import {
 } from '../../src/git/analyzer.js';
 import { GitRunner } from '../../src/git/runner.js';
 import { makeProjectDir, silenceStderr } from '../helpers.js';
-import { gitAvailable, makeGitRepo } from '../git-helpers.js';
+import { gitAvailable, makeGitRepo, REAL_GIT_SUITE_TIMEOUT } from '../git-helpers.js';
 
 interface CannedCommit {
   ts: number; // epoch seconds
@@ -250,7 +250,7 @@ describe('analyzeLog', () => {
   });
 });
 
-describe.skipIf(!gitAvailable)('analyzeLog against real git output', () => {
+describe.skipIf(!gitAvailable)('analyzeLog against real git output', { timeout: REAL_GIT_SUITE_TIMEOUT }, () => {
   let tmp: string;
   let stderrSpy: ReturnType<typeof silenceStderr>;
 

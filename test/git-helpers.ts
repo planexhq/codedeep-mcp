@@ -27,6 +27,16 @@ function probeGit(): boolean {
 
 export const gitAvailable: boolean = probeGit();
 
+// Per-test timeout for suites that drive real git. Each test spawns many
+// SYNCHRONOUS git subprocesses (init/add/commit/log…); on Windows CI a cold
+// process-spawn costs ~1s+, so the first real-git test in a file routinely
+// blows past vitest's 5s default and times out. Set at the describe level it
+// cascades to every test in the suite — but NOT to before*/after* hooks, which
+// keep the default hookTimeout, so keep heavy setup inside the it() body. 15s
+// leaves ~2-3x headroom over observed cold-start cost and also covers the
+// live-refresh suite's internal 8s FSEvents poll.
+export const REAL_GIT_SUITE_TIMEOUT = 15_000;
+
 // GIT_CONFIG_GLOBAL is only honored by git >= 2.32; pointing HOME and
 // XDG_CONFIG_HOME at an empty scratch dir seals ~/.gitconfig on older
 // gits too (one dir for the whole test process is fine — it stays empty).

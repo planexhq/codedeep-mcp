@@ -11,7 +11,7 @@ import { join } from 'node:path';
 
 import { GitError, GitRunner, type ExecFileFn } from '../../src/git/runner.js';
 import { makeProjectDir, silenceStderr, skipOnWindows } from '../helpers.js';
-import { gitAvailable, makeGitRepo, writeStubGit } from '../git-helpers.js';
+import { gitAvailable, makeGitRepo, REAL_GIT_SUITE_TIMEOUT, writeStubGit } from '../git-helpers.js';
 
 async function expectGitError(
   promise: Promise<unknown>,
@@ -71,7 +71,7 @@ describe('GitRunner', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  describe.skipIf(!gitAvailable)('with real git', () => {
+  describe.skipIf(!gitAvailable)('with real git', { timeout: REAL_GIT_SUITE_TIMEOUT }, () => {
     it('returns stdout on success', async () => {
       const runner = new GitRunner(tmp);
       const out = await runner.run(['--version']);
