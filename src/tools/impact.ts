@@ -11,6 +11,7 @@ import type { CodedeepConfig, Symbol } from '../types.js';
 
 import {
   BEHAVIORAL_TAG,
+  confidencePreamble,
   MEMBER_MATCH_TAG,
   MODULE_LEVEL,
   NAME_MATCH_TAG,
@@ -244,7 +245,7 @@ function renderImpact(
   // numbers. impact keeps tree.truncated and depthCapped SEPARATE below: they
   // map to two distinct remediation hints (raise max_tokens/narrow vs raise
   // depth), unlike the scalar BlastRadius which collapses both into one `+`.
-  const blast = countDistinctCallers(tree.root);
+  const blast = countDistinctCallers(tree.root, /* withTiers */ true);
   const depthCapped = blast.depthCapped;
   const callerCount = blast.callers;
   // A trailing `+` flags that a breadth/size cap fired, so the true total may
@@ -254,6 +255,22 @@ function renderImpact(
       `${blast.depths} ${plural('depth', blast.depths)} ` +
       `(${blast.files} ${plural('file', blast.files)}).`,
   );
+
+  // Confidence summary, derived from blast.tiers — the SAME distinct-caller
+  // dedup that produced the "N callers" headline above, so the two reconcile by
+  // construction (a DAG diamond / cycle is one caller, not N). Carries the
+  // headline's truncation flag so a capped walk shows "+ more" here too. Pushed
+  // into the never-dropped floor so it always shows.
+  // TRADEOFF: each distinct caller is bucketed by its STRONGEST edge, while the
+  // per-row tags below are per-PATH (tagFor on each occurrence). In the rare
+  // mixed-strength DAG diamond (one caller reached via a resolved AND a
+  // name-match edge) the summary counts it once as resolved while both rows
+  // still render — reconciling with the adjacent "N callers" headline is the
+  // primary invariant; per-occurrence counting would re-break that.
+  // blast.tiers is present because we passed withTiers=true above; `?? {}` keeps
+  // the type honest (CallerCounts.tiers is optional) and degrades to no preamble.
+  const preamble = confidencePreamble(blast.tiers ?? {}, tree.truncated);
+  if (preamble) blocks.push(preamble);
 
   let used = estimate(blocks.join('\n\n'));
   let cutoff: number | null = null;

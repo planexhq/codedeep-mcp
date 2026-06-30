@@ -126,6 +126,12 @@ export async function runFindReferences(
       `## References for \`${target.name}\` (${target.file}:${target.startLine})`,
     );
 
+    // No confidence summary here: find_references is reference-granular (one
+    // row per call SITE, not per distinct caller) and never emits a [structural]
+    // row — the section header already announces the approximate tier and each
+    // row carries its own tag. The Confidence summary lives in `impact`, where
+    // the caller tree mixes all three tiers and reconciles with the
+    // distinct-caller headline.
     if (kind === 'callers' || kind === 'all') {
       sections.push(renderCallers(target, deps.index, limit));
     }

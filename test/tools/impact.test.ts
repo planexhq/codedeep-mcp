@@ -71,6 +71,49 @@ describe('runImpact — rendering', () => {
     expect(text).toContain('### Depth 2 — callers of the above (1)');
     expect(text).toContain('- src/a.ts:3 — alpha()  [name match, unverified]');
     expect(text).toContain('← via beta()');
+    // A confidence summary (distinct callers by tier) leads the response.
+    expect(text).toContain('Confidence: 2 name-match (verify)');
+  });
+
+  it('confidence summary dedups diamond callers to match the N-callers headline', async () => {
+    // root2 -> branchA -> target AND root2 -> branchB -> target: root2 is
+    // reachable at depth 2 via two paths but is ONE distinct caller. The tier
+    // summary must dedup it (like the "N callers" headline), not double-count it
+    // into "Confidence: 4". (Names are ≥4 chars to clear the short-name gate.)
+    const idx = new CodeIndex(tmpRoot);
+    const target = mkSym({ name: 'target', file: 'src/t.ts', exported: true, startLine: 1 });
+    const branchA = mkSym({ name: 'branchA', file: 'src/b.ts', exported: true, startLine: 2 });
+    const branchB = mkSym({ name: 'branchB', file: 'src/c.ts', exported: true, startLine: 3 });
+    const root2 = mkSym({ name: 'root2', file: 'src/a.ts', startLine: 4 });
+    idx.addFile(makeFileInfo('typescript', 'src/t.ts'), [target], [], []);
+    idx.addFile(
+      makeFileInfo('typescript', 'src/b.ts'),
+      [branchA],
+      [mkUnresolvedRef(branchA, 'target', 'src/b.ts', 10)],
+      [mkImport('src/b.ts', './t', ['target'])],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [branchB],
+      [mkUnresolvedRef(branchB, 'target', 'src/c.ts', 11)],
+      [mkImport('src/c.ts', './t', ['target'])],
+    );
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [root2],
+      [
+        mkUnresolvedRef(root2, 'branchA', 'src/a.ts', 20),
+        mkUnresolvedRef(root2, 'branchB', 'src/a.ts', 21),
+      ],
+      [mkImport('src/a.ts', './b', ['branchA']), mkImport('src/a.ts', './c', ['branchB'])],
+    );
+
+    const text = await run(idx, { file: 'src/t.ts', symbol: 'target' });
+    // branchA, branchB, root2 = 3 distinct callers (root2 deduped despite two paths).
+    expect(text).toContain('3 callers across 2 depths (3 files).');
+    // The confidence summary must reconcile with the headline (3), never 4.
+    expect(text).toContain('Confidence: 3 name-match (verify)');
+    expect(text).not.toContain('Confidence: 4');
   });
 
   it('reports an empty blast radius honestly', async () => {
@@ -150,6 +193,9 @@ describe('runImpact — rendering', () => {
     const text = await run(idx, { file: 'src/t.ts', symbol: 'target' });
     expect(text).toContain('25+ callers'); // the trailing + flags the cap
     expect(text).toContain('Caller discovery hit the breadth/size limit');
+    // The confidence summary must carry the same incompleteness signal as the
+    // headline's `+`, not present a truncated count as the complete distribution.
+    expect(text).toContain('(+ more callers not shown)');
   });
 
   it('clamps a non-positive depth to 1 rather than reporting 0 callers', async () => {

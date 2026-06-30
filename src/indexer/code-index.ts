@@ -364,6 +364,12 @@ export interface CallerCounts {
   files: number;           // distinct files those callers live in
   depths: number;          // distinct hop depths reached
   depthCapped: boolean;    // a node hit the maxDepth wall — deeper callers exist
+  // Per-tier breakdown of the SAME distinct callers (strongest edge per caller),
+  // so a "Confidence:" summary derived from this reconciles with `callers` by
+  // construction. Sums to `callers`. OPTIONAL: present ONLY when
+  // countDistinctCallers is called with withTiers=true (impact); absent for the
+  // scalar blast-radius path, so the type forces consumers to opt in.
+  tiers?: { structural: number; nameMatch: number; weakMember: number };
 }
 
 // Scalar blast radius. `truncated` means the count is a LOWER BOUND for ANY
@@ -1978,14 +1984,30 @@ export function isClassMember(s: Symbol): boolean {
 // counting impact.ts renders ("N callers across D depths (F files)"), shared so
 // impact and the risk surface never diverge — and deduped, unlike
 // CallerTreeResult.totalNodes which double-counts DAG diamonds.
-export function countDistinctCallers(root: CallerTreeNode): CallerCounts {
-  const callers = new Set<string>();
+export function countDistinctCallers(
+  root: CallerTreeNode,
+  withTiers = false,
+): CallerCounts {
+  const callerKeys = new Set<string>();
+  // `strongest` (best edge per caller) is only built when the caller wants the
+  // tier breakdown; the scalar blast-radius path skips the per-node strength
+  // tracking + final bucketing loop entirely. Keyed identically to callerKeys,
+  // so the per-tier counts sum to `callers`. A caller reachable via a resolved
+  // path is at least that trustworthy, hence "strongest".
+  const strongest = withTiers ? new Map<string, EdgeStrength>() : null;
   const files = new Set<string>();
   const depths = new Set<number>();
   let depthCapped = false;
   const walk = (node: CallerTreeNode): void => {
     for (const child of node.children) {
-      callers.add(child.symbolId ?? `m:${child.file}:${child.line}`);
+      const key = child.symbolId ?? `m:${child.file}:${child.line}`;
+      callerKeys.add(key);
+      if (strongest) {
+        const prev = strongest.get(key);
+        if (prev === undefined || STRENGTH_RANK[child.strength] > STRENGTH_RANK[prev]) {
+          strongest.set(key, child.strength);
+        }
+      }
       files.add(child.file);
       depths.add(child.depth);
       if (child.depthCapped) depthCapped = true;
@@ -1993,7 +2015,22 @@ export function countDistinctCallers(root: CallerTreeNode): CallerCounts {
     }
   };
   walk(root);
-  return { callers: callers.size, files: files.size, depths: depths.size, depthCapped };
+  const counts: CallerCounts = {
+    callers: callerKeys.size,
+    files: files.size,
+    depths: depths.size,
+    depthCapped,
+  };
+  if (strongest) {
+    const tiers = { structural: 0, nameMatch: 0, weakMember: 0 };
+    for (const strength of strongest.values()) {
+      if (strength === 'resolved') tiers.structural += 1;
+      else if (strength === 'weak-member') tiers.weakMember += 1;
+      else tiers.nameMatch += 1;
+    }
+    counts.tiers = tiers;
+  }
+  return counts;
 }
 
 // True when `imports` brings `name` into scope as a value binding the bare

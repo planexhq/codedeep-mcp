@@ -15,6 +15,7 @@ import { errMsg, log } from '../logger.js';
 import {
   LANGUAGE_UNKNOWN,
   type FileInfo,
+  type GitMeta,
   type CodedeepConfig,
   type Symbol,
   type SymbolKind,
@@ -23,6 +24,7 @@ import {
 import {
   BEHAVIORAL_TAG,
   formatComplexityMetrics,
+  formatRelativeAge,
   INDEXING_BANNER,
   plural,
   textResponse,
@@ -189,6 +191,9 @@ interface OverviewGitData {
   hotspots: Array<{ path: string; commits: number }>;
   riskHotspots: RiskRow[];
   windowDays: number;
+  // Provenance of the persisted git analysis (analyzed HEAD + timestamp);
+  // drives the freshness banner. Null off-git / before the first analysis.
+  gitMeta: GitMeta | null;
 }
 
 // Defensive catch at the tool boundary: GitService promises not to
@@ -200,6 +205,8 @@ async function collectGitData(deps: OverviewDeps): Promise<OverviewGitData> {
   } catch {
     branch = null;
   }
+  // Captured once: drives both the window label and the freshness banner.
+  const gitMeta = deps.index.getGitMeta();
   return {
     branch,
     hotspots: deps.index.getHotspots(MAX_HOTSPOTS),
@@ -209,7 +216,8 @@ async function collectGitData(deps: OverviewDeps): Promise<OverviewGitData> {
     // Label with the window that PRODUCED the data (gitMeta provenance),
     // not the live config: after a gitWindow change, persisted counts
     // keep their true label until the re-analysis lands.
-    windowDays: deps.index.getGitMeta()?.windowDays ?? deps.config.gitWindow,
+    windowDays: gitMeta?.windowDays ?? deps.config.gitWindow,
+    gitMeta,
   };
 }
 
@@ -218,6 +226,27 @@ async function collectGitData(deps: OverviewDeps): Promise<OverviewGitData> {
 // placeholder. Hotspots come from the persisted index, so a warm start
 // shows them immediately, even while the indexing banner is up.
 function appendGitSections(lines: string[], data: OverviewGitData): void {
+  // Freshness banner: the analyzed HEAD and how long ago the git analysis ran,
+  // all from gitMeta (no extra git spawn). Tag-less — it's provenance, not a
+  // behavioral signal. Gated on a git analysis having run (gitMeta !== null),
+  // which is BROADER than the Hotspots/Risk gates (those need a qualifying
+  // file): the banner can therefore appear as the sole git output. Independent
+  // of the per-call branch probe so it still shows when branchSummary degrades.
+  // Omitted off-git, preserving the silent-omission contract.
+  if (data.gitMeta !== null) {
+    // "analyzed", not "index": this is the GIT-analysis timestamp (re-run on
+    // logs/HEAD changes), distinct from the structural index (re-run by the file
+    // watcher) — labeling it "index age" would overstate index staleness after a
+    // source-edit burst with no commit.
+    const analyzed = formatRelativeAge(Date.now() - data.gitMeta.analyzedAt);
+    // head is normally a full sha (rev-parse HEAD); guard a degenerate/empty
+    // value so the line never renders "HEAD  ·" with the identity dropped.
+    const head = data.gitMeta.head.slice(0, 7) || 'unknown';
+    lines.push(
+      '',
+      `Freshness: HEAD ${head} · analyzed ${analyzed} ago · window ${data.windowDays}d`,
+    );
+  }
   if (data.branch !== null) {
     lines.push('', `### Branch ${BEHAVIORAL_TAG}`, formatBranchLine(data.branch));
   }

@@ -141,6 +141,17 @@ describe.skipIf(!gitAvailable)('integration: git enrichment end-to-end', { timeo
     const env = await setupRepo();
     const text = (await runOverview({}, env)).content[0].text;
 
+    // Freshness banner leads the git block: analyzed HEAD + analysis age +
+    // window. "analyzed … ago" (the git-analysis timestamp), not "index … old".
+    expect(text).toMatch(/Freshness: HEAD [0-9a-f]{7,} · analyzed .+ ago · window \d+d/);
+    expect(text).toContain(`window ${env.config.gitWindow}d`);
+    expect(text.indexOf('Freshness:')).toBeLessThan(text.indexOf('### Branch'));
+    // Pin the rendered sha to the ACTUAL analyzed HEAD (not the branch sha /
+    // window / an off-by-one slice) — a wrong-field regression would still
+    // match the format above.
+    const analyzedHead = env.index.getGitMeta()?.head ?? '';
+    expect(analyzedHead).toMatch(/^[0-9a-f]{40}$/);
+    expect(text).toContain(`HEAD ${analyzedHead.slice(0, 7)}`);
     expect(text).toContain('### Branch [behavioral]');
     expect(text).toContain('- main (default branch)');
     expect(text).toContain(`### Hotspots (last ${env.config.gitWindow} days) [behavioral]`);
@@ -225,6 +236,8 @@ describe.skipIf(!gitAvailable)('integration: git enrichment end-to-end', { timeo
     expect(overview).not.toContain('Branch');
     expect(overview).not.toContain('Hotspots');
     expect(overview).not.toContain('[behavioral]');
+    // Freshness is gated on gitMeta — off-git it must not appear.
+    expect(overview).not.toContain('Freshness');
 
     const context = (
       await runGetContext({ file: 'src/auth.ts', symbol: 'authenticate' }, env)

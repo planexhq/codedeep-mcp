@@ -214,6 +214,44 @@ export function formatComplexity(sym: Symbol): string | null {
 // ([structural] / [approximate] / [behavioral]).
 export const BEHAVIORAL_TAG = '[behavioral]';
 
+// One-line trust distribution that leads a tiered response, e.g.
+// "Confidence: 3 resolved · 2 name-match (verify) · 1 weak", or '' when there
+// are no rows. Omits zero tiers so it never names a tier the response can't
+// show. The inline "(verify)" makes the line self-describing — there is no
+// separate static tag legend (one would disagree with this pruned summary, and
+// the per-row tags like "[name match, unverified]" already carry the meaning).
+// `truncated` appends a "+ more" marker so the line carries the same
+// incompleteness signal as the caller headline (which appends `+`). Used only
+// by `impact` — the one tool with a mixed-tier caller tree.
+export function confidencePreamble(
+  counts: { structural?: number; nameMatch?: number; weakMember?: number },
+  truncated = false,
+): string {
+  const parts: string[] = [];
+  if (counts.structural) parts.push(`${counts.structural} resolved`);
+  if (counts.nameMatch) parts.push(`${counts.nameMatch} name-match (verify)`);
+  if (counts.weakMember) parts.push(`${counts.weakMember} weak`);
+  if (parts.length === 0) return '';
+  const marker = truncated ? ' (+ more callers not shown)' : '';
+  return `Confidence: ${parts.join(' · ')}${marker}`;
+}
+
+// Compact relative age ("4m" / "2h" / "3d", or "<1m" sub-minute) for an
+// elapsed-ms duration. Used by the overview freshness banner to show how long
+// ago the git analysis ran. Tool handlers run at request time, so `Date.now()`
+// is available to the caller computing the elapsed value.
+export function formatRelativeAge(ms: number): string {
+  // Clamp negative elapsed (clock skew / a cache written by a faster clock, or
+  // a cache dir copied between machines) to 0 so it reads "<1m" deterministically
+  // rather than from undefined negative arithmetic.
+  const mins = Math.floor(Math.max(0, ms) / 60_000);
+  if (mins < 1) return '<1m';
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 export interface CoChangePartnerRow {
   partner: string;
   // Confidence FROM the queried file, as a rounded percent: "when THIS

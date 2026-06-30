@@ -90,6 +90,10 @@ describe('runFindReferences — resolution', () => {
     expect(text).toContain('## References for `authenticate` (src/auth.ts:5)');
     expect(text).toContain('### Callers (approximate — from AST name matching)');
     expect(text).toContain('src/api.ts:12 — handler()  [name match, unverified]');
+    // find_references does NOT emit the confidence summary — it is ref-granular
+    // (call SITES, not distinct callers) and never produces a [structural] row;
+    // that summary lives only in `impact`.
+    expect(text).not.toContain('Confidence:');
   });
 
   it('uses line to disambiguate when multiple symbols share a name', async () => {
@@ -470,7 +474,7 @@ describe('runFindReferences — limit', () => {
 
     const callerLines = text
       .split('\n')
-      .filter((l) => l.includes('[name match, unverified]'));
+      .filter((l) => l.startsWith('- ') && l.includes('[name match, unverified]'));
     expect(callerLines).toHaveLength(2);
     expect(text).toContain('(3 more omitted; raise `limit` to see all)');
   });
@@ -1125,7 +1129,8 @@ describe('runFindReferences — weak-member row cap', () => {
     const text = (
       await runFindReferences({ file: 'src/svc.ts', symbol: 'process' }, makeDeps(idx))
     ).content[0].text;
-    const memberRows = (text.match(/\[member call, unverified\]/g) ?? []).length;
+    // Count member-call ROW lines only (anchored to "- " rows).
+    const memberRows = (text.match(/^- .*\[member call, unverified\]/gm) ?? []).length;
     expect(memberRows).toBe(8); // WEAK_MEMBER_ROW_CAP
     expect(text).toContain('more omitted');
   });
@@ -1158,7 +1163,7 @@ describe('runFindReferences — weak-member row cap', () => {
         makeDeps(idx),
       )
     ).content[0].text;
-    expect((text.match(/\[member call, unverified\]/g) ?? []).length).toBe(8);
+    expect((text.match(/^- .*\[member call, unverified\]/gm) ?? []).length).toBe(8);
     expect(text).toContain('more omitted');
     // The honest message points at find_symbol's count, not the useless lever.
     expect(text).not.toContain('raise `limit`');

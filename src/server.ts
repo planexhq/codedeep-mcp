@@ -41,7 +41,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "overview",
     {
       description:
-        "Get a structural overview of the codebase: language breakdown, top-level directories, entry points, and symbol counts — plus branch summary, git hotspots, and risk hotspots (churn × call-graph coupling) when in a git repo.",
+        "Start here. 'What is this codebase?' — language breakdown, top-level structure, entry points, symbol counts; in a git repo, also branch/hotspots, risk ranking (churn × coupling × complexity), and index freshness. Orient with this before grepping; then drill in with find_symbol / get_context.",
       inputSchema: {
         path: z.string().optional().describe("Project root (default: cwd)"),
       },
@@ -54,7 +54,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "find_symbol",
     {
       description:
-        "AST-aware symbol lookup. Returns definitions matching a name (exact, prefix, or fuzzy), each with fan-in (references), fan-out (callees), and complexity — cyclomatic and cognitive, available for all 14 supported languages. Optional kind/scope/limit filters.",
+        "'Where is X defined?' Use instead of grep when you want the definition of a named symbol (exact/prefix/fuzzy) with fan-in, fan-out, and cyclomatic+cognitive complexity — not every text occurrence. Then get_context for the body or find_references for callers. Optional kind/scope/limit filters.",
       inputSchema: {
         name: z.string().describe("Symbol name (exact, prefix, or fuzzy)"),
         kind: z
@@ -90,7 +90,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "get_context",
     {
       description:
-        "Return everything needed to understand a symbol: full body, within-file callers/callees, coupling (fan-in/fan-out/cyclomatic+cognitive complexity/blast radius), and imports — plus co-change partners and recent commits when git is available.",
+        "'Tell me everything about this symbol.' Full body (verbatim), within-file callers/callees, coupling (fan-in/out, cyclomatic+cognitive complexity, blast radius), and imports — plus co-change partners and recent commits when git is available. Reach for this after find_symbol instead of opening the file by hand.",
       inputSchema: {
         file: z.string().describe("File path (relative to project root)"),
         symbol: z
@@ -124,7 +124,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "find_references",
     {
       description:
-        "Cross-file usage navigation. Returns approximate AST name-matched callers for a symbol, ranked by directory and import proximity — plus co-change partners from git history when available. LSP-precise tiers ship in Phase 2.",
+        "'Who uses X?' Cross-file callers ranked by confidence (directory + import proximity), not raw text matches like grep — each row tagged [name match] or the weaker [member call] (both unverified — verify before asserting). For the transitive blast radius use impact. (LSP-precise tiers ship in Phase 2.)",
       inputSchema: {
         file: z.string().describe("File containing the symbol (relative to project root)"),
         symbol: z.string().describe("Symbol name"),
@@ -159,7 +159,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "impact",
     {
       description:
-        "Trace the transitive blast radius of changing a symbol: upstream callers grouped by hop (depth 1, 2, …), with co-change partners from git history. Edges are AST name-matches, not compiler-verified; downstream callees and inheritance ship with LSP in Phase 2.",
+        "'What breaks if I change X?' Transitive upstream caller tree grouped by hop, with a distinct-caller blast count and git co-change partners — something grep can't compute. Each edge tagged by confidence. For direct callers only, use find_references. (Edges are AST name-matches, not compiler-verified; downstream callees and inheritance ship with LSP in Phase 2.)",
       inputSchema: {
         file: z
           .string()
@@ -198,7 +198,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "search_structure",
     {
       description:
-        "Keyword and structural code search. Fuzzy-matches symbol names, signatures, and docstrings; with `pattern`, runs an ast-grep structural query instead (TypeScript/TSX/JavaScript only for now).",
+        "'Find code by keyword or shape.' Fuzzy search over symbol names, signatures, and docstrings (git-churn-boosted), or with `pattern` an ast-grep structural query (TS/TSX/JS only). Use over grep for symbol-aware or structural matches; use plain grep for arbitrary string/comment text. To locate a known symbol by name, find_symbol is more direct.",
       inputSchema: {
         query: z
           .string()
