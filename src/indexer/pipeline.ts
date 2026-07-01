@@ -44,7 +44,10 @@ function isUnchanged(
   );
 }
 
-function hashContent(content: string): string {
+// Exported so the note store's staleness check can re-hash an anchored file
+// from disk with the SAME algorithm the indexer records in FileInfo.contentHash
+// — staleness compares against DISK, not the (possibly-lagging) live index.
+export function hashContent(content: string): string {
   return createHash('sha1').update(content).digest('hex').slice(0, 16);
 }
 

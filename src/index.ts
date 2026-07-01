@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { join } from "node:path";
+
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { loadConfig, resolveCacheDir } from "./config.js";
@@ -7,6 +9,7 @@ import { CodeIndex } from "./indexer/code-index.js";
 import { Indexer } from "./indexer/pipeline.js";
 import { Watcher } from "./indexer/watcher.js";
 import { errMsg, log } from "./logger.js";
+import { NoteStore } from "./notes/note-store.js";
 import { createServer } from "./server.js";
 import type { CodedeepConfig } from "./types.js";
 
@@ -70,6 +73,19 @@ if (config.watch) {
 // .catch makes the chain unrejectable — one line, one error path.
 const git = new GitService(config, index, indexer.cachePath);
 void indexingPromise.catch(() => {}).then(() => git.start());
+
+// The note store is independent of the code index (notes are primary,
+// non-rebuildable user data, NOT derived from source), so it survives every
+// index invalidation. It sits next to index.json under the resolved cacheDir,
+// inheriting the read-only-root ~/.cache fallback and the `.codedeep` scanner
+// exclude. Write-through saves on each remember/forget mean no shutdown flush is
+// needed. load() is FIRE-AND-FORGET (like git.start below): it never throws
+// (quarantines on corruption) and is memoized, and every note tool re-awaits it
+// before acting — so we must NOT block server.connect (and the 6 structural
+// tools that never touch notes) on note-store disk I/O, which can be slow on a
+// networked cacheDir or one cluttered with stale .tmp/.bak entries.
+const notes = new NoteStore(join(config.cacheDir, "notes.json"), config.projectRoot);
+void notes.load();
 
 // Flush-on-shutdown — the watcher's per-flush saves bound the loss window,
 // but exiting between flushes shouldn't discard the last debounce batch.
@@ -140,5 +156,5 @@ process.on("SIGTERM", () => shutdown("SIGTERM received", false, true));
 process.stdin.once("end", () => shutdown("stdin closed", true));
 process.stdin.once("close", () => shutdown("stdin closed", true));
 
-const server = createServer({ index, indexer, config, git });
+const server = createServer({ index, indexer, config, git, notes });
 await server.connect(new StdioServerTransport());

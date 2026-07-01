@@ -7,11 +7,15 @@ import { z } from "zod";
 import type { GitService } from "./git/git-service.js";
 import type { CodeIndex } from "./indexer/code-index.js";
 import type { Indexer } from "./indexer/pipeline.js";
+import type { NoteStore } from "./notes/note-store.js";
 import { runFindReferences } from "./tools/find-references.js";
 import { runFindSymbol } from "./tools/find-symbol.js";
+import { runForget } from "./tools/forget.js";
 import { runGetContext } from "./tools/get-context.js";
 import { runImpact } from "./tools/impact.js";
 import { runOverview } from "./tools/overview.js";
+import { runRecall } from "./tools/recall.js";
+import { runRemember } from "./tools/remember.js";
 import { runSearchStructure } from "./tools/search-structure.js";
 import type { CodedeepConfig } from "./types.js";
 
@@ -22,6 +26,17 @@ const SHARED_ANNOTATIONS = {
   openWorldHint: false,
 } as const;
 
+// remember/forget write the .codedeep note store (never source). readOnlyHint
+// is false so MCP clients surface the write; destructiveHint false (append /
+// scoped single-note removal, no source touched). The store write is the only
+// mutation in the server.
+const WRITE_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false,
+} as const;
+
 export interface ServerDeps {
   index: CodeIndex;
   indexer: Indexer;
@@ -29,6 +44,8 @@ export interface ServerDeps {
   // Required, not optional: git unavailability lives INSIDE the service
   // (null/empty returns), so tools never branch on a missing dep.
   git: GitService;
+  // The agent-curated knowledge layer (remember/recall/forget).
+  notes: NoteStore;
 }
 
 export function createServer(deps: ServerDeps): McpServer {
@@ -226,6 +243,78 @@ export function createServer(deps: ServerDeps): McpServer {
       annotations: SHARED_ANNOTATIONS,
     },
     async (args) => runSearchStructure(args, deps),
+  );
+
+  server.registerTool(
+    "remember",
+    {
+      description:
+        "Write a durable note about code that grep/AST can't infer — a cross-file router chain, an invariant, a footgun, an architecture decision. Anchor it to the file(s)/symbol(s) it's about; codedeep then tracks STALENESS, so recall flags the note when its anchors change (unlike memories that rot silently). Writes only to the .codedeep note store, never to source.",
+      inputSchema: {
+        note: z
+          .string()
+          .describe("The knowledge to store (markdown ok). Be specific."),
+        anchors: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Files/symbols this note is about, e.g. 'src/auth.ts' or 'src/auth.ts:authenticate' (add ':<line>' to disambiguate). Strongly recommended — anchors are what make the note staleness-tracked.",
+          ),
+      },
+      annotations: WRITE_ANNOTATIONS,
+    },
+    async (args) => runRemember(args, deps),
+  );
+
+  server.registerTool(
+    "recall",
+    {
+      description:
+        "Retrieve previously-remembered notes, each tagged ✓ fresh / ⚠ stale / ? unverified by re-checking its anchors against the current source. Call before editing a file/symbol ('what do I already know here, and is it still true?'). Filter by `file`/`symbol` (what's anchored here) or `query` (keyword); omit all to list every note.",
+      inputSchema: {
+        query: z
+          .string()
+          .optional()
+          .describe("Keywords matched against note text and anchors"),
+        file: z
+          .string()
+          .optional()
+          .describe("Return notes anchored to this file (relative path)"),
+        symbol: z
+          .string()
+          .optional()
+          .describe("With `file`, narrow to notes anchored to this symbol"),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max notes (default: 10, max: 50)"),
+        max_tokens: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Soft response budget (default: 3000)"),
+      },
+      annotations: SHARED_ANNOTATIONS,
+    },
+    async (args) => runRecall(args, deps),
+  );
+
+  server.registerTool(
+    "forget",
+    {
+      description:
+        "Delete a note by its id (shown by recall) — for superseded or wrong notes. Writes only to the .codedeep note store.",
+      inputSchema: {
+        noteId: z.string().describe("The note id to delete (from recall)"),
+      },
+      // destructiveHint: a forget is an irreversible delete of stored data (not
+      // additive like remember), so clients may gate it on confirmation.
+      annotations: { ...WRITE_ANNOTATIONS, destructiveHint: true, idempotentHint: true },
+    },
+    async (args) => runForget(args, deps),
   );
 
   return server;

@@ -297,6 +297,12 @@ export function readinessBanner(ready: boolean): string {
   return ready ? '' : `${INDEXING_BANNER}\n\n`;
 }
 
+// Token-budget approximation (CLAUDE.md "Token Budget"): chars / 4. Shared so a
+// new budgeted tool reuses it rather than adding another inline copy.
+export function estimate(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
 export function plural(word: string, count: number): string {
   return count === 1 ? word : `${word}s`;
 }

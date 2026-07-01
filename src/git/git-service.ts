@@ -86,6 +86,7 @@ export class GitService {
   private generationValue = 0;
   private branchMemo: { gen: number; value: BranchSummary | null } | null = null;
   private recentMemo = new Map<string, { gen: number; value: RecentCommit[] }>();
+  private headMemo: { gen: number; value: string | null } | null = null;
 
   // Single-flight: a refresh requested while one is running coalesces
   // into exactly one trailing rerun.
@@ -388,6 +389,7 @@ export class GitService {
     this.generationValue++;
     this.branchMemo = null;
     this.recentMemo.clear();
+    this.headMemo = null; // per-generation like its siblings; clear on HEAD move
   }
 
   async branchSummary(): Promise<BranchSummary | null> {
@@ -614,6 +616,29 @@ export class GitService {
       if (oldest !== undefined) this.recentMemo.delete(oldest);
     }
     this.recentMemo.set(memoKey, { gen, value });
+    return value;
+  }
+
+  // Short HEAD sha at the current generation, or null off-git / on transient
+  // failure. Used by `remember` to stamp a note's provenance ("noted at commit
+  // X"). Generation-memoized like recentCommits/branchSummary, so a HEAD move
+  // (the logs/HEAD watcher bumps the generation) invalidates it. Never throws.
+  async currentHead(): Promise<string | null> {
+    if (this.closed) return null;
+    this.maybeRetryStartup();
+    if (this.stateValue !== 'ready') return null;
+    if (this.headMemo && this.headMemo.gen === this.generationValue) {
+      return this.headMemo.value;
+    }
+    const gen = this.generationValue;
+    const { out } = await this.probe(['rev-parse', '--short', 'HEAD'], {
+      timeoutMs: QUICK_TIMEOUT_MS,
+    });
+    // null = unborn HEAD or a transient failure: return null WITHOUT memoizing
+    // so the next call retries (mirrors recentCommits).
+    if (out === null) return null;
+    const value = out.trim().length > 0 ? out.trim() : null;
+    this.headMemo = { gen, value };
     return value;
   }
 
