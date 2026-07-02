@@ -65,6 +65,13 @@ export type IndexFileResult =
   | 'removed'
   | 'noop'
   | 'cap-skipped'
+  // Grammar load failed for this file's language — the file itself was NOT
+  // judged (existing symbols kept, nothing deleted). Terminal for this event:
+  // the loader already retried in place (parser.ts ensureLanguage's bounded
+  // backoff), so a surviving failure is durable and re-queueing would only
+  // cycle the watcher's retry tick. Recovery rides the next fs event or
+  // rescan (the loader's memo self-resets on failure).
+  | 'transient'
   | 'dropped';
 
 export class Indexer {
@@ -79,6 +86,10 @@ export class Indexer {
   // preserves unseen cached entries — the watcher must know the rescan
   // it requested may not have covered everything.
   private lastScanCompleteFlag = true;
+  // Languages whose grammar-load failure was already warned — dedupes the
+  // per-file warn in processFile (one line per failure EPISODE per language,
+  // not one per file). Entries clear on the next successful load.
+  private readonly grammarWarnedLangs = new Set<string>();
 
   get lastScanComplete(): boolean {
     return this.lastScanCompleteFlag;
@@ -106,8 +117,10 @@ export class Indexer {
   // work and retry what deserves retrying.
   async indexAll(): Promise<boolean> {
     return this.runGuarded(async () => {
-      await initParser();
+      // Scan FIRST, then load only the grammars the repo actually contains —
+      // loading all 16 up front costs ~95MB RSS on a repo that needs one.
       const { files: current, complete } = await scanProject(this.config);
+      await this.warmUpGrammars(current);
       this.lastScanCompleteFlag = complete;
 
       this.total = current.length;
@@ -136,7 +149,6 @@ export class Indexer {
 
   async indexChanged(): Promise<boolean> {
     return this.runGuarded(async () => {
-      await initParser();
       const { files: current, complete } = await scanProject(this.config);
       this.lastScanCompleteFlag = complete;
 
@@ -170,6 +182,9 @@ export class Indexer {
         return;
       }
 
+      // Load only the grammars the CHANGED files need — the common warm start
+      // (few or no changes) then loads few or no grammars at all.
+      await this.warmUpGrammars(toIndex);
       this.total = toIndex.length;
       await this.processBatched(toIndex);
       await this.persist();
@@ -187,7 +202,9 @@ export class Indexer {
   }
 
   private async indexFileInner(rawPath: string): Promise<IndexFileResult> {
-    await initParser();
+    // No up-front initParser: processFile ensures the ONE grammar this file
+    // needs right before parsing (a watcher event on an unchanged file then
+    // loads nothing at all).
     // Canonicalize to a project-relative POSIX path so the cache key
     // aligns with the scanner's `src/a.ts` form regardless of whether
     // the watcher emits an absolute path, a `./`-prefix, or Windows
@@ -320,6 +337,20 @@ export class Indexer {
     return result;
   }
 
+  // Parallel bulk load of the grammars `files` need. A WARM-UP, not a
+  // correctness requirement (processFile re-ensures per-file), so failure is
+  // TOLERATED: one missing/corrupt .wasm must degrade that one language
+  // (per-file 'transient' + deduped warns), not abort indexing for every
+  // other language.
+  private async warmUpGrammars(files: readonly FileInfo[]): Promise<void> {
+    await initParser(files.map((f) => f.language)).catch((err) =>
+      log.warn(
+        `Indexer: bulk grammar warm-up failed (${errMsg(err)}); ` +
+          `grammars will load per-file`,
+      ),
+    );
+  }
+
   // Resolves `false` when a run is already in flight (the request is
   // dropped, not queued); `true` when the work ran to completion.
   private async runGuarded(work: () => Promise<void>): Promise<boolean> {
@@ -367,6 +398,45 @@ export class Indexer {
     const absPath = join(this.config.projectRoot, file.path);
     const removed = (): IndexFileResult =>
       this.index.removeFile(file.path) ? 'removed' : 'noop';
+
+    // Memoized per-language ensure — a resolved-promise await after the first
+    // load. Covers the watcher path (a NEW language can appear after the
+    // startup scan chose the initial grammar set). Runs BEFORE the content
+    // read (no point reading bytes a failed grammar can't parse — a
+    // permanently corrupt .wasm would otherwise cost one full-file read per
+    // affected file per rescan) and OUTSIDE the parse try/catch below: a
+    // grammar-LOAD failure says nothing about the FILE, so it returns
+    // 'transient' (existing symbols kept — genuinely-transient causes were
+    // already retried in place by ensureLanguage's bounded backoff), never
+    // cascade-deletes them the way an unparseable file does. The warn is
+    // deduped per LANGUAGE (5,000 Python files must not produce 5,000
+    // identical lines); the dedup entry clears on the next successful load so
+    // a NEW failure episode warns again.
+    try {
+      await initParser([file.language]);
+      this.grammarWarnedLangs.delete(file.language);
+    } catch (err) {
+      // Preserve the pre-existing precedence "unreadable bytes always prune
+      // the entry" even when the grammar is down: without this, a file that
+      // is itself gone/unreadable would keep serving stale symbols from the
+      // persisted cache indefinitely. One cheap access() probe, only on the
+      // (rare) grammar-failure path.
+      try {
+        await fs.access(absPath, fs.constants.R_OK);
+      } catch {
+        return removed();
+      }
+      if (!this.grammarWarnedLangs.has(file.language)) {
+        this.grammarWarnedLangs.add(file.language);
+        log.warn(
+          `Indexer: grammar load failed for ${file.language} (first: ${file.path}): ` +
+            `${errMsg(err)}. Files of this language are missing or stale in the ` +
+            `index until the grammar loads (fix the installation; probed again on ` +
+            `the next change or rescan). Existing symbols are kept.`,
+        );
+      }
+      return 'transient';
+    }
 
     let content: string;
     try {

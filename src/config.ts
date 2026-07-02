@@ -4,7 +4,7 @@ import { access, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { CodedeepConfig } from './types.js';
-import { toPosix } from './indexer/scanner.js';
+import { toPosix } from './fs-util.js';
 import { errMsg, log } from './logger.js';
 
 const DEFAULT_EXCLUDES: readonly string[] = [

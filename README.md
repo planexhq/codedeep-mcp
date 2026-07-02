@@ -10,7 +10,7 @@ An MCP server that gives AI coding agents structural understanding of codebases.
 
 **One tool call replaces 5-10 Grep-Read cycles.**
 
-codedeep-mcp parses your code with [tree-sitter](https://tree-sitter.github.io/tree-sitter/), builds a symbol index, and exposes 6 tools over the [Model Context Protocol](https://modelcontextprotocol.io/) that answer structural questions directly: find symbols, trace callers, assess blast radius, search by structure.
+codedeep-mcp parses your code with [tree-sitter](https://tree-sitter.github.io/tree-sitter/), builds a symbol index, and exposes 9 tools over the [Model Context Protocol](https://modelcontextprotocol.io/): 6 read-only structural tools that answer questions directly (find symbols, trace callers, assess blast radius, search by structure) plus a 3-tool agent-curated knowledge layer (`remember` / `recall` / `forget`) whose notes are **staleness-tracked** against your source — when anchored code changes, the note is flagged instead of rotting silently.
 
 ## Why
 
@@ -32,6 +32,9 @@ codedeep-mcp solves this by parsing code into symbols and relationships, then an
 | `find_references` | Cross-file usage search | Who calls this function, and from where? |
 | `impact` | Depth-N blast radius | Transitive upstream callers, grouped by hop |
 | `search_structure` | Keyword and structural search | Find by name/signature (all languages), or AST pattern (TS/JS) |
+| `remember` | Store a durable, anchored note | Cross-file invariants, footguns, decisions — anchored to files/symbols |
+| `recall` | Retrieve notes with freshness | Each note tagged ✓ fresh / ⚠ stale by re-checking its anchors |
+| `forget` | Delete a note | Remove superseded or wrong knowledge |
 
 ## Quick Start
 
@@ -63,7 +66,6 @@ Any MCP client that supports stdio transport works. Configure it to run `npx cod
 Your Code  ──>  tree-sitter (parse)  ──>  In-Memory Index  ──>  MCP Tools
                                                │
                                           Git (optional)
-                                          LSP (planned)
 ```
 
 **Structural index (always, instant):**
@@ -83,10 +85,18 @@ Commit frequency identifies hotspot files; co-change analysis reveals
 behavioral coupling (files that change together); and a risk score
 (churn × coupling × complexity) ranks the most change-prone, tangled hubs.
 
-**Planned — LSP semantic tier:**
-LSP integration (tsserver, pyright, gopls, …) for compiler-precise
-cross-file references and type info is designed but **not yet shipped** —
-cross-file edges today are AST name-matches.
+**Agent-curated knowledge layer (staleness-tracked):**
+`remember` anchors durable notes to files/symbols and snapshots a content
+baseline; `recall` re-checks each anchor against the current source and tags
+every note ✓ fresh / ⚠ stale / ✗ missing — so an agent's accumulated knowledge
+is verified at read time instead of rotting silently. Notes are stored in the
+local `.codedeep` cache, never written into your source.
+
+**Honest confidence, by design:**
+Cross-file edges are AST-derived name-matches with confidence tiers, not
+compiler-verified references — every approximate row is tagged (e.g.
+`[name match, unverified]`, `[behavioral]`) so an agent knows what to
+trust and what to verify before asserting.
 
 ## Example
 
@@ -139,8 +149,9 @@ cyclomatic + cognitive complexity:
 TypeScript / JS · Python · Java · Go · Rust · Swift · Kotlin · Dart · C# ·
 PHP · Ruby · C++ · C · Objective-C
 
-A planned LSP tier (see *How It Works*) will add compiler-precise cross-file
-resolution per language.
+Cross-file references are AST name-matches with per-row confidence tags (see
+*How It Works*) — precision-tuned per language against real-repo corpora with
+an explicit 0-wrong-kind-edge goal.
 
 ## Configuration
 

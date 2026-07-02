@@ -30,12 +30,10 @@ import {
   type ToolResponse,
 } from './common.js';
 
-export type FindReferencesKind =
-  | 'callers'
-  | 'callees'
-  | 'implementations'
-  | 'type_references'
-  | 'all';
+// implementations/type_references were removed from this union (and the server
+// zod enum) deliberately: they only ever rendered a "ships later" placeholder,
+// and a dead enum value in the live schema is an invitation to wasted calls.
+export type FindReferencesKind = 'callers' | 'callees' | 'all';
 
 export interface FindReferencesArgs {
   file: string;
@@ -62,7 +60,6 @@ const WEAK_MEMBER_ROW_CAP = 8;
 
 const CALLERS_HEADER = `### Callers ${NAME_MATCH_HEADER_QUALIFIER}`;
 const CALLEES_HEADER = '### Callees (within-file — from AST resolution)';
-const PHASE_2_NOTE = '(none — ships with LSP in Phase 2)';
 
 interface RankedRef {
   ref: Reference;
@@ -137,12 +134,6 @@ export async function runFindReferences(
     }
     if (kind === 'callees' || kind === 'all') {
       sections.push(renderCallees(target, deps.index, limit));
-    }
-    if (kind === 'implementations' || kind === 'all') {
-      sections.push(renderPhase2('Implementations'));
-    }
-    if (kind === 'type_references' || kind === 'all') {
-      sections.push(renderPhase2('Type References'));
     }
     // Behavioral coupling rides along with kind 'all' only: it is
     // file-granularity enrichment, not a reference kind, and it stays a
@@ -236,7 +227,9 @@ function renderCallees(
   index: CodeIndex,
   limit: number,
 ): string {
-  // Within-file only — cross-file callee resolution waits for LSP (Phase 2).
+  // Within-file only by design — callees are bound at extract time from the
+  // one file's AST; cross-file callee resolution is not modeled (the header
+  // says so, so an empty list reads as a scope limit, not an all-clear).
   const callees = index.getCallees(target.id);
   const body: string[] = callees
     .slice(0, limit)
@@ -245,10 +238,6 @@ function renderCallees(
     body.push(omittedSuffix(callees.length - limit));
   }
   return sectionOrNone(CALLEES_HEADER, body);
-}
-
-function renderPhase2(label: string): string {
-  return `### ${label}\n${PHASE_2_NOTE}`;
 }
 
 // Confidence-only rows — find_references is the breadth view; the

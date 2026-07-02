@@ -13,6 +13,7 @@ import {
   BEHAVIORAL_TAG,
   confidencePreamble,
   MEMBER_MATCH_TAG,
+  estimate,
   MODULE_LEVEL,
   NAME_MATCH_TAG,
   STRUCTURAL_TAG,
@@ -137,10 +138,6 @@ function tagFor(strength: EdgeStrength): string {
   if (strength === 'resolved') return STRUCTURAL_TAG;
   if (strength === 'weak-member') return MEMBER_MATCH_TAG;
   return NAME_MATCH_TAG;
-}
-
-function estimate(text: string): number {
-  return Math.ceil(text.length / 4);
 }
 
 function flattenByDepth(root: CallerTreeNode): Map<number, CallerTreeNode[]> {

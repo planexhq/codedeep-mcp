@@ -47,12 +47,14 @@
     "prepare": "npm run build"
   },
   "dependencies": {
-    "@ast-grep/napi": "^0.43.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "minisearch": "^7.1.2",
     "picomatch": "^4.0.4",
     "web-tree-sitter": "^0.26.8",
     "zod": "^4.0.0"
+  },
+  "optionalDependencies": {
+    "@ast-grep/napi": "^0.43.0"
   },
   "devDependencies": {
     "@repomix/tree-sitter-wasms": "^0.1.17",

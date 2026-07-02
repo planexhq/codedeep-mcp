@@ -83,3 +83,37 @@ describe('parser without initialization', () => {
     );
   });
 });
+
+describe('lazy per-language grammar loading', () => {
+  it('initParser([lang]) loads ONLY that grammar; others stay unloaded', async () => {
+    vi.resetModules();
+    const fresh = await import('../../src/indexer/parser.js');
+    await fresh.initParser(['python']);
+    // The requested grammar parses…
+    const tree = fresh.parseFile(PY_SRC, 'python');
+    expect(tree).not.toBeNull();
+    expect(tree!.rootNode.hasError).toBe(false);
+    // …while an unrequested-but-supported one is NOT silently degraded — it
+    // throws the loud ordering error (the pipeline always ensures per-file).
+    expect(() => fresh.parseFile(TS_SRC, 'typescript')).toThrow(/not initialized/i);
+    // Unsupported stays a warn + null, independent of what's loaded.
+    expect(fresh.parseFile('x', 'cobol')).toBeNull();
+  });
+
+  it('later initParser calls top up incrementally (idempotent per language)', async () => {
+    vi.resetModules();
+    const fresh = await import('../../src/indexer/parser.js');
+    await fresh.initParser(['python']);
+    await fresh.initParser(['typescript', 'python']); // python already loaded — no-op
+    expect(fresh.parseFile(TS_SRC, 'typescript')).not.toBeNull();
+    expect(fresh.parseFile(PY_SRC, 'python')).not.toBeNull();
+  });
+
+  it('initParser with unknown names is a safe no-op', async () => {
+    vi.resetModules();
+    const fresh = await import('../../src/indexer/parser.js');
+    // The scanner emits 'unknown' for unrecognized extensions; the pipeline
+    // passes the raw scan-found set, so unknown must not reject.
+    await expect(fresh.initParser(['unknown', 'cobol'])).resolves.toBeUndefined();
+  });
+});

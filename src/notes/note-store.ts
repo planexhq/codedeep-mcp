@@ -31,9 +31,12 @@ export class NoteStore {
   private loadPromise: Promise<void> | null = null;
   // Non-null when writes are blocked (and the reason). Set when the on-disk
   // store was written by a NEWER build (recall still serves it; remember/forget
-  // refuse so we never down-convert and clobber it), OR when a corrupt/foreign
+  // refuse so we never down-convert and clobber it), when a corrupt/foreign
   // store could NOT be quarantined (so a later persist can't overwrite the
-  // un-recovered original).
+  // un-recovered original), when notes.json is PRESENT but unreadable
+  // (transient lock/EACCES — a write would rename-over the un-read original),
+  // OR when notes.json is MISSING but a `.bak` survives (a write would clobber
+  // the manual restore our own message invites).
   private writeBlocked: string | null = null;
   // Non-null when the store's NOTES are unavailable at load — a corrupt/foreign
   // store that was quarantined (moved aside, success OR fail) or a
@@ -42,6 +45,15 @@ export class NoteStore {
   // its notes (no loadNotice), and a quarantine-SUCCESS leaves writes enabled
   // (no writeBlocked) yet the prior notes were moved aside (loadNotice set).
   private loadNotice: string | null = null;
+  // Identity of the blocked/degraded state the LAST load ended in (null =
+  // healthy). Three states reset loadPromise so every tool call re-loads
+  // (missing-with-.bak, present-but-unreadable, quarantine-rename-failure) —
+  // their stderr warns fire only on ENTERING the state (key change across
+  // consecutive loads), not once per recall/remember/forget forever. The
+  // in-band loadNotice still rides every response. The .bak state keys on the
+  // backup NAME SET, so exiting and re-entering with different backups (e.g.
+  // one restored, notes.json rm'd again) is a NEW entry and warns again.
+  private blockedWarnKey: string | null = null;
   private storeCreatedAt: string | null = null;
   private writeLock: Promise<unknown> = Promise.resolve();
 
@@ -77,9 +89,12 @@ export class NoteStore {
   private async doLoad(): Promise<void> {
     // Clear the block + notice up front so EVERY (re-)load starts from a clean
     // slate — the branches below re-set them only when they genuinely must
-    // (unreadable / newer-version / quarantine). This is the single reset point,
-    // so a retried load ending in ANY branch recovers instead of latching stale
-    // state.
+    // (unreadable / newer-version / quarantine / missing-with-.bak). This is
+    // the single reset point, so a retried load ending in ANY branch recovers
+    // instead of latching stale state. `prevWarnKey` is captured here for the
+    // same reason: the per-call-retry branches warn only on ENTERING their state.
+    const prevWarnKey = this.blockedWarnKey;
+    this.blockedWarnKey = null;
     this.writeBlocked = null;
     this.loadNotice = null;
     await this.cleanupStaleTmp();
@@ -101,24 +116,60 @@ export class NoteStore {
           `writes are disabled until it becomes readable (retried each tool call) — ` +
           `or recover/delete it manually.`;
         this.loadNotice = this.writeBlocked; // notes are unavailable this session
-        log.warn(
-          `NoteStore.load: failed to read ${this.notesPath}: ${errMsg(err)}; writes disabled (will retry)`,
-        );
+        this.blockedWarnKey = 'unreadable';
+        if (prevWarnKey !== this.blockedWarnKey) {
+          log.warn(
+            `NoteStore.load: failed to read ${this.notesPath}: ${errMsg(err)}; writes disabled (retried each tool call)`,
+          );
+        }
         this.loadPromise = null; // transient → allow the next load() to re-read
         return;
       }
-      // notes.json is absent → start empty, but warn if an interrupted-swap
-      // backup is present so the user can recover it manually (we never
-      // auto-restore — see warnIfBackupPresent). When one IS present, surface it
-      // in-band too (loadNotice): an MCP client doesn't see the stderr warn, so
-      // recall must be able to tell the agent that the empty store may have
-      // recoverable notes sitting in a `.bak` — not genuine emptiness.
-      const hadBackup = await this.warnIfBackupPresent();
-      if (hadBackup) {
-        this.loadNotice =
-          `notes.json is missing but a backup (.bak) is present — it may hold ` +
-          `recoverable notes from an interrupted write; inspect the newest and ` +
-          `rename it to restore. Starting empty until then.`;
+      // notes.json is absent → start empty, but if an interrupted-swap backup is
+      // present, warn AND surface it in-band (we never auto-restore — see
+      // warnIfBackupPresent). Crucially, BLOCK WRITES and reset the load memo:
+      // the message invites a manual `.bak`→notes.json restore, and with the
+      // empty view memoized and writable, the very next remember's atomic
+      // rename-over would CLOBBER the file the user just restored — destroying
+      // exactly the notes we told them to recover. Mirroring the
+      // transient-unreadable pattern (block + re-read each tool call) makes the
+      // advertised manual path survivable: restore → next load serves the real
+      // notes and re-enables writes; delete the .bak instead → next load starts
+      // empty-and-writable. Race-free because writes throw before mutating.
+      //
+      // ADJUDICATED TRADEOFF: this block also captures a stale ORPHAN .bak
+      // (successful Windows swap whose final unlink failed) followed by an
+      // intentional `rm notes.json` — that user hits a write outage until they
+      // delete the orphan. Post-hoc the two cases are indistinguishable on
+      // disk, notes are non-rebuildable, and the error message names the exact
+      // one-command remediation — so data-safety wins over availability here.
+      // Do not weaken the block without a way to tell the cases apart.
+      const baks = await this.detectBackups();
+      if (baks.length > 0) {
+        // Key on the backup NAME SET so a genuine re-entry (one .bak restored,
+        // notes.json rm'd again with another .bak still present) reads as a
+        // NEW state and warns again, while per-call re-loads of the SAME state
+        // stay silent. (detectBackups returns its names pre-sorted.)
+        this.blockedWarnKey = `bak:${baks.join('\0')}`;
+        if (prevWarnKey !== this.blockedWarnKey) {
+          log.warn(
+            `NoteStore.load: ${this.notesPath} is missing but ${baks.length} backup ` +
+              `file(s) exist (${basename(this.notesPath)}.bak.*) — possibly from an ` +
+              `interrupted or a prior write. Inspect the newest and rename it to ` +
+              `${basename(this.notesPath)} to restore it (it may be older than your ` +
+              `last state), or delete the .bak file(s) to start fresh; writes stay ` +
+              `disabled until one or the other.`,
+          );
+        }
+        this.writeBlocked =
+          `the note store at ${this.notesPath} is missing but a backup (.bak) is ` +
+          `present — it may hold recoverable notes from an interrupted write. ` +
+          `Writes are disabled (retried each tool call) so a manual restore ` +
+          `can't be overwritten: rename the newest .bak to ` +
+          `${basename(this.notesPath)} to restore it, or delete the .bak ` +
+          `file(s) to start fresh.`;
+        this.loadNotice = this.writeBlocked;
+        this.loadPromise = null; // re-check on the next tool call
       }
       return;
     }
@@ -127,18 +178,18 @@ export class NoteStore {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      await this.quarantine('corrupt', 'malformed JSON');
+      await this.quarantine('corrupt', 'malformed JSON', prevWarnKey);
       return;
     }
 
     if (!isValidStore(parsed)) {
-      await this.quarantine('corrupt', 'shape validation failed');
+      await this.quarantine('corrupt', 'shape validation failed', prevWarnKey);
       return;
     }
     if (parsed.projectRoot !== this.projectRoot) {
       // These notes belong to a different project (e.g. a shared explicit
       // cacheDir). Never serve them here; preserve the bytes for recovery.
-      await this.quarantine('otherroot', `projectRoot ${parsed.projectRoot}`);
+      await this.quarantine('otherroot', `projectRoot ${parsed.projectRoot}`, prevWarnKey);
       return;
     }
 
@@ -190,7 +241,7 @@ export class NoteStore {
   // bare SIMPLE query matches any member with that last segment. `::` scope in
   // the query is folded to the extractor's `.` form first.
   bySymbol(relPath: string, symbolName: string): Note[] {
-    const q = symbolName.replace(/::/g, '.');
+    const q = normalizeSymbolQuery(symbolName);
     const qualified = q.includes('.');
     return sortByRecency(
       this.notes.filter((n) =>
@@ -334,38 +385,39 @@ export class NoteStore {
     this.storeCreatedAt = createdAt;
   }
 
-  // notes.json is absent. If any `.bak` from an interrupted swap (or a prior
-  // write whose cleanup didn't run) survives, warn so the user can recover it by
-  // hand. We deliberately do NOT auto-restore: an absent notes.json is
-  // indistinguishable from an intentional `rm`, and a lingering backup may be
-  // OLDER than the last state — silently resurrecting it is worse than starting
-  // empty. The wording is non-committal for exactly that reason. Never throws.
-  // Returns whether a backup was found so the caller can surface it in-band.
-  private async warnIfBackupPresent(): Promise<boolean> {
+  // notes.json is absent — list any `.bak` survivors from an interrupted swap
+  // (or a prior write whose cleanup didn't run). Silent (the caller owns the
+  // warn-once-per-state-entry decision). We deliberately do NOT auto-restore:
+  // an absent notes.json is indistinguishable from an intentional `rm`, and a
+  // lingering backup may be OLDER than the last state — silently resurrecting
+  // it is worse than starting empty. The caller BLOCKS writes so the advertised
+  // manual restore can't be clobbered by a memoized empty store. Never throws.
+  // Returned names are SORTED so callers can use them directly as a stable
+  // state-identity key (readdir order is platform-dependent).
+  private async detectBackups(): Promise<string[]> {
     try {
       const dir = dirname(this.notesPath);
       const prefix = `${basename(this.notesPath)}.bak.`;
-      const baks = (await fs.readdir(dir)).filter((e) => e.startsWith(prefix));
-      if (baks.length === 0) return false;
-      log.warn(
-        `NoteStore.load: ${this.notesPath} is missing but ${baks.length} backup ` +
-          `file(s) exist (${prefix}*) — possibly from an interrupted or a prior ` +
-          `write. Inspect the newest and rename it to ${basename(this.notesPath)} ` +
-          `ONLY to restore it (it may be older than your last state); else ignored.`,
-      );
-      return true;
+      return (await fs.readdir(dir)).filter((e) => e.startsWith(prefix)).sort();
     } catch {
       // no dir / unreadable → nothing to recover, start empty
-      return false;
+      return [];
     }
   }
 
   // Preserve unreadable/foreign bytes for manual recovery, then start empty.
-  // If the rename SUCCEEDS the original is safe aside, so writes may proceed.
-  // If it FAILS the original is still at notesPath — block writes, because a
-  // later persist() would atomically overwrite (and destroy) those un-recovered
-  // bytes, violating the "never lose notes" invariant. Never throws out of load.
-  private async quarantine(kind: string, reason: string): Promise<void> {
+  // If the rename SUCCEEDS the original is safe aside, so writes may proceed
+  // (that warn is unconditional — the file is renamed away, so it fires once
+  // by nature). If it FAILS the original is still at notesPath — block writes,
+  // because a later persist() would atomically overwrite (and destroy) those
+  // un-recovered bytes, violating the "never lose notes" invariant; that
+  // failure state RE-LOADS per tool call, so its warn is gated on state entry
+  // (prevWarnKey). Never throws out of load.
+  private async quarantine(
+    kind: string,
+    reason: string,
+    prevWarnKey: string | null,
+  ): Promise<void> {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const aside = `${this.notesPath}.${kind}-${stamp}`;
     try {
@@ -382,10 +434,17 @@ export class NoteStore {
         `(${reason}); writes are disabled to avoid overwriting it — recover or ` +
         `delete it manually.`;
       this.loadNotice = this.writeBlocked;
-      log.warn(
-        `NoteStore.load: ${this.notesPath} ${reason}; could not quarantine ` +
-          `(${errMsg(err)}); writes disabled, original left in place`,
-      );
+      // The key carries the CAUSE: transitioning between different
+      // quarantine-fail reasons (corrupt → foreign-root, say the user swapped
+      // the file while the dir stayed unwritable) is a NEW state whose fresh
+      // cause must reach stderr, not be suppressed as a repeat.
+      this.blockedWarnKey = `quarantine-fail:${kind}:${reason}`;
+      if (prevWarnKey !== this.blockedWarnKey) {
+        log.warn(
+          `NoteStore.load: ${this.notesPath} ${reason}; could not quarantine ` +
+            `(${errMsg(err)}); writes disabled, original left in place`,
+        );
+      }
       // The rename failure is often TRANSIENT (a read-only-for-a-moment dir) —
       // reset the memo so a later load() re-attempts the quarantine once the dir
       // is writable again, instead of latching the block for the whole session.
@@ -452,6 +511,14 @@ function simpleSymbolName(s: string): string {
 export function qualifiedSymbolName(fqn: string, file: string, fallback: string): string {
   const prefix = `${file}:`;
   return fqn.startsWith(prefix) ? fqn.slice(prefix.length) : fallback;
+}
+
+// Fold `::` scope separators to the extractor's dotted FQN form
+// ("Ns::Type::method" → "Ns.Type.method"). The ONE normalization every
+// symbol-name entry point applies — remember's anchor resolution, bySymbol
+// queries — so a note stored from a C++-style query is findable by either form.
+export function normalizeSymbolQuery(symbolName: string): string {
+  return symbolName.replace(/::/g, '.');
 }
 
 function isValidStore(data: unknown): data is NotesStore {

@@ -93,6 +93,57 @@ describe('CodeIndex.addFile', () => {
   });
 });
 
+describe('CodeIndex.addFile — same-file adjacency invariant', () => {
+  it('rejects a cross-file resolved ref from the id-keyed adjacency (kept name-keyed)', () => {
+    // removeFileInternal prunes the adjacency by deleting only the removed
+    // file's OWN keys — sound only if every id-keyed edge is same-file. This
+    // guard enforces that at the edge-entry site: a future cross-file resolver
+    // must not silently poison the maps (dangling ids after removeFile,
+    // inflated fan-in/fan-out) — its refs stay name-keyed until the cross-file
+    // story is designed deliberately.
+    const idx = new CodeIndex();
+    const other = mkSym({ name: 'target', file: 'src/other.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/other.ts'), [other], [], []);
+
+    const caller = mkSym({ name: 'caller', file: 'src/a.ts' });
+    const crossRef = mkRef(caller, other); // targetId points OUTSIDE src/a.ts
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [caller], [crossRef], []);
+
+    // Not admitted to the id-keyed adjacency. Assert via getFanOut — the RAW
+    // set size — not getCallees, whose resolveIds silently filters dangling
+    // ids and would pass vacuously even if the edge had leaked in.
+    expect(idx.getFanOut(caller.id)).toBe(0);
+    expect(idx.getCallers(other.id)).toEqual([]);
+    // …but still present in the name-keyed store (today's cross-file path).
+    expect(
+      idx.getReferencesByName('target').some((r) => r.file === 'src/a.ts'),
+    ).toBe(true);
+
+    // Removing the TARGET file leaves no dangling raw entry behind.
+    idx.removeFile('src/other.ts');
+    expect(idx.getFanOut(caller.id)).toBe(0);
+  });
+
+  it('rejects a foreign-SOURCE resolved ref from the id-keyed adjacency too', () => {
+    // The invariant cuts both ways: an edge keyed under ANOTHER file's source
+    // id would dangle in that file's sets when THIS file is removed (inflating
+    // the source's raw fan-out) — the gate must check both endpoints.
+    const idx = new CodeIndex();
+    const foreign = mkSym({ name: 'outsideCaller', file: 'src/other.ts' });
+    idx.addFile(makeFileInfo('typescript', 'src/other.ts'), [foreign], [], []);
+
+    const target = mkSym({ name: 'localTarget', file: 'src/a.ts' });
+    const ref = mkRef(foreign, target); // sourceId from OUTSIDE src/a.ts
+    ref.file = 'src/a.ts'; // anchored in this file, as a cross-file resolver would
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [target], [ref], []);
+
+    expect(idx.getFanOut(foreign.id)).toBe(0); // never keyed under the foreign id
+    expect(idx.getCallers(target.id)).toEqual([]);
+    idx.removeFile('src/a.ts');
+    expect(idx.getFanOut(foreign.id)).toBe(0); // nothing dangling under src/other.ts's key
+  });
+});
+
 describe('CodeIndex.removeFile', () => {
   it('cascade-deletes symbols, names, callees, callers, imports', () => {
     const idx = new CodeIndex();
@@ -972,20 +1023,23 @@ describe('CodeIndex.getReferencesByName', () => {
   });
 
   it('returns module-level refs (sourceId=null) without polluting callers adjacency', () => {
+    // Realistic shape: a module-level call resolves (targetId set) only when
+    // the target is in the SAME file — resolveCalls builds its name maps from
+    // the one file's symbols, and addFile's same-file gate demotes anything
+    // else. The null sourceId must still keep the ref out of the adjacency.
     const idx = new CodeIndex();
     const target = mkSym({ name: 'authenticate', file: 'src/auth.ts' });
-    idx.addFile(makeFileInfo('typescript', 'src/auth.ts'), [target], [], []);
     idx.addFile(
-      makeFileInfo('typescript', 'src/api.ts'),
-      [],
+      makeFileInfo('typescript', 'src/auth.ts'),
+      [target],
       [
         {
           sourceId: null,
           targetId: target.id,
           targetName: 'authenticate',
           kind: 'calls',
-          file: 'src/api.ts',
-          line: 2,
+          file: 'src/auth.ts',
+          line: 20,
         },
       ],
       [],
@@ -2385,7 +2439,7 @@ describe('isCallerOf', () => {
   );
 
   it.each(['this', 'self', 'cls'])(
-    'rejects unresolved %s-receiver refs (inherited methods are LSP territory)',
+    'rejects unresolved %s-receiver refs (inheritance is not modeled)',
     (receiver) => {
       const target = mkSym({
         name: 'render',

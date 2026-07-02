@@ -319,21 +319,18 @@ describe('integration: end-to-end pipeline + tools', () => {
     expect(text).toContain('[name match, unverified]');
   });
 
-  it('find_references returns Phase-2 placeholder for kind=implementations', async () => {
+  it('find_references never emits retired placeholders or LSP roadmap promises', async () => {
     const deps = await setup('small-ts');
     const text = (
       await runFindReferences(
-        {
-          file: 'src/auth.ts',
-          symbol: 'authenticate',
-          kind: 'implementations',
-        },
+        { file: 'src/auth.ts', symbol: 'authenticate', kind: 'all' },
         deps,
       )
     ).content[0].text;
 
-    expect(text).toContain('### Implementations');
-    expect(text).toContain('(none — ships with LSP in Phase 2)');
+    expect(text).not.toContain('### Implementations');
+    expect(text).not.toContain('### Type References');
+    expect(text).not.toMatch(/LSP|Phase 2/);
   });
 
   it('find_references errors when symbol is unknown in file', async () => {

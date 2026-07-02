@@ -1,9 +1,15 @@
 import { open, readdir, stat } from 'node:fs/promises';
-import { join, relative, sep, posix } from 'node:path';
+import { join, relative, posix } from 'node:path';
 import picomatch from 'picomatch';
 
+import { toPosix } from '../fs-util.js';
 import { LANGUAGE_UNKNOWN, type FileInfo, type CodedeepConfig } from '../types.js';
 import { log } from '../logger.js';
+
+// Re-exported for the scanner's indexer siblings (pipeline/watcher) — the
+// implementation lives in the neutral fs-util module so config.ts can use it
+// without importing the indexer layer.
+export { toPosix };
 
 const BYTE_CHECK_BUF_SIZE = 8192;
 
@@ -83,10 +89,6 @@ const BINARY_EXT = new Set([
 ]);
 
 const GLOB_CHARS = /[*?[\]{}!]/;
-
-export function toPosix(p: string): string {
-  return sep === '/' ? p : p.split(sep).join('/');
-}
 
 export function detectLanguage(filename: string): string | null {
   const ext = posix.extname(toPosix(filename)).toLowerCase();

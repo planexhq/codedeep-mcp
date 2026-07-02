@@ -1,7 +1,7 @@
 import type { GitService, RecentCommit } from '../git/git-service.js';
 import type { CodeIndex } from '../indexer/code-index.js';
 import { hashContent } from '../indexer/pipeline.js';
-import { safeReadIndexedFile } from '../tools/common.js';
+import { safeReadIndexedFile } from '../fs-util.js';
 import type { CodedeepConfig, Symbol } from '../types.js';
 import { qualifiedSymbolName } from './note-store.js';
 import type { Anchor, Note } from './types.js';

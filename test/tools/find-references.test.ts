@@ -351,7 +351,10 @@ describe('runFindReferences — noise reduction', () => {
 });
 
 describe('runFindReferences — kind handling', () => {
-  it("renders Phase-2 placeholder for kind='implementations'", async () => {
+  it("kind='all' contains no retired placeholder sections or roadmap promises", async () => {
+    // implementations/type_references were REMOVED (they only ever rendered a
+    // "ships later" placeholder — a dead enum value invites wasted calls), and
+    // the shipped surface must not promise an LSP tier the roadmap retired.
     const idx = new CodeIndex(tmpRoot);
     idx.addFile(
       makeFileInfo('typescript', 'src/a.ts'),
@@ -362,34 +365,16 @@ describe('runFindReferences — kind handling', () => {
 
     const text = (
       await runFindReferences(
-        { file: 'src/a.ts', symbol: 'foo', kind: 'implementations' },
+        { file: 'src/a.ts', symbol: 'foo', kind: 'all' },
         makeDeps(idx),
       )
     ).content[0].text;
 
-    expect(text).toContain('### Implementations');
-    expect(text).toContain('(none — ships with LSP in Phase 2)');
-    expect(text).not.toContain('### Callers');
-  });
-
-  it("renders Phase-2 placeholder for kind='type_references'", async () => {
-    const idx = new CodeIndex(tmpRoot);
-    idx.addFile(
-      makeFileInfo('typescript', 'src/a.ts'),
-      [mkSym({ name: 'foo', file: 'src/a.ts' })],
-      [],
-      [],
-    );
-
-    const text = (
-      await runFindReferences(
-        { file: 'src/a.ts', symbol: 'foo', kind: 'type_references' },
-        makeDeps(idx),
-      )
-    ).content[0].text;
-
-    expect(text).toContain('### Type References');
-    expect(text).toContain('(none — ships with LSP in Phase 2)');
+    expect(text).toContain('### Callers');
+    expect(text).toContain('### Callees');
+    expect(text).not.toContain('### Implementations');
+    expect(text).not.toContain('### Type References');
+    expect(text).not.toMatch(/LSP|Phase 2/);
   });
 
   it("kind='callees' falls through to within-file adjacency", async () => {
@@ -422,27 +407,6 @@ describe('runFindReferences — kind handling', () => {
     expect(text).not.toContain('### Callers');
   });
 
-  it("kind='all' renders all sections", async () => {
-    const idx = new CodeIndex(tmpRoot);
-    idx.addFile(
-      makeFileInfo('typescript', 'src/a.ts'),
-      [mkSym({ name: 'foo', file: 'src/a.ts' })],
-      [],
-      [],
-    );
-
-    const text = (
-      await runFindReferences(
-        { file: 'src/a.ts', symbol: 'foo', kind: 'all' },
-        makeDeps(idx),
-      )
-    ).content[0].text;
-
-    expect(text).toContain('### Callers');
-    expect(text).toContain('### Callees');
-    expect(text).toContain('### Implementations');
-    expect(text).toContain('### Type References');
-  });
 });
 
 describe('runFindReferences — limit', () => {

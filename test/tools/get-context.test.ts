@@ -831,8 +831,22 @@ describe('runGetContext — file mode', () => {
     idx.addFile(
       makeFileInfo('typescript', 'src/api.ts'),
       [externalCaller],
-      [mkRef(externalCaller, authenticate), mkRef(externalCaller, authorize)],
-      [],
+      // Cross-file calls are UNRESOLVED name refs (targetId null) — the real
+      // extractor resolves ids within one file only, and addFile's same-file
+      // gate demotes anything else. The import edge is what scopes them to
+      // src/auth.ts (primaryRefMatchesTarget), exactly as in real code.
+      [
+        mkUnresolvedRef(externalCaller, 'authenticate'),
+        mkUnresolvedRef(externalCaller, 'authorize'),
+      ],
+      [
+        {
+          file: 'src/api.ts',
+          sourceModule: './auth',
+          importedNames: [{ name: 'authenticate' }, { name: 'authorize' }],
+          line: 1,
+        },
+      ],
     );
 
     const result = await runGetContext(
@@ -1227,6 +1241,49 @@ describe('runGetContext — include filter', () => {
     expect(text).not.toContain('### Body');
     expect(text).not.toContain('### Callees');
     expect(text).not.toContain('### Imports');
+  });
+
+  it('surfaces a typo\'d include section instead of silently dropping it', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, { 'src/a.ts': 'function foo() {}\n' });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/a.ts'),
+      [mkSym({ name: 'foo', file: 'src/a.ts', startLine: 1, endLine: 1 })],
+      [],
+      [],
+    );
+
+    // All-invalid: the old behavior yielded an EMPTY shell that read as "no
+    // data here" — a false conclusion. Now: note the typo, list the valid
+    // names, and fall back to showing everything.
+    const allBad = await runGetContext(
+      { file: 'src/a.ts', symbol: 'foo', include: ['callrs'] },
+      makeDeps(idx),
+    );
+    const allBadText = allBad.content[0].text;
+    expect(allBadText).toContain('Ignored unknown include section');
+    expect(allBadText).toContain('"callrs"');
+    expect(allBadText).toContain('Valid: body, callers');
+    expect(allBadText).toContain('Showing all sections');
+    expect(allBadText).toContain('### Body'); // fell back to ALL_SECTIONS
+
+    // Mixed: keep the valid selection, still surface the unknown key.
+    const mixed = await runGetContext(
+      { file: 'src/a.ts', symbol: 'foo', include: ['body', 'callrs'] },
+      makeDeps(idx),
+    );
+    const mixedText = mixed.content[0].text;
+    expect(mixedText).toContain('Ignored unknown include section');
+    expect(mixedText).toContain('### Body');
+    expect(mixedText).not.toContain('### Callers'); // selection still honored
+    expect(mixedText).not.toContain('Showing all sections');
+
+    // Hyphen alias folds to the canonical underscore name — no note.
+    const hyphen = await runGetContext(
+      { file: 'src/a.ts', symbol: 'foo', include: ['co-changes'] },
+      makeDeps(idx),
+    );
+    expect(hyphen.content[0].text).not.toContain('Ignored unknown');
   });
 
   it('honors include in file mode and shows only the requested sections', async () => {

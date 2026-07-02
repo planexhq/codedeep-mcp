@@ -3,6 +3,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -287,17 +288,112 @@ describe('NoteStore', () => {
     expect(reloaded.all().map((n) => n.id)).toEqual(['n1']);
   });
 
-  it('flags degraded (in-band) when notes.json is missing but a .bak survives', async () => {
+  it('flags degraded AND blocks writes when notes.json is missing but a .bak survives', async () => {
     // Crash-orphan case: notes.json absent, a .bak present. The load warns on
-    // stderr (invisible to an MCP client) AND sets degradedReason so recall can
-    // tell the agent recoverable notes may exist — not genuine emptiness ([1]).
+    // stderr (invisible to an MCP client), sets degradedReason so recall can
+    // tell the agent recoverable notes may exist — AND blocks writes: the
+    // message invites a manual restore, so a write from the memoized empty
+    // store must not be able to clobber it.
     const dir = dirname(notesPath);
     writeFileSync(join(dir, `${basename(notesPath)}.bak.9.9`), 'older notes', 'utf8');
     const store = new NoteStore(notesPath, root);
     await store.load();
     expect(store.all()).toEqual([]); // notes.json absent → empty
-    expect(store.isReadOnly).toBe(false); // an absent store is writable
+    expect(store.isReadOnly).toBe(true); // write would clobber a manual restore
     expect(store.degradedReason).toMatch(/backup/i);
+    await expect(store.add(mkNote({ id: 'n1' }))).rejects.toThrow(/\.bak/);
+  });
+
+  it('never clobbers a manually-restored notes.json (missing-with-.bak → restore → write)', async () => {
+    // THE clobber scenario: notes.json absent + a .bak holding the only copy.
+    // The user follows the store's own advice and renames the .bak back to
+    // notes.json. The next mutation must SEE the restored notes (block was
+    // transient — the load memo was reset) and append to them, not rename-over
+    // them with a 1-note store built from the memoized empty view.
+    const dir = dirname(notesPath);
+    const bak = join(dir, `${basename(notesPath)}.bak.5.5`);
+    writeFileSync(
+      bak,
+      JSON.stringify({
+        version: NOTES_STORE_VERSION,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        projectRoot: root,
+        notes: [mkNote({ id: 'precious' })],
+      }),
+      'utf8',
+    );
+    const store = new NoteStore(notesPath, root);
+    await store.load();
+    await expect(store.add(mkNote({ id: 'blocked' }))).rejects.toThrow(/\.bak/);
+    // Manual restore, exactly as the message instructs.
+    renameSync(bak, notesPath);
+    // Next mutation re-loads (memo was reset), serves the restored notes,
+    // re-enables writes, and APPENDS — the restored note survives.
+    await store.add(mkNote({ id: 'fresh' }));
+    expect(store.all().map((n) => n.id).sort()).toEqual(['fresh', 'precious']);
+    const onDisk = JSON.parse(readFileSync(notesPath, 'utf8'));
+    expect(onDisk.notes.map((n: Note) => n.id).sort()).toEqual(['fresh', 'precious']);
+  });
+
+  it('warns to stderr ONCE per entry into the missing-with-.bak state, not per call', async () => {
+    // The blocked state re-loads on every tool call (loadPromise reset) so a
+    // restore/delete is noticed — but the stderr warning must fire only on
+    // ENTERING the state, or hundreds of recalls bury real warnings in spam.
+    // (The in-band loadNotice still rides every response.)
+    const dir = dirname(notesPath);
+    writeFileSync(join(dir, `${basename(notesPath)}.bak.3.3`), 'orphan', 'utf8');
+    const spy = silenceStderr();
+    const store = new NoteStore(notesPath, root);
+    await store.load();
+    await store.add(mkNote({ id: 'x' })).catch(() => undefined); // re-load 1
+    await store.add(mkNote({ id: 'y' })).catch(() => undefined); // re-load 2
+    await store.load(); // re-load 3
+    const warns = spy.mock.calls.filter((c) =>
+      String(c[0]).includes('backup file(s) exist'),
+    );
+    expect(warns).toHaveLength(1);
+  });
+
+  it('warns ONCE for a persistently unreadable notes.json across per-call retries', async () => {
+    // The present-but-unreadable state also resets loadPromise (re-read per
+    // tool call, so it recovers when the lock/perm clears) — its stderr warn
+    // must fire once per state entry, not once per call (same rule as the
+    // missing-with-.bak state).
+    if (skipOnWindows) return;
+    if (process.getuid?.() === 0) return; // root bypasses POSIX mode bits
+    seedStore('locked');
+    const spy = silenceStderr();
+    const store = new NoteStore(notesPath, root);
+    await withChmod(notesPath, 0o000, async () => {
+      await store.load();
+      await store.load(); // per-call retry re-runs doLoad
+      await store.add(mkNote({ id: 'x' })).catch(() => undefined); // third re-load
+      expect(store.isReadOnly).toBe(true);
+      const warns = spy.mock.calls.filter((c) =>
+        String(c[0]).includes('failed to read'),
+      );
+      expect(warns).toHaveLength(1);
+    });
+    // Recovers (and serves the real notes) once readable again.
+    await store.load();
+    expect(store.all().map((n) => n.id)).toEqual(['locked']);
+    expect(store.isReadOnly).toBe(false);
+  });
+
+  it('starts fresh and writable once the lingering .bak is deleted', async () => {
+    // The other lever the message offers: the user deletes the .bak instead of
+    // restoring it. The next tool call's load must re-check (memo reset), find
+    // a plain ENOENT, and re-enable writes on a genuinely-empty store.
+    const dir = dirname(notesPath);
+    const bak = join(dir, `${basename(notesPath)}.bak.6.6`);
+    writeFileSync(bak, 'orphan', 'utf8');
+    const store = new NoteStore(notesPath, root);
+    await store.load();
+    expect(store.isReadOnly).toBe(true);
+    rmSync(bak);
+    await store.add(mkNote({ id: 'fresh-start' })); // re-loads, unblocked
+    expect(store.all().map((n) => n.id)).toEqual(['fresh-start']);
+    expect(store.degradedReason).toBeNull();
   });
 
   it('survives an index.json wipe — notes.json is a separate file', async () => {

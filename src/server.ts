@@ -1,12 +1,15 @@
 // SDK v1.29 takes `inputSchema` as a RAW Zod shape ({ k: z.string() }), not
 // `z.object({...})`. The v2 alpha uses the wrapped form — do not confuse them.
 
+import { readFileSync } from "node:fs";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import type { GitService } from "./git/git-service.js";
 import type { CodeIndex } from "./indexer/code-index.js";
 import type { Indexer } from "./indexer/pipeline.js";
+import { errMsg, log } from "./logger.js";
 import type { NoteStore } from "./notes/note-store.js";
 import { runFindReferences } from "./tools/find-references.js";
 import { runFindSymbol } from "./tools/find-symbol.js";
@@ -48,10 +51,42 @@ export interface ServerDeps {
   notes: NoteStore;
 }
 
+// Single source of truth for the advertised server version: the package's own
+// version field. Resolves from both src/ (tests) and dist/ (shipped) — each is
+// one directory below the package root. A hardcoded copy here drifted silently
+// (deferred v0.1.0 release note); reading it makes `npm version` sufficient.
+// Guarded: a bundled/relocated dist (no package.json one level up — or a
+// FOREIGN one that legally omits `version`, e.g. a private monorepo root) must
+// fall back to a placeholder STRING, never crash at import time and never let
+// `undefined` reach McpServer (serverInfo.version is required by the spec — an
+// undefined field would be dropped from the initialize response and can fail
+// client-side schema validation). The fallback is warned, not silent: a
+// placeholder version in a bug report should be traceable to its cause.
+const PACKAGE_VERSION: string = (() => {
+  try {
+    const version: unknown = (
+      JSON.parse(
+        readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+      ) as { version?: unknown }
+    ).version;
+    if (typeof version === "string" && version.length > 0) return version;
+    log.warn(
+      "server: ../package.json has no usable `version` field (foreign/rootless " +
+        "package.json?); advertising 0.0.0-unknown",
+    );
+  } catch (err) {
+    log.warn(
+      `server: could not read ../package.json for the server version ` +
+        `(${errMsg(err)}); advertising 0.0.0-unknown`,
+    );
+  }
+  return "0.0.0-unknown";
+})();
+
 export function createServer(deps: ServerDeps): McpServer {
   const server = new McpServer({
     name: "codedeep-mcp",
-    version: "0.1.0",
+    version: PACKAGE_VERSION,
   });
 
   server.registerTool(
@@ -60,7 +95,12 @@ export function createServer(deps: ServerDeps): McpServer {
       description:
         "Start here. 'What is this codebase?' — language breakdown, top-level structure, entry points, symbol counts; in a git repo, also branch/hotspots, risk ranking (churn × coupling × complexity), and index freshness. Orient with this before grepping; then drill in with find_symbol / get_context.",
       inputSchema: {
-        path: z.string().optional().describe("Project root (default: cwd)"),
+        path: z
+          .string()
+          .optional()
+          .describe(
+            "Sanity check only: must equal the server's configured project root if given (errors otherwise — one server indexes one root). Omit it; it does NOT scope the overview to a subdirectory.",
+          ),
       },
       annotations: SHARED_ANNOTATIONS,
     },
@@ -141,7 +181,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "find_references",
     {
       description:
-        "'Who uses X?' Cross-file callers ranked by confidence (directory + import proximity), not raw text matches like grep — each row tagged [name match] or the weaker [member call] (both unverified — verify before asserting). For the transitive blast radius use impact. (LSP-precise tiers ship in Phase 2.)",
+        "'Who uses X?' Cross-file callers ranked by confidence (directory + import proximity), not raw text matches like grep — each row tagged [name match] or the weaker [member call]. Rows are AST-derived and confidence-tiered, not compiler-verified — verify before asserting. For the transitive blast radius use impact.",
       inputSchema: {
         file: z.string().describe("File containing the symbol (relative to project root)"),
         symbol: z.string().describe("Symbol name"),
@@ -151,13 +191,7 @@ export function createServer(deps: ServerDeps): McpServer {
           .optional()
           .describe("Disambiguate when multiple symbols share a name"),
         kind: z
-          .enum([
-            "callers",
-            "callees",
-            "implementations",
-            "type_references",
-            "all",
-          ])
+          .enum(["callers", "callees", "all"])
           .optional()
           .describe("Result kind (default: 'all')"),
         limit: z
@@ -176,7 +210,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "impact",
     {
       description:
-        "'What breaks if I change X?' Transitive upstream caller tree grouped by hop, with a distinct-caller blast count and git co-change partners — something grep can't compute. Each edge tagged by confidence. For direct callers only, use find_references. (Edges are AST name-matches, not compiler-verified; downstream callees and inheritance ship with LSP in Phase 2.)",
+        "'What breaks if I change X?' Transitive upstream caller tree grouped by hop, with a distinct-caller blast count and git co-change partners — something grep can't compute. Each edge tagged by confidence. For direct callers only, use find_references. (Edges are AST name-matches, not compiler-verified — verify before asserting; downstream callees and inheritance are not traversed.)",
       inputSchema: {
         file: z
           .string()

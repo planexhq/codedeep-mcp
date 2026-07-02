@@ -38,6 +38,41 @@ describe('extractSymbols dispatcher', () => {
     }
   });
 
+  // Pins the SAME-FILE adjacency invariant that CodeIndex.removeFileInternal
+  // relies on to skip a whole-map prune sweep: resolveCalls builds its
+  // resolution maps (nameToId/typeNameToId/methodsByClass) from the ONE file's
+  // symbols, so a resolved reference (targetId !== null) can only point at a
+  // symbol of the same file — cross-file refs are stored name-keyed with
+  // targetId=null. If cross-file resolution is ever added (e.g. a project-wide
+  // symbol table), this fails and removeFileInternal must regain a sweep.
+  it.each([
+    [
+      'typescript',
+      'export function callee() {}\nexport class Svc { run() { this.step(); } step() {} }\nexport function caller() { callee(); new Svc(); }\n',
+    ],
+    [
+      'python',
+      'def callee():\n    pass\n\nclass Svc:\n    def run(self):\n        self.step()\n    def step(self):\n        pass\n\ndef caller():\n    callee()\n    Svc()\n',
+    ],
+    [
+      'cpp',
+      'class Svc { public: void run(); void step(); };\nvoid Svc::run() { step(); }\nint callee() { return 1; }\nint caller() { Svc s; return callee(); }\n',
+    ],
+    [
+      'ruby',
+      'class Svc\n  def run\n    step\n  end\n  def step\n  end\nend\n\ndef callee\nend\n\ndef caller\n  callee\n  Svc.new\nend\n',
+    ],
+  ])('resolved %s references always target the SAME file’s symbols', (language, src) => {
+    const tree = parseFile(src, language)!;
+    const { symbols, references } = extractSymbols(tree, src, makeFileInfo(language));
+    const ownIds = new Set(symbols.map((s) => s.id));
+    const resolved = references.filter((r) => r.targetId !== null);
+    expect(resolved.length).toBeGreaterThan(0); // the snippet must exercise resolution
+    for (const ref of resolved) {
+      expect(ownIds.has(ref.targetId!)).toBe(true);
+    }
+  });
+
   it('returns empty and warns for an unsupported language', () => {
     const tree = parseFile('const x = 1;', 'typescript')!;
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);

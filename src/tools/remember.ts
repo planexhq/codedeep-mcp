@@ -5,7 +5,7 @@ import type { CodeIndex } from '../indexer/code-index.js';
 import { hashContent } from '../indexer/pipeline.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
-import { NoteStore, qualifiedSymbolName } from '../notes/note-store.js';
+import { NoteStore, normalizeSymbolQuery, qualifiedSymbolName } from '../notes/note-store.js';
 import type { Anchor, Note } from '../notes/types.js';
 import type { CodedeepConfig } from '../types.js';
 import {
@@ -200,7 +200,7 @@ async function resolveAnchor(
   // "Ns::Type::method" via the symbol's fqn (`<file>:<Class>.<member>`, dotted)
   // so members can be anchored precisely without dropping to file level. `::`
   // scope separators are normalized to the extractor's `.` FQN form.
-  const wantFqn = `${rel}:${parsed.symbol.replace(/::/g, '.')}`;
+  const wantFqn = `${rel}:${normalizeSymbolQuery(parsed.symbol)}`;
   const candidates = index
     .getSymbolsInFile(rel)
     .filter((s) => s.name === parsed.symbol || s.fqn === wantFqn);
@@ -212,7 +212,7 @@ async function resolveAnchor(
       // the note by symbol, and tell the agent to re-remember once indexed for
       // signature-level tracking — a name with no baseline symbolId yields only
       // file-level staleness (describeChange bails to the generic detail).
-      anchor.symbol = parsed.symbol.replace(/::/g, '.');
+      anchor.symbol = normalizeSymbolQuery(parsed.symbol);
       return {
         anchor,
         line:
@@ -231,7 +231,7 @@ async function resolveAnchor(
     if (parsed.line === undefined) {
       // Ambiguous: anchor by file (still useful). Store the NORMALIZED name so
       // recall's `::`-folding bySymbol can still match it.
-      anchor.symbol = parsed.symbol.replace(/::/g, '.');
+      anchor.symbol = normalizeSymbolQuery(parsed.symbol);
       return {
         anchor,
         line:

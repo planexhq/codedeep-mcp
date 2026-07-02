@@ -356,6 +356,15 @@ export class Watcher {
         if (outcome === 'removed') freedSlot = true;
         else if (outcome === 'dropped') this.pending.add(rel); // guard drop — retry
         else if (outcome === 'cap-skipped') capSkipped.push(rel);
+        // 'transient' (grammar-load failure) is deliberately NOT re-queued:
+        // the loader already retried in place (parser.ts's bounded
+        // backoff inside ensureLanguage covers the genuinely-transient case
+        // for EVERY caller), so a failure surviving that is durable — a
+        // corrupt/missing .wasm re-queued here would just cycle the retry
+        // tick. The file's existing symbols were kept; recovery rides the
+        // next fs event or rescan (langLoads self-resets). A per-path retry
+        // budget was tried and removed — it swallowed edits landing
+        // mid-budget and its counters leaked across interleaved outcomes.
       } catch (err) {
         log.warn(`watcher: failed to index ${rel}: ${errMsg(err)}`);
       }

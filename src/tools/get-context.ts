@@ -17,6 +17,7 @@ import {
   NAME_MATCH_TAG,
   STRUCTURAL_TAG,
   displaySignature,
+  estimate,
   formatComplexity,
   normalizeFilePath,
   pickByLine,
@@ -129,7 +130,7 @@ export async function runGetContext(
       );
     }
 
-    const include = parseInclude(args.include);
+    const { include, note: includeNote } = parseInclude(args.include);
     const maxTokens = args.max_tokens ?? DEFAULT_MAX_TOKENS;
     const banner = readinessBanner(deps.indexer.ready);
 
@@ -146,27 +147,46 @@ export async function runGetContext(
         maxTokens,
         deps,
       );
-      return textResponse(banner + body);
+      return textResponse(banner + includeNote + body);
     }
 
     return textResponse(
-      banner + (await renderFileMode(file, include, maxTokens, deps)),
+      banner + includeNote + (await renderFileMode(file, include, maxTokens, deps)),
     );
   } catch (err) {
     return textResponse(`Error: ${errMsg(err)}`);
   }
 }
 
-function parseInclude(input?: string[]): Set<Section> {
-  if (!input) return new Set(ALL_SECTIONS);
+// Unknown section names are SURFACED, never silently dropped: a typo'd
+// `include: ["callrs"]` used to yield an empty shell that read as "no data
+// here" — a false conclusion the agent then acts on. Unknown keys produce an
+// in-band note listing the valid names, and when NOTHING valid remains the
+// filter falls back to ALL_SECTIONS (a full answer with a correction beats an
+// empty one). An explicit empty array means the default too. Hyphens fold to
+// underscores so `co-changes` finds `co_changes`.
+function parseInclude(input?: string[]): { include: Set<Section>; note: string } {
+  if (!input || input.length === 0) {
+    return { include: new Set(ALL_SECTIONS), note: '' };
+  }
   const set = new Set<Section>();
+  const unknown: string[] = [];
   for (const s of input) {
-    const lower = s.toLowerCase();
-    if ((ALL_SECTIONS as readonly string[]).includes(lower)) {
-      set.add(lower as Section);
+    const key = s.trim().toLowerCase().replace(/-/g, '_');
+    if ((ALL_SECTIONS as readonly string[]).includes(key)) {
+      set.add(key as Section);
+    } else {
+      unknown.push(s);
     }
   }
-  return set;
+  if (unknown.length === 0) return { include: set, note: '' };
+  const fellBack = set.size === 0;
+  if (fellBack) for (const s of ALL_SECTIONS) set.add(s);
+  const note =
+    `(Ignored unknown include section${unknown.length === 1 ? '' : 's'}: ` +
+    `${unknown.map((u) => `"${u}"`).join(', ')}. Valid: ${ALL_SECTIONS.join(', ')}.` +
+    `${fellBack ? ' Showing all sections.' : ''})\n\n`;
+  return { include: set, note };
 }
 
 async function renderSymbolMode(
@@ -519,9 +539,5 @@ function collectExportCallers(
 
 function formatFileSymbolLine(s: Symbol): string {
   return `- ${s.name} (${s.kind}, line ${s.startLine}) — ${displaySignature(s)}`;
-}
-
-function estimate(text: string): number {
-  return Math.ceil(text.length / 4);
 }
 

@@ -35,7 +35,84 @@ const LANG_TO_WASM: Record<string, string> = {
 };
 
 const parsers = new Map<string, Parser>();
-let initPromise: Promise<void> | null = null;
+// Split memoization: the tree-sitter WASM runtime loads once (coreInit);
+// each language's grammar loads on demand (langLoads) — a repo that is pure
+// Python must not pay the ~95MB RSS floor of all 16 grammars. Rejections
+// self-reset (a transient EMFILE must not disable a language for the
+// process lifetime).
+let coreInit: Promise<void> | null = null;
+const langLoads = new Map<string, Promise<void>>();
+
+// A grammar load is retried IN PLACE with a short backoff before the promise
+// rejects: transient failures (an EMFILE storm during the WASM read) clear in
+// milliseconds, and retrying HERE — at the altitude where the failure lives —
+// protects every caller identically (startup bulk scan, watcher single-file,
+// pattern-mode validation) with no per-path retry bookkeeping anywhere else.
+// (A per-path retry queue in the watcher was tried and removed: it could not
+// cover the startup path, swallowed edits landing mid-budget, and its counters
+// leaked across interleaved outcomes.) A failure that survives the attempts is
+// treated as durable (corrupt/missing .wasm — needs user action); langLoads
+// still self-resets, so a LATER call (next fs event / rescan / restart) probes
+// again rather than latching the language off forever.
+const GRAMMAR_LOAD_ATTEMPTS = 3;
+const GRAMMAR_RETRY_BASE_MS = 50;
+// After a full attempt budget fails, further ensures for that language FAIL
+// FAST for this window instead of re-running the backoff sequence. Without
+// it, the memo's self-reset composes badly with the serial batch path: a
+// permanently corrupt .wasm would cost ~150ms of backoff PER FILE of that
+// language (5,000 files ≈ 12+ minutes of stall inside one indexAll). With
+// it, a batch sweeps at full speed (~one backoff sequence per TTL window)
+// while a later probe — the next fs event / rescan after the window — still
+// retries fresh, so the language is never latched off.
+const GRAMMAR_FAILURE_TTL_MS = 5_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const langFailures = new Map<string, { at: number; err: unknown }>();
+
+function ensureLanguage(lang: string): Promise<void> {
+  const wasm = LANG_TO_WASM[lang];
+  // Unknown/unsupported names are a no-op here (the scanner emits 'unknown'
+  // for unrecognized extensions); parseFile still warns when asked to parse one.
+  if (!wasm) return Promise.resolve();
+  let p = langLoads.get(lang);
+  if (!p) {
+    const recent = langFailures.get(lang);
+    if (recent !== undefined) {
+      if (Date.now() - recent.at < GRAMMAR_FAILURE_TTL_MS) {
+        return Promise.reject(recent.err); // fail fast inside the TTL window
+      }
+      langFailures.delete(lang); // window over → probe again for real
+    }
+    p = (async () => {
+      let lastErr: unknown;
+      for (let attempt = 1; attempt <= GRAMMAR_LOAD_ATTEMPTS; attempt++) {
+        try {
+          const language = await Language.load(path.join(grammarsDir, wasm));
+          const parser = new Parser();
+          parser.setLanguage(language);
+          parsers.set(lang, parser);
+          langFailures.delete(lang);
+          return;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < GRAMMAR_LOAD_ATTEMPTS) {
+            await delay(GRAMMAR_RETRY_BASE_MS * attempt);
+          }
+        }
+      }
+      langFailures.set(lang, { at: Date.now(), err: lastErr });
+      throw lastErr;
+    })();
+    p.catch(() => {
+      langLoads.delete(lang); // durable failure → a later call probes again
+    });
+    langLoads.set(lang, p);
+  }
+  return p;
+}
 
 // Conditional-compilation directive lines (#if / #elseif / #else / #endif).
 // `m` matches ^/$ per line; without `s`, `.*` stays within one line.
@@ -98,43 +175,42 @@ function countParseErrors(root: Node): number {
   return count;
 }
 
-export function initParser(): Promise<void> {
-  if (!initPromise) {
-    initPromise = (async () => {
-      await Parser.init();
-      const loaded = await Promise.all(
-        Object.entries(LANG_TO_WASM).map(async ([lang, wasm]) => {
-          const language = await Language.load(path.join(grammarsDir, wasm));
-          const parser = new Parser();
-          parser.setLanguage(language);
-          return [lang, parser] as const;
-        }),
-      );
-      for (const [lang, parser] of loaded) {
-        parsers.set(lang, parser);
-      }
-    })();
+// Initialize the runtime and load grammars. With `languages`, loads ONLY those
+// grammars (the pipeline passes the scan-found set, so a repo pays memory for
+// exactly the languages it contains); with no argument, loads ALL grammars
+// (test harnesses and callers that can't know the set up front). Idempotent
+// and incremental: each grammar loads at most once, and later calls with new
+// languages top up what's already loaded.
+export async function initParser(languages?: Iterable<string>): Promise<void> {
+  if (!coreInit) {
+    coreInit = Parser.init();
     // A cached rejection would otherwise disable parsing (and pattern
-    // validation) for the process lifetime after one transient failure
-    // (EMFILE during the WASM reads) — reset so the next call retries.
-    initPromise.catch(() => {
-      initPromise = null;
+    // validation) for the process lifetime after one transient failure —
+    // reset so the next call retries.
+    coreInit.catch(() => {
+      coreInit = null;
     });
   }
-  return initPromise;
+  await coreInit;
+  const langs = languages ? [...new Set(languages)] : Object.keys(LANG_TO_WASM);
+  await Promise.all(langs.map(ensureLanguage));
 }
 
 // The returned Tree holds WASM memory; callers must call `tree.delete()` when
 // finished — JS GC won't free it.
 export function parseFile(content: string, language: string): Tree | null {
-  if (parsers.size === 0) {
-    throw new Error('parser not initialized; call initParser() first');
-  }
-
   const parser = parsers.get(language);
   if (!parser) {
-    log.warn(`parseFile: unsupported language "${language}"`);
-    return null;
+    if (!(language in LANG_TO_WASM)) {
+      log.warn(`parseFile: unsupported language "${language}"`);
+      return null;
+    }
+    // Supported but not loaded — a caller-ordering bug (every parse path must
+    // initParser([language]) first). Throw loudly (the pipeline catches and
+    // warns per file) rather than silently skipping the file.
+    throw new Error(
+      `parser not initialized for "${language}"; call initParser(["${language}"]) first`,
+    );
   }
 
   let tree = parser.parse(content);

@@ -436,8 +436,8 @@ const DEFAULT_RISK_HOTSPOTS = 10;  // rows returned by getRiskHotspots
 // and inheritance-blind by construction, so an empty/shallow tree is a blind
 // spot, not an "all clear".
 const CALLER_TREE_LIMITATIONS: readonly string[] = Object.freeze([
-  'Upstream callers only — cross-file callees (downstream) are not traversed (LSP, Phase 2).',
-  'Inheritance/override edges are not modeled, so virtual-dispatch callers may be missing (LSP, Phase 2).',
+  'Upstream callers only — cross-file callees (downstream) are not traversed.',
+  'Inheritance/override edges are not modeled, so virtual-dispatch callers may be missing.',
   'Edges are heuristic AST name-matches, not compiler-verified; confidence is ordinal, not probabilistic.',
 ]);
 
@@ -536,21 +536,62 @@ export class CodeIndex {
     this.importsByFile.set(file.path, [...imports]);
     this.symbolsByFile.set(file.path, [...symbols]);
 
+    const ownIds = new Set<string>();
     for (const sym of symbols) {
+      ownIds.add(sym.id);
       this.symbolById.set(sym.id, sym);
       pushOrInit(this.symbolsByName, sym.name, sym);
     }
 
-    this.referencesBySourceFile.set(file.path, [...references]);
+    // The id-keyed adjacency admits SAME-FILE edges only — enforced here, at
+    // the site where LIVE-EXTRACTED edges enter the maps, not just by
+    // extractor convention. (load() is the OTHER entry site: it restores
+    // persisted adjacency verbatim, trusting that the cache was written from
+    // maps this gate already filtered — a hand-edited cache bypasses it, and
+    // corrupt caches are deleted, not repaired.) removeFileInternal's prune
+    // relies on this invariant (it deletes only the removed file's own keys;
+    // a cross-file edge — on EITHER endpoint — would leave dangling ids in
+    // another file's sets and inflate fan-in/fan-out). A violating ref is
+    // DEMOTED WHOLESALE, not just skipped: its foreign endpoint ids are
+    // nulled before it enters the name-keyed stores, so every query surface
+    // agrees it is an unresolved name match (a kept ids-intact copy would
+    // read as top-tier 'resolved' in find_references while being absent from
+    // fan-in/fan-out — two surfaces disagreeing about the same edge). If a
+    // future resolver produces cross-file edges, they surface as these
+    // demoted name-keyed refs plus this warn — the deliberate signal to
+    // design the cross-file story properly.
+    let crossFileEdges = 0;
+    const admitted: Reference[] = [];
     for (const ref of references) {
-      pushOrInit(this.referencesByTargetName, ref.targetName, ref);
+      let stored = ref;
+      if (
+        (ref.sourceId !== null && !ownIds.has(ref.sourceId)) ||
+        (ref.targetId !== null && !ownIds.has(ref.targetId))
+      ) {
+        crossFileEdges++;
+        stored = {
+          ...ref,
+          sourceId: ref.sourceId !== null && ownIds.has(ref.sourceId) ? ref.sourceId : null,
+          targetId: ref.targetId !== null && ownIds.has(ref.targetId) ? ref.targetId : null,
+        };
+      }
+      admitted.push(stored);
+      pushOrInit(this.referencesByTargetName, stored.targetName, stored);
       // Module-level calls (sourceId=null) and cross-file unresolved refs
       // (targetId=null) skip the id-keyed adjacency; they're queried by name
       // via referencesByTargetName.
-      if (ref.sourceId && ref.targetId) {
-        addAdjacency(this.callees, ref.sourceId, ref.targetId);
-        addAdjacency(this.callers, ref.targetId, ref.sourceId);
+      if (stored.sourceId && stored.targetId) {
+        addAdjacency(this.callees, stored.sourceId, stored.targetId);
+        addAdjacency(this.callers, stored.targetId, stored.sourceId);
       }
+    }
+    this.referencesBySourceFile.set(file.path, admitted);
+    if (crossFileEdges > 0) {
+      log.warn(
+        `CodeIndex.addFile: ${file.path} carried ${crossFileEdges} reference(s) ` +
+          `with a non-same-file endpoint id; demoted to unresolved name matches ` +
+          `(id-keyed adjacency is same-file by invariant — see removeFileInternal)`,
+      );
     }
 
     this.namesDirty = true;
@@ -584,12 +625,20 @@ export class CodeIndex {
       else this.symbolsByName.set(sym.name, filtered);
     }
 
+    // Deleting each id's own key fully prunes the adjacency maps: id-keyed
+    // edges are SAME-FILE by construction (resolveCalls builds its nameToId/
+    // typeNameToId/methodsByClass maps from the one file's symbols — a non-null
+    // targetId can only point within the file; cross-file refs are stored
+    // name-keyed with targetId=null), so no OTHER file's set can contain this
+    // file's ids. A whole-map sweep here would be a provable no-op that scales
+    // the watcher's re-index hot path with total repo size. The invariant is
+    // ENFORCED at the edge-entry site (addFile's ownIds gate above) and pinned
+    // by extractor.test.ts's "resolved references always target the SAME
+    // file's symbols" property test.
     for (const id of deletedIds) {
       this.callees.delete(id);
       this.callers.delete(id);
     }
-    pruneAdjacency(this.callers, deletedIds);
-    pruneAdjacency(this.callees, deletedIds);
 
     const refsFromFile = this.referencesBySourceFile.get(path);
     if (refsFromFile) {
@@ -1934,7 +1983,8 @@ export function isCallerOf(ref: Reference, target: Symbol): boolean {
       posix.dirname(ref.file) === posix.dirname(target.file);
     // Self-receiver refs (extractor-determined: TS `this` node, Python
     // self/cls) that extract-time resolution did NOT bind to a sibling
-    // method can only target an inherited method — LSP territory. An
+    // method can only target an inherited method — inheritance is not
+    // modeled, so claiming the edge would be confidently wrong. An
     // ordinary receiver merely NAMED `self` is not affected.
     if (isMember && ref.selfReceiver) return false;
     // Bare-name matches never bind to method/interface/type — bare
@@ -2091,16 +2141,6 @@ function addAdjacency(
     map.set(key, set);
   }
   set.add(value);
-}
-
-function pruneAdjacency(
-  map: Map<string, Set<string>>,
-  deleted: Set<string>,
-): void {
-  for (const [key, set] of map) {
-    for (const id of deleted) set.delete(id);
-    if (set.size === 0) map.delete(key);
-  }
 }
 
 function adjacencyToEntries(

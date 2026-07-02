@@ -374,6 +374,32 @@ describe('Watcher — busy indexer and guard drops', () => {
     expect(indexFile).toHaveBeenCalledTimes(2);
     expect(indexFile).toHaveBeenLastCalledWith('src/a.ts');
   });
+
+  it("'transient' (grammar-load failure) is terminal for the event — no requeue loop", async () => {
+    // The loader already retried in place (ensureLanguage's bounded backoff),
+    // so a surviving failure is durable: re-queueing here would cycle the
+    // 250ms retry tick against a corrupt .wasm forever. The path must NOT be
+    // re-queued — recovery rides the next real fs event.
+    const indexFile = vi.fn().mockResolvedValue('transient');
+    const watcher = new Watcher(stubIndexer({ indexFile }), stubIndex(), config, {
+      debounceMs: DEBOUNCE,
+      retryMs: RETRY,
+    });
+
+    watcher.handleEvent('change', 'src/a.ts');
+    await advanceAndSettle(watcher, DEBOUNCE);
+    expect(indexFile).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 4; i++) await advanceAndSettle(watcher, RETRY);
+    expect(indexFile).toHaveBeenCalledTimes(1); // never re-queued
+
+    // A NEW fs event re-attempts (the loader's memo self-resets on failure,
+    // so this is where a recovered grammar gets picked up).
+    indexFile.mockResolvedValue('indexed');
+    watcher.handleEvent('change', 'src/a.ts');
+    await advanceAndSettle(watcher, DEBOUNCE);
+    expect(indexFile).toHaveBeenCalledTimes(2);
+    expect(indexFile).toHaveBeenLastCalledWith('src/a.ts');
+  });
 });
 
 describe('Watcher — error isolation', () => {

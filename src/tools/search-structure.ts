@@ -252,8 +252,9 @@ async function runPatternMode(
   // nothing), so validate by parsing the pattern as code with our own
   // tree-sitter grammars. `hasError` covers both ERROR nodes and
   // zero-width MISSING-token recovery (e.g. `function f() {`), which an
-  // ERROR-kind query would let through.
-  await initParser();
+  // ERROR-kind query would let through. Load ONLY the grammars pattern mode
+  // can scan — an argless initParser would pull in all 16.
+  await initParser(targets.keys());
   const invalidLangs: string[] = [];
   for (const id of targets.keys()) {
     if (!patternParses(id, pattern)) {

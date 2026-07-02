@@ -1,8 +1,12 @@
-import { promises as fs } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { relative, resolve } from 'node:path';
 
 import { partnerOf } from '../git/analyzer.js';
-import type { CoChange, CodedeepConfig, Symbol } from '../types.js';
+import type { CoChange, Symbol } from '../types.js';
+
+// Re-exported for the tools' convenience — the implementation lives in the
+// neutral fs-util module so lower layers (notes/staleness) can use it without
+// importing the tools layer.
+export { safeReadIndexedFile } from '../fs-util.js';
 
 // Index signature required to satisfy the MCP SDK's CallToolResult shape.
 export interface ToolResponse {
@@ -22,51 +26,6 @@ export function normalizeFilePath(input: string, projectRoot: string): string | 
   const rel = relative(projectRoot, absolute).replace(/\\/g, '/');
   if (rel === '' || rel === '..' || rel.startsWith('../')) return null;
   return rel;
-}
-
-// projectRoot is fixed for the process lifetime, so its realpath is too —
-// caching it spares one syscall per safeReadIndexedFile call (pattern
-// scans call this once per candidate file).
-const realRootCache = new Map<string, string>();
-async function realProjectRoot(projectRoot: string): Promise<string> {
-  let cached = realRootCache.get(projectRoot);
-  if (cached === undefined) {
-    cached = await fs.realpath(projectRoot);
-    realRootCache.set(projectRoot, cached);
-  }
-  return cached;
-}
-
-// Re-check scanner admission rules at read time so stale on-disk
-// state (symlink-swap, growth past cap, became-directory) can't
-// bypass the indexer's contract.
-export async function safeReadIndexedFile(
-  relPath: string,
-  config: CodedeepConfig,
-): Promise<string> {
-  const abs = join(config.projectRoot, relPath);
-  const stats = await fs.lstat(abs);
-  if (stats.isSymbolicLink()) {
-    throw new Error('refusing to follow symlink');
-  }
-  if (!stats.isFile()) {
-    throw new Error('not a regular file');
-  }
-  if (stats.size > config.maxFileSize) {
-    throw new Error(
-      `exceeds maxFileSize (${stats.size} > ${config.maxFileSize})`,
-    );
-  }
-  // lstat only checks the final component. Resolve parent-directory
-  // symlinks so a swap higher up in the path can't escape projectRoot.
-  const [real, realRoot] = await Promise.all([
-    fs.realpath(abs),
-    realProjectRoot(config.projectRoot),
-  ]);
-  if (real !== realRoot && !real.startsWith(realRoot + sep)) {
-    throw new Error('path escapes project root');
-  }
-  return fs.readFile(abs, 'utf8');
 }
 
 // Among ranges that contain `line`, pick the smallest — targets the innermost
@@ -162,7 +121,7 @@ export const INDEXING_BANNER = '⏳ Indexing in progress. Results may be incompl
 export const MODULE_LEVEL = '(module-level)';
 
 // Per-line tag stamped on every approximate-name-match caller row so
-// consumers can distinguish AST-only matches from precise (LSP) refs.
+// consumers never mistake an AST name-match for a compiler-verified ref.
 // Shared between `find_references` and `get_context`'s file-mode export
 // caller summary — both render the same data path.
 export const NAME_MATCH_TAG = '[name match, unverified]';
