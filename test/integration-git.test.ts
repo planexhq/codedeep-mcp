@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { CodeIndex } from '../src/indexer/code-index.js';
+import { NoteStore } from '../src/notes/note-store.js';
 import * as parserModule from '../src/indexer/parser.js';
 import { Indexer } from '../src/indexer/pipeline.js';
 import { GitService } from '../src/git/git-service.js';
@@ -43,6 +44,7 @@ interface Env {
   indexer: Indexer;
   config: CodedeepConfig;
   git: GitService;
+  notes: NoteStore;
 }
 
 beforeAll(async () => {
@@ -117,7 +119,13 @@ describe.skipIf(!gitAvailable)('integration: git enrichment end-to-end', { timeo
     const git = new GitService(config, index, indexer.cachePath);
     services.push(git);
     await git.start();
-    return { index, indexer, config, git };
+    return {
+      index,
+      indexer,
+      config,
+      git,
+      notes: new NoteStore(join(config.cacheDir, 'notes.json'), config.projectRoot),
+    };
   }
 
   it('analyzes the repo: hotspots, co-changes, commitFrequency', async () => {

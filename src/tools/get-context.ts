@@ -7,8 +7,17 @@ import {
 import type { GitService } from '../git/git-service.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
+import { qualifiedSymbolName, type NoteStore } from '../notes/note-store.js';
+import {
+  computeNoteStatusSafe,
+  newCommitCache,
+  newFileProbeCache,
+  type StalenessDeps,
+} from '../notes/staleness.js';
+import type { Anchor, Note } from '../notes/types.js';
 import { classNameFromFqn } from '../types.js';
 import type { ImportInfo, CodedeepConfig, Symbol } from '../types.js';
+import { renderNote } from './note-render.js';
 
 import {
   BEHAVIORAL_TAG,
@@ -46,6 +55,9 @@ export interface GetContextDeps {
   indexer: Pick<Indexer, 'ready'>;
   config: CodedeepConfig;
   git: Pick<GitService, 'recentCommits'>;
+  // PULL surface of the knowledge layer: anchored notes render inside the
+  // response (read-only — get_context never writes the store).
+  notes: NoteStore;
 }
 
 const DEFAULT_MAX_TOKENS = 3000;
@@ -54,9 +66,12 @@ const SUGGEST_LIMIT = 5;
 // statements (`export { x } from './y'`), so any "exported by" listing in
 // Phase 1a would only surface coincidentally same-named exports from
 // unrelated files. The section returns when re-export edges land.
-// `co_changes` and `git` sit last: they render at the end and are the
-// first casualties under max_tokens pressure (enrichment, not core).
-const ALL_SECTIONS = ['body', 'callers', 'callees', 'coupling', 'imports', 'co_changes', 'git'] as const;
+// `notes` (anchored knowledge-layer notes, staleness-checked) sits after the
+// structural sections — enrichment must never displace body/callers — but
+// above the git tail: a curated note about THIS symbol outranks generic
+// churn data. `co_changes` and `git` sit last: they render at the end and are
+// the first casualties under max_tokens pressure (enrichment, not core).
+const ALL_SECTIONS = ['body', 'callers', 'callees', 'coupling', 'imports', 'notes', 'co_changes', 'git'] as const;
 type Section = typeof ALL_SECTIONS[number];
 
 type SectionItem = {
@@ -246,6 +261,13 @@ async function renderSymbolBlock(
   if (target.doc && target.doc.length > 0) headerLines.push(target.doc);
   const header = headerLines.join('\n');
 
+  const { item: notesSection, degradedNotice } = await notesItem(
+    deps,
+    file,
+    include,
+    target,
+  );
+
   // `body` is the highest-priority section and is never dropped to fit budget.
   const items: SectionItem[] = [
     {
@@ -277,10 +299,137 @@ async function renderSymbolBlock(
       render: () => renderImports(file, deps.index),
       peekNonEmpty: () => deps.index.getImports(file).length > 0,
     },
+    notesSection,
     ...gitSectionItems(target.file, deps),
   ];
 
-  return renderBudgeted(header, items, include, maxTokens, 'body');
+  return (await renderBudgeted(header, items, include, maxTokens, 'body')) + degradedNotice;
+}
+
+// --- PULL: anchored knowledge-layer notes rendered in place ---
+
+// Cap so a note-heavy file can't displace the structural sections; the
+// overflow line names the recall query that lists the rest.
+const MAX_CONTEXT_NOTES = 3;
+
+// Builds the notes SectionItem for either mode, plus a `degradedNotice` the
+// caller appends OUTSIDE the token budget. The store load + selection happen up
+// front (sync store queries after the memoized load, so the budget loop can
+// peek emptiness for free) but are GATED on the include filter — a caller
+// looping get_context({include:['body']}) must not pay a store read per call.
+// Both modes share this so the load-before-select ordering and the peek
+// contract can't drift apart.
+async function notesItem(
+  deps: GetContextDeps,
+  file: string,
+  include: Set<Section>,
+  target?: Symbol,
+): Promise<{ item: SectionItem; degradedNotice: string }> {
+  let selected: Note[] = [];
+  let degradedNotice = '';
+  if (include.has('notes')) {
+    await deps.notes.load();
+    selected = selectContextNotes(deps.notes, file, target);
+    const degraded = deps.notes.degradedReason;
+    // Rides EVERY response — appended by the caller AFTER renderBudgeted, so a
+    // body that eats the whole token budget (dropping the notes section) can't
+    // suppress the "prior notes were quarantined; recover manually" signal.
+    // Same guarantee recall makes.
+    if (degraded) degradedNotice = `\n\n(note store degraded: ${degraded})`;
+  }
+  const item: SectionItem = {
+    name: 'notes',
+    includeKey: 'notes',
+    render: () => renderNotesSection(selected, file, deps),
+    peekNonEmpty: () => selected.length > 0,
+  };
+  return { item, degradedNotice };
+}
+
+// Symbol mode: a note surfaces when one of its anchors names THIS symbol —
+// plus FILE-level anchors (notes about the whole file). An anchor names the
+// symbol when EITHER:
+//   - its stored (qualified) name equals this symbol's qualified name
+//     ("Class.member" / top-level bare name) — a RESOLVED anchor; or
+//   - it is a NAME-ONLY anchor (no symbolId — remember's ambiguous /
+//     index-still-building paths, declared "anchored by name") whose bare name
+//     equals this symbol's simple name, i.e. "about any symbol so named".
+// The name arm is GATED on symbolId===undefined: a resolved anchor pinned to
+// ONE specific symbol (e.g. top-level `foo`, symbolId set) must match by
+// qualified name ONLY, never bleed onto a same-named sibling added later (a
+// method `C.foo`) — and, symmetrically, a member-qualified anchor never bleeds
+// onto a same-named top-level target. Anchors qualified to a DIFFERENT
+// container, or to another symbol, stay out. File mode (no `target`): every
+// note with an anchor in the file.
+function selectContextNotes(
+  notes: NoteStore,
+  file: string,
+  target?: Symbol,
+): Note[] {
+  const all = notes.byFile(file); // newest first
+  if (target === undefined) return all;
+  const qualified = qualifiedSymbolName(target.fqn, file, target.name);
+  const anchorNamesSymbol = (a: Anchor): boolean => {
+    if (a.file !== file || a.symbol === undefined) return false;
+    if (a.symbol === qualified) return true; // resolved to THIS symbol
+    return a.symbolId === undefined && a.symbol === target.name; // name-only
+  };
+  const symbolNotes = all.filter((n) => n.anchors.some(anchorNamesSymbol));
+  const seen = new Set(symbolNotes.map((n) => n.id));
+  const fileLevel = all.filter(
+    (n) =>
+      !seen.has(n.id) &&
+      n.anchors.some((a) => a.file === file && a.symbol === undefined),
+  );
+  return [...symbolNotes, ...fileLevel];
+}
+
+async function renderNotesSection(
+  selected: Note[],
+  file: string,
+  deps: GetContextDeps,
+): Promise<string> {
+  // Degraded-store signalling is handled OUTSIDE this section (notesItem's
+  // degradedNotice, appended past the budget) — an empty selection here means
+  // "no notes to render", nothing more.
+  if (selected.length === 0) return '';
+  const shown = selected.slice(0, MAX_CONTEXT_NOTES);
+  // Same staleness path — and the same render grammar (note-render.ts) — as
+  // recall, so a note reads identically everywhere. The caches dedupe the
+  // per-file hash/git probe across the shown notes' anchors; per-note failure
+  // isolation lives in computeNoteStatusSafe (shared with recall).
+  const stalenessDeps: StalenessDeps = {
+    index: deps.index,
+    config: deps.config,
+    git: deps.git,
+  };
+  const fileCache = newFileProbeCache();
+  const commitCache = newCommitCache();
+  const blocks = await Promise.all(
+    shown.map(async (note) =>
+      renderNote(
+        note,
+        await computeNoteStatusSafe(note, stalenessDeps, fileCache, commitCache),
+      ),
+    ),
+  );
+  const lines = ['### Notes (agent-curated)', ...blocks];
+  if (selected.length > shown.length) {
+    lines.push(notesOverflowLine(selected.length - shown.length, file));
+  }
+  return lines.join('\n\n');
+}
+
+// The cap hid `hidden` selected notes. Point the agent at recall to BROWSE the
+// rest rather than promise reproduction: recall paginates (default 10, max 50).
+// ALWAYS recall({file}) — NOT recall({file, symbol}): symbol mode's selection
+// mixes symbol-anchored AND file-level notes, but recall's `symbol` filter is
+// bySymbol (file-level anchors excluded), so it would return a SUBSET that can
+// miss the very notes we hid. byFile ({file} only) is the true SUPERSET of the
+// selection in both modes. JSON.stringify quotes+escapes the path so the
+// suggested call is copy-paste valid even for exotic filenames.
+function notesOverflowLine(hidden: number, file: string): string {
+  return `(${hidden} more not shown — recall({ file: ${JSON.stringify(file)} }) to browse notes here.)`;
 }
 
 // The two git sections are identical in both modes and always trail the
@@ -462,6 +611,9 @@ async function renderFileMode(
   const exported = topLevel.filter((s) => s.exported);
   const internal = topLevel.filter((s) => !s.exported);
 
+  // File mode surfaces EVERY note anchored in the file (whole-file view).
+  const { item: notesSection, degradedNotice } = await notesItem(deps, file, include);
+
   // `body` covers the outline (Exports + Internal); `callees` has no
   // file-mode analogue. Renderers are lazy so dropped sections don't pay
   // for caller scans.
@@ -494,10 +646,11 @@ async function renderFileMode(
       // when the budget is already gone.
       peekNonEmpty: () => true,
     },
+    notesSection,
     ...gitSectionItems(file, deps),
   ];
 
-  return renderBudgeted(header, items, include, maxTokens);
+  return (await renderBudgeted(header, items, include, maxTokens)) + degradedNotice;
 }
 
 // Uses `getReferencesByNameOrAlias + isCallerOf` (same data path as

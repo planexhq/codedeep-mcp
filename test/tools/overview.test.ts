@@ -3,6 +3,7 @@ import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CodeIndex } from '../../src/indexer/code-index.js';
+import { NoteStore } from '../../src/notes/note-store.js';
 import { runOverview, type OverviewDeps } from '../../src/tools/overview.js';
 import {
   makeConfig,
@@ -31,12 +32,17 @@ function makeDeps(
   index: CodeIndex,
   ready = true,
   git: OverviewDeps['git'] = makeGitStub(),
+  notes: NoteStore = new NoteStore(
+    join(tmpRoot, '.codedeep', 'cache', 'notes.json'),
+    tmpRoot,
+  ),
 ): OverviewDeps {
   return {
     index,
     indexer: { ready },
     config: makeConfig(tmpRoot),
     git,
+    notes,
   };
 }
 
@@ -1256,5 +1262,109 @@ describe('runOverview — hotspot window label provenance', () => {
     const text = (await runOverview({}, makeDeps(idx))).content[0].text;
     expect(text).toContain('### Hotspots (last 90 days) [behavioral]');
     expect(text).not.toContain('last 180 days');
+  });
+});
+
+describe('runOverview — Knowledge section (PULL)', () => {
+  it('renders counts-only knowledge line when notes exist', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    const deps = makeDeps(idx);
+    await deps.notes.add({
+      id: 'aaaaaaaaaaaaaaaa',
+      text: 'note one',
+      createdAt: '2026-07-01T00:00:00.000Z',
+      anchors: [{ file: 'src/a.ts' }],
+    });
+    await deps.notes.add({
+      id: 'bbbbbbbbbbbbbbbb',
+      text: 'note two',
+      createdAt: '2026-07-01T00:00:01.000Z',
+      anchors: [{ file: 'src/a.ts' }, { file: 'src/b.ts' }],
+    });
+
+    const text = (await runOverview({}, deps)).content[0].text;
+
+    expect(text).toContain('### Knowledge (agent-curated)');
+    expect(text).toContain('- 2 anchored notes across 2 files — `recall` checks staleness');
+    // Counts only — the always-first call must not pay staleness hashing.
+    expect(text).not.toContain('✓ fresh');
+    expect(text).not.toContain('⚠ stale');
+  });
+
+  it('omits the Knowledge section when the store is empty and healthy', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    const text = (await runOverview({}, makeDeps(idx))).content[0].text;
+    expect(text).not.toContain('### Knowledge');
+  });
+
+  it('describes anchor-less notes honestly (no "across 0 anchored files")', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    const deps = makeDeps(idx);
+    await deps.notes.add({
+      id: 'cccccccccccccccc',
+      text: 'free-floating thought',
+      createdAt: '2026-07-01T00:00:00.000Z',
+      anchors: [],
+    });
+    const text = (await runOverview({}, deps)).content[0].text;
+    expect(text).toContain('- 1 unanchored note — not staleness-tracked');
+    expect(text).not.toContain('across 0 anchored files');
+    expect(text).not.toContain('`recall` checks staleness'); // it would not
+  });
+
+  it('counts anchored vs unanchored separately in a MIXED store', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    const deps = makeDeps(idx);
+    await deps.notes.add({
+      id: 'eeeeeeeeeeeeeeee', text: 'anchored one',
+      createdAt: '2026-07-01T00:00:00.000Z', anchors: [{ file: 'src/a.ts' }],
+    });
+    await deps.notes.add({
+      id: 'ffffffffffffffff', text: 'floating one',
+      createdAt: '2026-07-01T00:00:01.000Z', anchors: [],
+    });
+    const text = (await runOverview({}, deps)).content[0].text;
+    // Only the anchored note is staleness-tracked — the unanchored one is
+    // reported separately, never folded into the "recall checks staleness" count.
+    expect(text).toContain(
+      '- 1 anchored note across 1 file — `recall` checks staleness; 1 unanchored (not tracked)',
+    );
+    expect(text).not.toContain('2 notes across'); // the old inflated wording
+  });
+
+  it('shows live counts alongside the degraded notice when notes exist', async () => {
+    // Quarantine-success + new remembers: hiding the counts would read as
+    // "no stored knowledge" and the agent re-derives what it already saved.
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    const deps = makeDeps(idx);
+    await deps.notes.add({
+      id: 'dddddddddddddddd',
+      text: 'post-quarantine note',
+      createdAt: '2026-07-01T00:00:00.000Z',
+      anchors: [{ file: 'src/a.ts' }],
+    });
+    vi.spyOn(deps.notes, 'degradedReason', 'get').mockReturnValue(
+      'the previous note store was malformed JSON and moved aside; starting empty',
+    );
+    const text = (await runOverview({}, deps)).content[0].text;
+    expect(text).toContain('- note store degraded:');
+    expect(text).toContain('- 1 anchored note across 1 file');
+  });
+
+  it('surfaces a degraded note store even with zero notes', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+    const deps = makeDeps(idx);
+    vi.spyOn(deps.notes, 'degradedReason', 'get').mockReturnValue(
+      'the previous note store was malformed JSON and moved aside; starting empty',
+    );
+    const text = (await runOverview({}, deps)).content[0].text;
+    expect(text).toContain('### Knowledge (agent-curated)');
+    expect(text).toContain('- note store degraded:');
   });
 });

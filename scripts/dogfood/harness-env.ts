@@ -3,10 +3,13 @@
 // indexAndStart(), but pointed at a real cloned repo and with CODEDEEP_* env
 // isolated and the cache forced to an external scratch dir.
 
+import { join } from 'node:path';
+
 import { loadConfig } from '../../src/config.js';
 import { CodeIndex } from '../../src/indexer/code-index.js';
 import { GitService } from '../../src/git/git-service.js';
 import { Indexer } from '../../src/indexer/pipeline.js';
+import { NoteStore } from '../../src/notes/note-store.js';
 import type { CodedeepConfig } from '../../src/types.js';
 
 const CODEDEEP_ENV_VARS = [
@@ -39,6 +42,7 @@ export interface HarnessEnv {
   indexer: Indexer;
   config: CodedeepConfig;
   git: GitService;
+  notes: NoteStore;
   cacheDir: string;
 }
 
@@ -66,5 +70,6 @@ export function createEnv(
   const index = new CodeIndex(config.projectRoot);
   const indexer = new Indexer(config, index);
   const git = new GitService(config, index, indexer.cachePath);
-  return { index, indexer, config, git, cacheDir };
+  const notes = new NoteStore(join(config.cacheDir, 'notes.json'), config.projectRoot);
+  return { index, indexer, config, git, notes, cacheDir };
 }

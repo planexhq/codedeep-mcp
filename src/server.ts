@@ -93,7 +93,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "overview",
     {
       description:
-        "Start here. 'What is this codebase?' — language breakdown, top-level structure, entry points, symbol counts; in a git repo, also branch/hotspots, risk ranking (churn × coupling × complexity), and index freshness. Orient with this before grepping; then drill in with find_symbol / get_context.",
+        "Start here. 'What is this codebase?' — language breakdown, top-level structure, entry points, symbol counts, and remembered-knowledge counts; in a git repo, also branch/hotspots, risk ranking (churn × coupling × complexity), and index freshness. Orient with this before grepping; then drill in with find_symbol / get_context.",
       inputSchema: {
         path: z
           .string()
@@ -147,7 +147,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "get_context",
     {
       description:
-        "'Tell me everything about this symbol.' Full body (verbatim), within-file callers/callees, coupling (fan-in/out, cyclomatic+cognitive complexity, blast radius), and imports — plus co-change partners and recent commits when git is available. Reach for this after find_symbol instead of opening the file by hand.",
+        "'Tell me everything about this symbol.' Full body (verbatim), within-file callers/callees, coupling (fan-in/out, cyclomatic+cognitive complexity, blast radius), imports, and any remembered notes anchored here (staleness-tagged ✓/⚠) — plus co-change partners and recent commits when git is available. Reach for this after find_symbol instead of opening the file by hand.",
       inputSchema: {
         file: z.string().describe("File path (relative to project root)"),
         symbol: z
@@ -169,7 +169,7 @@ export function createServer(deps: ServerDeps): McpServer {
           .array(z.string())
           .optional()
           .describe(
-            "Sections to include: body, callers, callees, coupling, imports, co_changes, git",
+            "Sections to include: body, callers, callees, coupling, imports, notes, co_changes, git",
           ),
       },
       annotations: SHARED_ANNOTATIONS,
@@ -283,7 +283,7 @@ export function createServer(deps: ServerDeps): McpServer {
     "remember",
     {
       description:
-        "Write a durable note about code that grep/AST can't infer — a cross-file router chain, an invariant, a footgun, an architecture decision. Anchor it to the file(s)/symbol(s) it's about; codedeep then tracks STALENESS, so recall flags the note when its anchors change (unlike memories that rot silently). Writes only to the .codedeep note store, never to source.",
+        "Write a durable note about code that grep/AST can't infer — a cross-file router chain, an invariant, a footgun, an architecture decision. Anchor it to the file(s)/symbol(s) it's about; codedeep then tracks STALENESS — recall flags the note when its anchors change (unlike memories that rot silently), and get_context surfaces anchored notes inline. Writes only to the .codedeep note store, never to source.",
       inputSchema: {
         note: z
           .string()

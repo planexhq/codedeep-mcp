@@ -89,8 +89,12 @@ behavioral coupling (files that change together); and a risk score
 `remember` anchors durable notes to files/symbols and snapshots a content
 baseline; `recall` re-checks each anchor against the current source and tags
 every note ✓ fresh / ⚠ stale / ✗ missing — so an agent's accumulated knowledge
-is verified at read time instead of rotting silently. Notes are stored in the
-local `.codedeep` cache, never written into your source.
+is verified at read time instead of rotting silently. Anchored notes also
+surface **inline**: `get_context` renders the notes anchored to the symbol or
+file being read (staleness-checked, budget-capped), and `overview` reports how
+much knowledge is stored — the agent meets its own notes where it's already
+looking, without having to ask. Notes are stored in the local `.codedeep`
+cache, never written into your source.
 
 **Honest confidence, by design:**
 Cross-file edges are AST-derived name-matches with confidence tiers, not

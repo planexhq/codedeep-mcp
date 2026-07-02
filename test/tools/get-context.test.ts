@@ -1,8 +1,11 @@
-import { rmSync, symlinkSync, unlinkSync } from 'node:fs';
+import { existsSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CodeIndex } from '../../src/indexer/code-index.js';
+import { NoteStore } from '../../src/notes/note-store.js';
+import { runRecall } from '../../src/tools/recall.js';
+import { runRemember } from '../../src/tools/remember.js';
 import {
   runGetContext,
   type GetContextDeps,
@@ -40,12 +43,17 @@ function makeDeps(
   index: CodeIndex,
   ready = true,
   git: GetContextDeps['git'] = makeGitStub(),
+  notes: NoteStore = new NoteStore(
+    join(tmpRoot, '.codedeep', 'cache', 'notes.json'),
+    tmpRoot,
+  ),
 ): GetContextDeps {
   return {
     index,
     indexer: { ready },
     config: makeConfig(tmpRoot),
     git,
+    notes,
   };
 }
 
@@ -440,6 +448,7 @@ describe('runGetContext — symbol mode body extraction', () => {
       indexer: { ready: true },
       config: makeConfig(tmpRoot, { maxFileSize: 128 }),
       git: makeGitStub(),
+      notes: new NoteStore(join(tmpRoot, '.codedeep', 'cache', 'notes.json'), tmpRoot),
     };
     writeTree(tmpRoot, { 'src/big.ts': 'x'.repeat(deps.config.maxFileSize + 1) });
     idx.addFile(
@@ -1969,5 +1978,383 @@ describe('runGetContext — coupling section', () => {
     expect(result.content[0].text).toContain(
       '- Blast radius: 0 callers (no upstream call sites in the index)',
     );
+  });
+});
+
+describe('runGetContext — notes section (PULL)', () => {
+  const AUTH_SRC =
+    'export function authenticate(req: string): string {\n' +
+    '  return req;\n' +
+    '}\n' +
+    'export function authorize(u: string): boolean {\n' +
+    '  return u.length > 0;\n' +
+    '}\n';
+
+  function addAuthFile(idx: CodeIndex): { auth: Symbol; authz: Symbol } {
+    writeTree(tmpRoot, { 'src/auth.ts': AUTH_SRC });
+    const auth = mkSym({
+      name: 'authenticate',
+      file: 'src/auth.ts',
+      exported: true,
+      signature: 'function authenticate(req: string): string',
+      startLine: 1,
+      endLine: 3,
+    });
+    const authz = mkSym({
+      name: 'authorize',
+      file: 'src/auth.ts',
+      exported: true,
+      signature: 'function authorize(u: string): boolean',
+      startLine: 4,
+      endLine: 6,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/auth.ts'), [auth, authz], [], []);
+    return { auth, authz };
+  }
+
+  // Notes are written through the REAL remember path so anchors carry the
+  // disk-hash baseline + qualified symbol name exactly as production does.
+  async function rememberNote(
+    notes: NoteStore,
+    idx: CodeIndex,
+    note: string,
+    anchors: string[],
+  ): Promise<void> {
+    const r = await runRemember(
+      { note, anchors },
+      {
+        notes,
+        index: idx,
+        indexer: { ready: true },
+        config: makeConfig(tmpRoot),
+        git: makeGitStub(),
+      },
+    );
+    expect(r.content[0].text).toContain('✓ Remembered');
+  }
+
+  it('symbol mode surfaces an anchored note with a fresh verdict', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    addAuthFile(idx);
+    const deps = makeDeps(idx);
+    await rememberNote(
+      deps.notes,
+      idx,
+      'authenticate swallows trailing whitespace — trim first',
+      ['src/auth.ts:authenticate'],
+    );
+
+    const text = (
+      await runGetContext({ file: 'src/auth.ts', symbol: 'authenticate' }, deps)
+    ).content[0].text;
+
+    expect(text).toContain('### Notes (agent-curated)');
+    expect(text).toContain('authenticate swallows trailing whitespace');
+    expect(text).toContain('✓ fresh');
+    expect(text).toContain('✓ src/auth.ts:authenticate — unchanged');
+    // The structural sections still render around it.
+    expect(text).toContain('### Body');
+  });
+
+  it('flags the note stale after the file changes on disk', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    addAuthFile(idx);
+    const deps = makeDeps(idx);
+    await rememberNote(deps.notes, idx, 'watch this invariant', [
+      'src/auth.ts:authenticate',
+    ]);
+
+    // Edit the file on disk AFTER the note was taken (index left lagging —
+    // the disk re-hash alone must flag it).
+    writeTree(tmpRoot, { 'src/auth.ts': AUTH_SRC + '\n// drift\n' });
+
+    const text = (
+      await runGetContext({ file: 'src/auth.ts', symbol: 'authenticate' }, deps)
+    ).content[0].text;
+
+    expect(text).toContain('⚠ stale');
+    expect(text).toContain('file changed since this note');
+  });
+
+  it('symbol mode includes file-level notes but excludes other symbols’ notes', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    addAuthFile(idx);
+    const deps = makeDeps(idx);
+    await rememberNote(deps.notes, idx, 'note about the whole file', ['src/auth.ts']);
+    await rememberNote(deps.notes, idx, 'note about authorize only', [
+      'src/auth.ts:authorize',
+    ]);
+
+    const text = (
+      await runGetContext({ file: 'src/auth.ts', symbol: 'authenticate' }, deps)
+    ).content[0].text;
+
+    expect(text).toContain('note about the whole file'); // file-level anchor rides along
+    expect(text).not.toContain('note about authorize only'); // other symbol = noise
+  });
+
+  it('file mode surfaces every note anchored in the file', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    addAuthFile(idx);
+    const deps = makeDeps(idx);
+    await rememberNote(deps.notes, idx, 'note about authorize only', [
+      'src/auth.ts:authorize',
+    ]);
+    await rememberNote(deps.notes, idx, 'note about the whole file', ['src/auth.ts']);
+
+    const text = (
+      await runGetContext({ file: 'src/auth.ts' }, deps)
+    ).content[0].text;
+
+    expect(text).toContain('### Notes (agent-curated)');
+    expect(text).toContain('note about authorize only');
+    expect(text).toContain('note about the whole file');
+  });
+
+  it('caps rendered notes and points the overflow at recall', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    addAuthFile(idx);
+    const deps = makeDeps(idx);
+    for (let i = 1; i <= 5; i++) {
+      await rememberNote(deps.notes, idx, `note number ${i}`, ['src/auth.ts']);
+    }
+
+    const text = (
+      await runGetContext({ file: 'src/auth.ts' }, deps)
+    ).content[0].text;
+
+    const shown = (text.match(/### Note [0-9a-f]{16}/g) ?? []).length;
+    expect(shown).toBe(3); // MAX_CONTEXT_NOTES — structural sections keep priority
+    expect(text).toContain('(2 more not shown — recall({ file: "src/auth.ts" }) to browse notes here.)');
+  });
+
+  it('overflow in SYMBOL mode points at recall({file}), which actually returns the hidden file-level notes', async () => {
+    // The selection mixes symbol + file-level notes; recall({file,symbol}) is
+    // bySymbol (file-level excluded) and would return NONE of these — so the
+    // pointer must be the file-only recall (byFile = the true superset).
+    const idx = new CodeIndex(tmpRoot);
+    addAuthFile(idx);
+    const deps = makeDeps(idx);
+    for (let i = 1; i <= 5; i++) {
+      await rememberNote(deps.notes, idx, `file-level note ${i}`, ['src/auth.ts']);
+    }
+    const text = (
+      await runGetContext({ file: 'src/auth.ts', symbol: 'authenticate' }, deps)
+    ).content[0].text;
+    // File-only recall suggestion — NOT the symbol-scoped one that drops file anchors.
+    expect(text).toContain('recall({ file: "src/auth.ts" }) to browse notes here.');
+    expect(text).not.toContain('symbol:');
+
+    // Follow the suggestion: recall({file}) must actually return the notes.
+    const recalled = (
+      await runRecall(
+        { file: 'src/auth.ts' },
+        { notes: deps.notes, index: idx, indexer: { ready: true }, config: makeConfig(tmpRoot), git: makeGitStub() },
+      )
+    ).content[0].text;
+    expect(recalled).toContain('file-level note');
+  });
+
+  it('excludes a member-qualified anchor from a same-named TOP-LEVEL target', async () => {
+    // src/x.ts has top-level parse() AND Parser.parse. A note anchored to
+    // 'Parser.parse' must NOT bleed into the top-level function's context —
+    // an agent would read another symbol's invariant as this one's.
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, {
+      'src/x.ts':
+        'export function parse(s: string) { return s; }\n' +
+        'export class Parser {\n  parse(s: string) { return s; }\n}\n',
+    });
+    const topLevel = mkSym({
+      name: 'parse', file: 'src/x.ts', exported: true,
+      signature: 'function parse(s: string)', startLine: 1, endLine: 1,
+    });
+    const member = mkSym({
+      name: 'parse', file: 'src/x.ts', kind: 'method', parent: 'Parser',
+      signature: 'parse(s: string)', startLine: 3, endLine: 3,
+    });
+    const cls = mkSym({
+      name: 'Parser', file: 'src/x.ts', kind: 'class', exported: true,
+      signature: 'class Parser', startLine: 2, endLine: 4,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/x.ts'), [topLevel, cls, member], [], []);
+    const deps = makeDeps(idx);
+    await rememberNote(deps.notes, idx, 'note about the METHOD Parser.parse', [
+      'src/x.ts:Parser.parse',
+    ]);
+
+    const text = (
+      await runGetContext({ file: 'src/x.ts', symbol: 'parse', line: 1 }, deps)
+    ).content[0].text;
+    expect(text).not.toContain('note about the METHOD Parser.parse');
+  });
+
+  it('excludes a RESOLVED top-level anchor (symbolId set) from a same-named member', async () => {
+    // The reverse bleed: a note line-disambiguated to top-level `foo` resolves
+    // with a symbolId, so it is about THAT symbol only — it must NOT surface on
+    // a same-named method `foo` via the loose name arm (which is reserved for
+    // name-only/ambiguous anchors that carry no symbolId).
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, {
+      'src/x.ts':
+        'export function foo() {}\n' +
+        'export class C {\n  foo() {}\n}\n',
+    });
+    const topLevel = mkSym({
+      name: 'foo', file: 'src/x.ts', exported: true,
+      signature: 'function foo()', startLine: 1, endLine: 1,
+    });
+    const member = mkSym({
+      name: 'foo', file: 'src/x.ts', kind: 'method', parent: 'C',
+      signature: 'foo()', startLine: 3, endLine: 3,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/x.ts'), [topLevel, member], [], []);
+    const deps = makeDeps(idx);
+    // Line-disambiguate to the top-level symbol → remember stores a symbolId.
+    await rememberNote(deps.notes, idx, 'invariant of the TOP-LEVEL foo', [
+      'src/x.ts:foo:1',
+    ]);
+    const stored = deps.notes.all()[0].anchors[0];
+    expect(stored.symbolId).toBeDefined(); // resolved, not name-only
+
+    const text = (
+      await runGetContext({ file: 'src/x.ts', symbol: 'foo', line: 3 }, deps)
+    ).content[0].text;
+    expect(text).not.toContain('invariant of the TOP-LEVEL foo');
+  });
+
+  it('surfaces the degraded notice even when the body eats the whole token budget', async () => {
+    // The degraded signal must ride EVERY response (like recall) — a body large
+    // enough to truncate before the notes section must not suppress it.
+    const idx = new CodeIndex(tmpRoot);
+    const big = 'export function huge() {\n' + '  const x = 1;\n'.repeat(200) + '}\n';
+    writeTree(tmpRoot, { 'src/big.ts': big });
+    idx.addFile(
+      makeFileInfo('typescript', 'src/big.ts'),
+      [mkSym({ name: 'huge', file: 'src/big.ts', exported: true, signature: 'function huge()', startLine: 1, endLine: 202 })],
+      [],
+      [],
+    );
+    const deps = makeDeps(idx);
+    vi.spyOn(deps.notes, 'degradedReason', 'get').mockReturnValue(
+      'the previous note store was malformed JSON and moved aside; starting empty',
+    );
+    const text = (
+      await runGetContext({ file: 'src/big.ts', symbol: 'huge', max_tokens: 50 }, deps)
+    ).content[0].text;
+    // Budget forced truncation…
+    expect(text).toMatch(/omitted to stay within max_tokens/);
+    // …yet the degraded notice still rides the response (appended past budget).
+    expect(text).toContain('(note store degraded:');
+  });
+
+  it('surfaces a name-only (ambiguous) anchor on the member target it may describe', async () => {
+    // remember stores name-only anchors ('anchored by name') when the name is
+    // ambiguous — such a note is about ANY symbol with that name, so it must
+    // surface when reading the member, not fall through both selection paths.
+    const idx = new CodeIndex(tmpRoot);
+    writeTree(tmpRoot, {
+      'src/x.ts':
+        'export function foo() {}\n' +
+        'export class C {\n  foo() {}\n}\n',
+    });
+    const topLevel = mkSym({
+      name: 'foo', file: 'src/x.ts', exported: true,
+      signature: 'function foo()', startLine: 1, endLine: 1,
+    });
+    const member = mkSym({
+      name: 'foo', file: 'src/x.ts', kind: 'method', parent: 'C',
+      signature: 'foo()', startLine: 3, endLine: 3,
+    });
+    idx.addFile(makeFileInfo('typescript', 'src/x.ts'), [topLevel, member], [], []);
+    const deps = makeDeps(idx);
+    // Ambiguous name → remember stores the SIMPLE name, no symbolId.
+    const r = await runRemember(
+      { note: 'footgun shared by every foo', anchors: ['src/x.ts:foo'] },
+      { notes: deps.notes, index: idx, indexer: { ready: true }, config: makeConfig(tmpRoot), git: makeGitStub() },
+    );
+    expect(r.content[0].text).toContain('anchored by name');
+
+    const text = (
+      await runGetContext({ file: 'src/x.ts', symbol: 'foo', line: 3 }, deps)
+    ).content[0].text;
+    expect(text).toContain('footgun shared by every foo');
+  });
+
+  it('keeps the degraded notice on a NON-empty notes section', async () => {
+    // Same adjudication as recall: a newly-added note rendering fine must not
+    // hide that the PRIOR notes were moved aside.
+    const idx = new CodeIndex(tmpRoot);
+    addAuthFile(idx);
+    const deps = makeDeps(idx);
+    await rememberNote(deps.notes, idx, 'fresh note after quarantine', [
+      'src/auth.ts:authenticate',
+    ]);
+    vi.spyOn(deps.notes, 'degradedReason', 'get').mockReturnValue(
+      'the previous note store was malformed JSON and moved aside; starting empty',
+    );
+    const text = (
+      await runGetContext({ file: 'src/auth.ts', symbol: 'authenticate' }, deps)
+    ).content[0].text;
+    expect(text).toContain('fresh note after quarantine');
+    expect(text).toContain('(note store degraded:');
+  });
+
+  it('omits the section entirely when no notes are anchored', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    addAuthFile(idx);
+    const text = (
+      await runGetContext({ file: 'src/auth.ts', symbol: 'authenticate' }, makeDeps(idx))
+    ).content[0].text;
+    expect(text).not.toContain('### Notes');
+  });
+
+  it('honors the include filter for notes', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    addAuthFile(idx);
+    const deps = makeDeps(idx);
+    await rememberNote(deps.notes, idx, 'filterable note', ['src/auth.ts:authenticate']);
+
+    const only = (
+      await runGetContext(
+        { file: 'src/auth.ts', symbol: 'authenticate', include: ['notes'] },
+        deps,
+      )
+    ).content[0].text;
+    expect(only).toContain('filterable note');
+    expect(only).not.toContain('### Body');
+
+    const without = (
+      await runGetContext(
+        { file: 'src/auth.ts', symbol: 'authenticate', include: ['body'] },
+        deps,
+      )
+    ).content[0].text;
+    expect(without).toContain('### Body');
+    expect(without).not.toContain('filterable note');
+  });
+
+  it('surfaces a degraded note store instead of silently omitting', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    addAuthFile(idx);
+    const deps = makeDeps(idx);
+    vi.spyOn(deps.notes, 'degradedReason', 'get').mockReturnValue(
+      'the previous note store was malformed JSON and moved aside; starting empty',
+    );
+    const text = (
+      await runGetContext({ file: 'src/auth.ts', symbol: 'authenticate' }, deps)
+    ).content[0].text;
+    expect(text).toContain('(note store degraded:');
+  });
+
+  it('never creates or writes the note store (read-only surface)', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    addAuthFile(idx);
+    const notesPath = join(tmpRoot, '.codedeep', 'cache', 'notes.json');
+    await runGetContext(
+      { file: 'src/auth.ts', symbol: 'authenticate' },
+      makeDeps(idx),
+    );
+    expect(existsSync(notesPath)).toBe(false); // load() of an absent store never writes
   });
 });

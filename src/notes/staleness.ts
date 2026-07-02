@@ -1,6 +1,7 @@
 import type { GitService, RecentCommit } from '../git/git-service.js';
 import type { CodeIndex } from '../indexer/code-index.js';
 import { hashContent } from '../indexer/pipeline.js';
+import { errMsg } from '../logger.js';
 import { safeReadIndexedFile } from '../fs-util.js';
 import type { CodedeepConfig, Symbol } from '../types.js';
 import { qualifiedSymbolName } from './note-store.js';
@@ -66,6 +67,30 @@ export async function computeNoteStatus(
     if (SEVERITY[a.verdict] > SEVERITY[overall]) overall = a.verdict;
   }
   return { overall, anchors };
+}
+
+// computeNoteStatus that can never throw out of a tool call: one bad anchor
+// degrades ITS note to unverified (with the cause in the detail) instead of
+// sinking the whole response. Shared by recall and get_context's notes section
+// so the two surfaces keep identical degradation semantics.
+export async function computeNoteStatusSafe(
+  note: Note,
+  deps: StalenessDeps,
+  fileCache?: FileProbeCache,
+  commitCache?: CommitCache,
+): Promise<NoteStatus> {
+  try {
+    return await computeNoteStatus(note, deps, fileCache, commitCache);
+  } catch (err) {
+    return {
+      overall: 'unverified',
+      anchors: note.anchors.map((anchor) => ({
+        anchor,
+        verdict: 'unverified' as const,
+        detail: `staleness check failed: ${errMsg(err)}`,
+      })),
+    };
+  }
 }
 
 // 'ok' carries the live content hash; the failure states classify the read.

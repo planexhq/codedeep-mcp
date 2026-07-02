@@ -7,6 +7,7 @@ import * as parserModule from '../../src/indexer/parser.js';
 import { Indexer } from '../../src/indexer/pipeline.js';
 import { NoteStore } from '../../src/notes/note-store.js';
 import { runForget } from '../../src/tools/forget.js';
+import { runGetContext } from '../../src/tools/get-context.js';
 import { runRecall, type RecallDeps } from '../../src/tools/recall.js';
 import { runRemember, type RememberDeps } from '../../src/tools/remember.js';
 import type { CodedeepConfig } from '../../src/types.js';
@@ -136,5 +137,34 @@ describe('notes integration: remember → recall staleness', () => {
     expect(f.content[0].text).toContain(`✓ Forgot note ${noteId}`);
     const r = await runRecall({ file: 'router.py' }, await recallDeps());
     expect(r.content[0].text).toContain('No notes match');
+  });
+
+  it('PULL: get_context surfaces the anchored note fresh, then stale after an edit', async () => {
+    const deps = await recallDeps();
+
+    const fresh = (
+      await runGetContext({ file: 'router.py', symbol: 'parse_route' }, deps)
+    ).content[0].text;
+    expect(fresh).toContain('### Notes (agent-curated)');
+    expect(fresh).toContain('parse_route strips trailing slashes');
+    expect(fresh).toContain('✓ fresh');
+    expect(fresh).toContain('### Body'); // structural sections intact around it
+
+    // Body-only edit on disk; the disk re-hash flags it without any re-index.
+    writeTree(root, {
+      'router.py': 'def parse_route(path):\n    return path.rstrip("/").lower()\n',
+    });
+    const stale = (
+      await runGetContext({ file: 'router.py', symbol: 'parse_route' }, deps)
+    ).content[0].text;
+    expect(stale).toContain('⚠ stale');
+
+    // And overview reports the counts-only knowledge line.
+    const { runOverview } = await import('../../src/tools/overview.js');
+    const ov = (
+      await runOverview({}, { ...deps, git: makeGitStub() })
+    ).content[0].text;
+    expect(ov).toContain('### Knowledge (agent-curated)');
+    expect(ov).toContain('- 1 anchored note across 2 files');
   });
 });

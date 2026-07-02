@@ -4,7 +4,7 @@ import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
 import { NoteStore } from '../notes/note-store.js';
 import {
-  computeNoteStatus,
+  computeNoteStatusSafe,
   newCommitCache,
   newFileProbeCache,
   type NoteStatus,
@@ -95,28 +95,13 @@ export async function runRecall(
     // fileCache dedups same-file probes and each note is independent, so this
     // avoids serializing per-note git/disk latency.
     const considered = notes.slice(0, limit);
+    // Per-note failure isolation lives in computeNoteStatusSafe (shared with
+    // get_context's notes section) — one bad anchor degrades its note only.
     const statuses = await Promise.all(
-      considered.map(async (note): Promise<{ note: Note; status: NoteStatus }> => {
-        try {
-          return {
-            note,
-            status: await computeNoteStatus(note, stalenessDeps, fileCache, commitCache),
-          };
-        } catch (err) {
-          // One bad anchor must not sink the whole recall — degrade this note.
-          return {
-            note,
-            status: {
-              overall: 'unverified',
-              anchors: note.anchors.map((anchor) => ({
-                anchor,
-                verdict: 'unverified' as const,
-                detail: `staleness check failed: ${errMsg(err)}`,
-              })),
-            },
-          };
-        }
-      }),
+      considered.map(async (note): Promise<{ note: Note; status: NoteStatus }> => ({
+        note,
+        status: await computeNoteStatusSafe(note, stalenessDeps, fileCache, commitCache),
+      })),
     );
     const staleCount = statuses.filter((s) => s.status.overall === 'stale').length;
     const missingCount = statuses.filter((s) => s.status.overall === 'missing').length;

@@ -12,6 +12,7 @@ import type { BranchSummary, GitService } from '../git/git-service.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { compareShallowFirst } from '../indexer/scanner.js';
 import { errMsg, log } from '../logger.js';
+import type { NoteStore } from '../notes/note-store.js';
 import {
   LANGUAGE_UNKNOWN,
   type FileInfo,
@@ -40,6 +41,9 @@ export interface OverviewDeps {
   indexer: Pick<Indexer, 'ready'>;
   config: CodedeepConfig;
   git: Pick<GitService, 'branchSummary'>;
+  // Counts-only knowledge-layer surface (see the Knowledge section) — no
+  // staleness hashing on the always-first call.
+  notes: NoteStore;
 }
 
 const MAX_DIR_GROUPS = 7;
@@ -178,11 +182,65 @@ export async function runOverview(
       `- ${stats.totalFiles} ${plural('file', stats.totalFiles)} indexed, ${stats.totalSymbols} total ${plural('symbol', stats.totalSymbols)}`,
     );
 
-    appendGitSections(lines, await collectGitData(deps));
+    // The note-store read and the git subprocess work are independent I/O —
+    // start them concurrently (load never throws; it quarantines internally).
+    const [gitData] = await Promise.all([
+      collectGitData(deps),
+      deps.notes.load(),
+    ]);
+    appendKnowledgeSection(lines, deps.notes);
+
+    appendGitSections(lines, gitData);
 
     return textResponse(lines.join('\n'));
   } catch (err) {
     return textResponse(`Error: ${errMsg(err)}`);
+  }
+}
+
+// Counts-only PULL surface of the knowledge layer: overview is the always-
+// first call, so this deliberately does NO disk re-hashing (staleness lives in
+// recall and get_context's notes section). Silently omitted when the store is
+// empty AND healthy. A degraded store gets its one-line notice — and STILL
+// reports the live counts when notes exist (after a quarantine + new
+// remembers, hiding the counts would read as "no stored knowledge"). The
+// caller has already awaited notes.load().
+function appendKnowledgeSection(lines: string[], notes: NoteStore): void {
+  const all = notes.all();
+  const degraded = notes.degradedReason;
+  if (all.length === 0 && degraded === null) return;
+  lines.push('');
+  lines.push('### Knowledge (agent-curated)');
+  if (degraded !== null) {
+    lines.push(`- note store degraded: ${degraded}`);
+  }
+  if (all.length === 0) return;
+  // Only ANCHORED notes are staleness-tracked; count them separately from
+  // unanchored ones so a mixed store never claims "N notes … recall checks
+  // staleness" over notes recall reports as "(no anchors — not tracked)".
+  const anchoredFiles = new Set<string>();
+  let anchoredNotes = 0;
+  for (const note of all) {
+    if (note.anchors.length === 0) continue;
+    anchoredNotes++;
+    for (const anchor of note.anchors) anchoredFiles.add(anchor.file);
+  }
+  const unanchored = all.length - anchoredNotes;
+  if (anchoredNotes > 0) {
+    const base =
+      `- ${anchoredNotes} anchored ${plural('note', anchoredNotes)} across ` +
+      `${anchoredFiles.size} ${plural('file', anchoredFiles.size)} — ` +
+      '`recall` checks staleness';
+    lines.push(
+      unanchored > 0
+        ? `${base}; ${unanchored} unanchored (not tracked)`
+        : base,
+    );
+  } else {
+    lines.push(
+      `- ${unanchored} unanchored ${plural('note', unanchored)} — ` +
+        'not staleness-tracked; anchor notes to files/symbols to track them',
+    );
   }
 }
 

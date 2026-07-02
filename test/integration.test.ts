@@ -11,6 +11,7 @@ import {
 } from 'vitest';
 
 import { CodeIndex } from '../src/indexer/code-index.js';
+import { NoteStore } from '../src/notes/note-store.js';
 import * as parserModule from '../src/indexer/parser.js';
 import { Indexer } from '../src/indexer/pipeline.js';
 import { runFindReferences } from '../src/tools/find-references.js';
@@ -105,6 +106,7 @@ describe('integration: end-to-end pipeline + tools', () => {
     indexer: Indexer;
     config: CodedeepConfig;
     git: ReturnType<typeof makeGitStub>;
+    notes: NoteStore;
   }> {
     // loadConfig (config.ts:81,115) reads CODEDEEP_EXCLUDE and CODEDEEP_CACHE_DIR.
     // Unset them so a developer's shell can't perturb the fixture's index.
@@ -118,7 +120,13 @@ describe('integration: end-to-end pipeline + tools', () => {
     await indexer.indexAll();
     // Disabled stub: fixtures are not git repos. Real-git end-to-end
     // coverage lives in integration-git.test.ts.
-    return { index, indexer, config, git: makeGitStub() };
+    return {
+      index,
+      indexer,
+      config,
+      git: makeGitStub(),
+      notes: new NoteStore(join(config.cacheDir, 'notes.json'), root),
+    };
   }
 
   afterEach(() => {
@@ -283,7 +291,13 @@ describe('integration: end-to-end pipeline + tools', () => {
       const indexer = new Indexer(config, index);
       silenceStderr();
       await indexer.indexAll();
-      const deps = { index, indexer, config, git: makeGitStub() };
+      const deps = {
+        index,
+        indexer,
+        config,
+        git: makeGitStub(),
+        notes: new NoteStore(join(config.cacheDir, 'notes.json'), proj),
+      };
 
       const found = (await runFindSymbol({ name: 'classify' }, deps)).content[0].text;
       // TS now carries BOTH metrics → "cyc N / cog M".
