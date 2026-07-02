@@ -99,9 +99,20 @@ function repoScript(head = HEAD_A): (args: string[]) => string | GitError {
 let tmp: string;
 let cachePath: string;
 let stderrSpy: ReturnType<typeof silenceStderr>;
+// Every index handed to a GitService is tracked here so afterEach can drain
+// its write lock before rmdir'ing tmp (see the afterEach note). Indexes built
+// with bare `new CodeIndex()` must be wrapped in track() too — an untracked
+// index whose (possibly watcher-driven) fire-and-forget save is still in
+// flight would re-expose the exact rmdir/write race this guards against.
+let createdIndexes: CodeIndex[] = [];
+
+function track(idx: CodeIndex): CodeIndex {
+  createdIndexes.push(idx);
+  return idx;
+}
 
 function makeIndex(): CodeIndex {
-  const idx = new CodeIndex(tmp);
+  const idx = track(new CodeIndex(tmp));
   idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [mkSym({ name: 'a', file: 'src/a.ts' })], [], []);
   idx.addFile(makeFileInfo('typescript', 'src/b.ts'), [mkSym({ name: 'b', file: 'src/b.ts' })], [], []);
   return idx;
@@ -117,8 +128,24 @@ beforeEach(() => {
   stderrSpy = silenceStderr();
 });
 
-afterEach(() => {
+afterEach(async () => {
   stderrSpy.mockRestore();
+  // A GitService reaching 'ready' through the fire-and-forget startup retry
+  // (maybeRetryStartup) — or the kill-switch clear, or a live HEAD watcher —
+  // persists to the CodeIndex cache asynchronously. Drain every tracked
+  // index's write lock before the rmdir below; otherwise on Windows the rmdir
+  // races an in-flight temp-file write/rename and hits ENOTEMPTY.
+  //
+  // whenPersisted() only waits out writes ALREADY enqueued on the lock, so it
+  // relies on the save having been enqueued by the time we get here. That
+  // holds because (a) the retry tests poll index.getGitMeta(), which flips
+  // one microtask AFTER applyGitAnalysis enqueues save(); and (b) the
+  // real-repo suites run their own afterEach FIRST (inner-to-outer), close()-
+  // ing services so a retry still mid-subprocess is aborted before it can
+  // enqueue a save. A future test that heals a service and tears down while
+  // asserting only on service.state must keep one of those guarantees.
+  await Promise.all(createdIndexes.map((idx) => idx.whenPersisted()));
+  createdIndexes = [];
   // Retry on Windows: a real HEAD-watcher's fs.watch handle (or a debounce
   // timer that re-touches .git/logs) can briefly hold the temp dir open even
   // after service.close(), so an immediate rmdir hits ENOTEMPTY/EBUSY. The
@@ -474,7 +501,7 @@ describe.skipIf(!gitAvailable)('GitService against real repos', { timeout: REAL_
     expect(analyzedAt).toBeDefined();
 
     // Same cache file, new index + service — the warm-start path.
-    const index2 = new CodeIndex(tmp);
+    const index2 = track(new CodeIndex(tmp));
     expect(await index2.load(cachePath)).toBe(true);
     const service2 = new GitService(cfg(), index2, cachePath);
     services.push(service2);
@@ -588,7 +615,7 @@ describe('GitService review hardening', () => {
 
   it('refuses to apply an analysis over an empty index (cold-start indexing failure)', async () => {
     const runner = new FakeRunner(repoScript());
-    const emptyIndex = new CodeIndex(tmp);
+    const emptyIndex = track(new CodeIndex(tmp));
     const service = new GitService(cfg(), emptyIndex, cachePath, runner);
     await service.start();
 
@@ -640,7 +667,7 @@ describe.skipIf(!gitAvailable)('GitService in a monorepo subdirectory', { timeou
       },
     ]);
     const appRoot = join(tmp, 'packages', 'app');
-    const index = new CodeIndex(appRoot);
+    const index = track(new CodeIndex(appRoot));
     index.addFile(
       makeFileInfo('typescript', 'src/a.ts'),
       [mkSym({ name: 'a', file: 'src/a.ts' })],

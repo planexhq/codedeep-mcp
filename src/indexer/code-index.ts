@@ -1439,6 +1439,18 @@ export class CodeIndex {
     });
   }
 
+  // Resolve once every write already queued on the internal FIFO lock
+  // (save / applyGitAnalysis / clearGitData) has drained. Some of those
+  // writers run fire-and-forget — a background analysis refresh, the
+  // kill-switch clear — so a caller that must not race an in-flight cache
+  // write can await quiescence: a test tearing down its temp dir (an
+  // unfinished temp-file write/rename surfaces as ENOTEMPTY on Windows), or
+  // a graceful shutdown. Never rejects — the lock chain already swallows
+  // write failures and this enqueues only a no-op.
+  whenPersisted(): Promise<void> {
+    return this.runLocked(async () => {});
+  }
+
   async load(cachePath: string): Promise<boolean> {
     await this.cleanupStaleTmp(cachePath);
 
