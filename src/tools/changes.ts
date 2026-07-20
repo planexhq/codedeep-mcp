@@ -1,5 +1,5 @@
 import type { CodeIndex } from '../indexer/code-index.js';
-import type { GitService } from '../git/git-service.js';
+import { formatRepoList, type GitService } from '../git/git-service.js';
 import type { ChangedFile } from '../git/git-service.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { errMsg } from '../logger.js';
@@ -34,8 +34,9 @@ export interface ChangesDeps {
   index: CodeIndex;
   indexer: Pick<Indexer, 'ready'>;
   config: CodedeepConfig;
-  // recentCommits rides along for the notes' staleness provenance line.
-  git: Pick<GitService, 'changedFiles' | 'recentCommits'>;
+  // recentCommits rides along for the notes' staleness provenance line;
+  // childGitRepos upgrades the no-repo error at a folder-of-repos root.
+  git: Pick<GitService, 'changedFiles' | 'recentCommits' | 'childGitRepos'>;
   notes: NoteStore;
 }
 
@@ -70,11 +71,20 @@ export async function runChanges(
     // failure kind gets an honest, actionable in-band message — not the
     // silent section-omission the enrichment surfaces use.
     switch (ws.kind) {
-      case 'no-repo':
+      case 'no-repo': {
+        // A folder-of-repos root gets the actionable variant: the repos exist,
+        // they're just one level down — point at per-repo servers.
+        const children = deps.git.childGitRepos;
         return textResponse(
           'Error: `changes` requires a git repository — the working set IS the ' +
-            'git status. This project has no repo; use overview/find_symbol to explore.',
+            'git status. ' +
+            (children.length > 0
+              ? `This root is a workspace containing ${children.length} child git ` +
+                `${plural('repo', children.length)} (${formatRepoList(children)}) — ` +
+                'run one codedeep server per repository (--project <path> or CODEDEEP_ROOT).'
+              : 'This project has no repo; use overview/find_symbol to explore.'),
         );
+      }
       case 'unavailable':
         return textResponse(
           'Error: git is unavailable (disabled or not detected yet), so the ' +

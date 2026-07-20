@@ -1,14 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 
 import {
   defaultCacheDir,
   fallbackCacheDir,
   loadConfig,
   resolveCacheDir,
+  resolveProjectRoot,
 } from '../src/config.js';
 import {
   makeProjectDir,
@@ -23,6 +24,7 @@ const EXPECTED_DEFAULT_EXCLUDES = [
   'node_modules',
   '.git',
   '.codedeep',
+  '.playwright-mcp',
   '__pycache__',
   '.venv',
   'dist',
@@ -572,6 +574,120 @@ describe('resolveCacheDir', () => {
           });
         });
       });
+    },
+  );
+});
+
+// Root override resolution: --project / CODEDEEP_ROOT / cwd, with loud
+// validation — a typo'd root must throw here, never be mkdir-discovered
+// into a silently empty index by resolveCacheDir.
+describe('resolveProjectRoot', () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = makeProjectDir('codedeep-root-override-');
+    // Neutralize any ambient CODEDEEP_ROOT (a real one in the shell/CI env
+    // would otherwise hijack the no-override default-path assertions).
+    vi.stubEnv('CODEDEEP_ROOT', '');
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  });
+
+  it('defaults to process.cwd() with no override', () => {
+    expect(resolveProjectRoot([])).toBe(process.cwd());
+  });
+
+  it('--project <path> resolves and canonicalizes the root', () => {
+    // realpathSync: makeProjectDir lives under os.tmpdir(), which is itself
+    // a symlink on macOS (/var -> /private/var) — expected must match.
+    expect(resolveProjectRoot(['--project', root])).toBe(realpathSync(root));
+  });
+
+  it('--project=<path> form works', () => {
+    expect(resolveProjectRoot([`--project=${root}`])).toBe(realpathSync(root));
+  });
+
+  it('a relative path resolves against cwd', () => {
+    const rel = relative(process.cwd(), root);
+    expect(resolveProjectRoot(['--project', rel])).toBe(realpathSync(root));
+  });
+
+  it('CODEDEEP_ROOT is honored when no CLI flag is given', () => {
+    vi.stubEnv('CODEDEEP_ROOT', root);
+    expect(resolveProjectRoot([])).toBe(realpathSync(root));
+  });
+
+  it('--project beats CODEDEEP_ROOT', () => {
+    const other = makeProjectDir('codedeep-root-env-');
+    try {
+      vi.stubEnv('CODEDEEP_ROOT', other);
+      expect(resolveProjectRoot(['--project', root])).toBe(realpathSync(root));
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('the last --project occurrence wins', () => {
+    const other = makeProjectDir('codedeep-root-last-');
+    try {
+      expect(resolveProjectRoot(['--project', other, '--project', root])).toBe(
+        realpathSync(root),
+      );
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('blank CODEDEEP_ROOT is treated as unset', () => {
+    vi.stubEnv('CODEDEEP_ROOT', '   ');
+    expect(resolveProjectRoot([])).toBe(process.cwd());
+  });
+
+  it('--project with no value throws', () => {
+    expect(() => resolveProjectRoot(['--project'])).toThrow(/requires a path/);
+  });
+
+  it('--project followed by another flag throws (missing value, not a path)', () => {
+    expect(() => resolveProjectRoot(['--project', '--verbose'])).toThrow(
+      /requires a path/,
+    );
+  });
+
+  it('--project= with a blank value throws', () => {
+    expect(() => resolveProjectRoot(['--project='])).toThrow(/non-empty path/);
+    expect(() => resolveProjectRoot(['--project', '  '])).toThrow(/non-empty path/);
+  });
+
+  it('a nonexistent root throws with the resolved path and the source', () => {
+    const missing = join(root, 'no-such-dir');
+    expect(() => resolveProjectRoot(['--project', missing])).toThrow(
+      /--project path ".*no-such-dir" does not exist/,
+    );
+    vi.stubEnv('CODEDEEP_ROOT', missing);
+    expect(() => resolveProjectRoot([])).toThrow(
+      /CODEDEEP_ROOT path ".*no-such-dir" does not exist/,
+    );
+  });
+
+  it('a file as root throws "not a directory"', () => {
+    const file = join(root, 'a-file.txt');
+    writeFileSync(file, 'x\n');
+    expect(() => resolveProjectRoot(['--project', file])).toThrow(
+      /is not a directory/,
+    );
+  });
+
+  it.skipIf(skipOnWindows)(
+    'a symlinked root canonicalizes to the real path (matches git --show-prefix)',
+    () => {
+      const real = join(root, 'real-project');
+      mkdirSync(real, { recursive: true });
+      const link = join(root, 'link-to-project');
+      symlinkSync(real, link);
+      expect(resolveProjectRoot(['--project', link])).toBe(realpathSync(real));
     },
   );
 });

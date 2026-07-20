@@ -210,12 +210,14 @@ export function makeGitStub(
       n?: number,
     ) => Promise<import('../src/git/git-service.js').RecentCommit[]>;
     currentHead: () => Promise<string | null>;
+    childGitRepos: readonly string[];
   }> = {},
 ) {
   return {
     branchSummary: async () => null,
     recentCommits: async () => [],
     currentHead: async () => null,
+    childGitRepos: [] as readonly string[],
     ...overrides,
   };
 }

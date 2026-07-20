@@ -47,6 +47,21 @@ describe('buildLogArgs', () => {
     const since = args.find((a) => a.startsWith('--since='));
     expect(since).toBe(`--since=${new Date(now - 30 * 86_400_000).toISOString()}`);
   });
+
+  it('omits the subtree pathspec by default (repo-root case unchanged)', () => {
+    const args = buildLogArgs(30, Date.UTC(2026, 5, 10));
+    expect(args).not.toContain('--');
+    expect(args).not.toContain('.');
+  });
+
+  it('appends a `-- .` pathspec (last) when scoping to a subdir root', () => {
+    const args = buildLogArgs(30, Date.UTC(2026, 5, 10), true);
+    // Must be the final two args, after every option (the `--` terminator).
+    expect(args.slice(-2)).toEqual(['--', '.']);
+    // The pathspec is cwd-relative; the runner runs git with cwd=projectRoot,
+    // so at a monorepo subdir it filters --name-only to the subtree.
+    expect(args.indexOf('--')).toBe(args.length - 2);
+  });
 });
 
 describe('analyzeLog', () => {

@@ -1052,6 +1052,31 @@ describe('runOverview — git sections', () => {
     expect(text).not.toContain('ahead of');
   });
 
+  it('renders the workspace note at a folder-of-repos root', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'backend/src/a.ts'), [], [], []);
+    const git = makeGitStub({ childGitRepos: ['backend', 'frontend'] });
+    const text = (await runOverview({}, makeDeps(idx, true, git))).content[0].text;
+
+    expect(text).toContain(
+      'Note: this root is not a git repository but contains 2 child git repositories (backend, frontend).',
+    );
+    expect(text).toContain('run one codedeep server per repository');
+    expect(text).toContain('--project');
+  });
+
+  it('singular child repo renders "repository", and the note is absent by default', async () => {
+    const idx = new CodeIndex(tmpRoot);
+    idx.addFile(makeFileInfo('typescript', 'src/a.ts'), [], [], []);
+
+    const one = makeGitStub({ childGitRepos: ['backend'] });
+    const withNote = (await runOverview({}, makeDeps(idx, true, one))).content[0].text;
+    expect(withNote).toContain('1 child git repository (backend)');
+
+    const none = (await runOverview({}, makeDeps(idx))).content[0].text;
+    expect(none).not.toContain('child git repositor');
+  });
+
   it('renders top-10 hotspots with window label and commit counts, strongest first', async () => {
     const idx = new CodeIndex(tmpRoot);
     const entries: Array<[string, number]> = [];

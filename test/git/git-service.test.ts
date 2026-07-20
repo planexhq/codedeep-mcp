@@ -4,7 +4,7 @@
 // (branch summary, recent commits, detection variants).
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { CodeIndex } from '../../src/indexer/code-index.js';
@@ -191,6 +191,87 @@ describe('GitService detection', () => {
     const service = new GitService(cfg(), makeIndex(), cachePath, runner);
     await service.start();
     expect(service.state).toBe('no-repo');
+  });
+});
+
+// A workspace FOLDER of repos (root is no-repo, children have .git) looks
+// identical to a plain non-repo but silently loses every behavioral surface —
+// detection upgrades it to a warn + a populated childGitRepos for the tools.
+describe('GitService child-repo detection (folder-of-repos root)', () => {
+  const noRepoRunner = () =>
+    new FakeRunner(
+      () => new GitError('exit', 'not a git repository', { exitCode: 128 }),
+    );
+
+  function stderrText(): string {
+    return stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+  }
+
+  it('no-repo root with child repos populates childGitRepos (sorted) and warns', async () => {
+    // .git as a DIR (normal clone) and as a FILE (worktree/submodule form)
+    // both count; a plain child dir and a loose file do not.
+    mkdirSync(join(tmp, 'frontend', '.git'), { recursive: true });
+    mkdirSync(join(tmp, 'backend'), { recursive: true });
+    writeFileSync(join(tmp, 'backend', '.git'), 'gitdir: ../actual\n');
+    mkdirSync(join(tmp, 'docs'), { recursive: true });
+    writeFileSync(join(tmp, 'notes.txt'), 'not a dir\n');
+
+    const service = new GitService(cfg(), makeIndex(), cachePath, noRepoRunner());
+    await service.start();
+
+    expect(service.state).toBe('no-repo');
+    expect(service.childGitRepos).toEqual(['backend', 'frontend']);
+    const err = stderrText();
+    expect(err).toContain('contains 2 child git repos');
+    expect(err).toContain('backend, frontend');
+    expect(err).toContain('--project');
+  });
+
+  it('plain no-repo root leaves childGitRepos empty and does not warn', async () => {
+    mkdirSync(join(tmp, 'src'), { recursive: true });
+    const service = new GitService(cfg(), makeIndex(), cachePath, noRepoRunner());
+    await service.start();
+    expect(service.state).toBe('no-repo');
+    expect(service.childGitRepos).toEqual([]);
+    expect(stderrText()).not.toContain('child git');
+  });
+
+  it('a ready repo never scans: childGitRepos stays empty even with a child repo', async () => {
+    // Nested repo under a REAL repo root (e.g. an unregistered submodule
+    // checkout) must not trigger the workspace warning — the root itself
+    // is enriched, so per-repo servers are not the guidance to give.
+    mkdirSync(join(tmp, 'vendor-checkout', '.git'), { recursive: true });
+    const service = new GitService(cfg(), makeIndex(), cachePath, new FakeRunner(repoScript()));
+    await service.start();
+    expect(service.state).toBe('ready');
+    expect(service.childGitRepos).toEqual([]);
+    expect(stderrText()).not.toContain('child git');
+  });
+
+  it('transient detection failure does not scan (state stays unknown)', async () => {
+    mkdirSync(join(tmp, 'backend', '.git'), { recursive: true });
+    const runner = new FakeRunner(() => new GitError('timeout', 'git timed out'));
+    const service = new GitService(cfg(), makeIndex(), cachePath, runner);
+    await service.start();
+    expect(service.state).toBe('unknown');
+    expect(service.childGitRepos).toEqual([]);
+  });
+
+  it('list is sorted and capped in the warn message for huge workspaces', async () => {
+    // Create in DESCENDING order: on an insertion-order fs, dropping the
+    // .sort() in detectChildRepos would surface repo-6..repo-0 and fail both
+    // the toEqual and the capped-message assertions below.
+    for (let i = 6; i >= 0; i--) {
+      mkdirSync(join(tmp, `repo-${i}`, '.git'), { recursive: true });
+    }
+    const service = new GitService(cfg(), makeIndex(), cachePath, noRepoRunner());
+    await service.start();
+    expect(service.childGitRepos).toEqual([
+      'repo-0', 'repo-1', 'repo-2', 'repo-3', 'repo-4', 'repo-5', 'repo-6',
+    ]);
+    const err = stderrText();
+    expect(err).toContain('contains 7 child git repos');
+    expect(err).toContain('repo-0, repo-1, repo-2, repo-3, repo-4, +2 more');
   });
 });
 
@@ -641,36 +722,31 @@ describe('GitService review hardening', () => {
 });
 
 describe.skipIf(!gitAvailable)('GitService in a monorepo subdirectory', { timeout: REAL_GIT_SUITE_TIMEOUT }, () => {
-  it('maps repo-relative log paths onto project-relative index keys', async () => {
-    // The git toplevel is tmp; the probed project is tmp/packages/app.
-    makeGitRepo(tmp, [
-      {
-        files: {
-          'packages/app/src/a.ts': 'export const a = 1;',
-          'packages/lib/src/b.ts': 'export const b = 1;',
-        },
-        message: 'init',
+  it('maps repo-relative paths to index keys, keeps in-subtree co-change, drops sibling-package partners', async () => {
+    // The git toplevel is tmp; the probed project is tmp/packages/app. Every
+    // commit touches an in-subtree pair (app a.ts + c.ts) AND a sibling
+    // package (lib/b.ts), so a.ts co-changes with both — but the bulk log is
+    // scoped to the subtree (`-- .`), so only the in-subtree partner survives.
+    const bump = (n: number) => ({
+      files: {
+        'packages/app/src/a.ts': `export const a = ${n};`,
+        'packages/app/src/c.ts': `export const c = ${n};`,
+        'packages/lib/src/b.ts': `export const b = ${n};`,
       },
-      {
-        files: {
-          'packages/app/src/a.ts': 'export const a = 2;',
-          'packages/lib/src/b.ts': 'export const b = 2;',
-        },
-        message: 'touch both 1',
-      },
-      {
-        files: {
-          'packages/app/src/a.ts': 'export const a = 3;',
-          'packages/lib/src/b.ts': 'export const b = 3;',
-        },
-        message: 'touch both 2',
-      },
-    ]);
+      message: `touch all ${n}`,
+    });
+    makeGitRepo(tmp, [bump(1), bump(2), bump(3)]);
     const appRoot = join(tmp, 'packages', 'app');
     const index = track(new CodeIndex(appRoot));
     index.addFile(
       makeFileInfo('typescript', 'src/a.ts'),
       [mkSym({ name: 'a', file: 'src/a.ts' })],
+      [],
+      [],
+    );
+    index.addFile(
+      makeFileInfo('typescript', 'src/c.ts'),
+      [mkSym({ name: 'c', file: 'src/c.ts' })],
       [],
       [],
     );
@@ -682,17 +758,20 @@ describe.skipIf(!gitAvailable)('GitService in a monorepo subdirectory', { timeou
     expect(service.state).toBe('ready');
     // Index-relative key carries the churn, not the repo-relative path.
     expect(index.getFile('src/a.ts')?.commitFrequency).toBe(3);
-    expect(index.getHotspots().map((h) => h.path)).toEqual(['src/a.ts']);
-    // The sibling package appears as a PROJECT-relative partner value
-    // ('../'-prefixed) so it can never collide with an index key.
-    const record = index.getCoChanges('src/a.ts')[0];
-    expect(record).toBeDefined();
-    const partner = record.fileA === 'src/a.ts' ? record.fileB : record.fileA;
-    expect(partner).toBe('../lib/src/b.ts');
+    expect(index.getHotspots().map((h) => h.path)).toEqual(['src/a.ts', 'src/c.ts']);
+    // The in-subtree partner survives; the sibling package (packages/lib,
+    // OUTSIDE the project subtree) is filtered out by the `-- .` pathspec and
+    // never appears as a '../'-prefixed cross-repo partner.
+    const partners = index.getCoChanges('src/a.ts').map((r) =>
+      r.fileA === 'src/a.ts' ? r.fileB : r.fileA,
+    );
+    expect(partners).toContain('src/c.ts');
+    expect(partners).not.toContain('../lib/src/b.ts');
+    expect(partners.some((p) => p.startsWith('../'))).toBe(false);
 
       // Recent commits resolve via the cwd-relative pathspec.
       const commits = await service.recentCommits('src/a.ts', 2);
-      expect(commits[0]?.subject).toBe('touch both 2');
+      expect(commits[0]?.subject).toBe('touch all 3');
     } finally {
       // A real HeadWatcher attached here — a failing assertion above must
       // not leak it past afterEach's rmSync (sibling suites use a

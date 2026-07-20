@@ -15,6 +15,7 @@
 // the ServerDeps shape stays uniform.
 
 import { existsSync } from 'node:fs';
+import { access, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import type { CodeIndex } from '../indexer/code-index.js';
@@ -150,6 +151,17 @@ const RECENT_COMMITS_DEFAULT = 5;
 // every tool call into a 30s/64MB git child.
 const STARTUP_RETRY_BACKOFF_MS = 60_000;
 
+// Bounded child-repo name list for the warn/overview/changes lines — a huge
+// workspace must not produce a screen-wide message. Shared with the tools
+// that render childGitRepos so the three surfaces stay word-for-word aligned.
+const CHILD_REPO_LIST_CAP = 5;
+export function formatRepoList(repos: readonly string[]): string {
+  const shown = repos.slice(0, CHILD_REPO_LIST_CAP).join(', ');
+  return repos.length > CHILD_REPO_LIST_CAP
+    ? `${shown}, +${repos.length - CHILD_REPO_LIST_CAP} more`
+    : shown;
+}
+
 export class GitService {
   private readonly config: CodedeepConfig;
   private readonly index: CodeIndex;
@@ -164,6 +176,13 @@ export class GitService {
   // toplevel (monorepo package): repo-relative log paths must be
   // stripped by this prefix to match project-relative index keys.
   private pathPrefix = '';
+  // Immediate child directories of a NON-repo root that are git repos
+  // themselves (a workspace folder holding backend/.git + frontend/.git).
+  // Populated only when detection lands in 'no-repo': that layout looks
+  // identical to a plain non-repo yet silently loses every behavioral
+  // surface, so it gets a startup warn + an overview/changes pointer to
+  // per-repo servers (--project) instead of the usual silent omission.
+  private childRepos: readonly string[] = [];
   private headWatcher: HeadWatcher | null = null;
   private readonly headDebounceMs: number | undefined;
 
@@ -212,6 +231,12 @@ export class GitService {
     return this.stateValue;
   }
 
+  // Empty except at a folder-of-repos root (see childRepos above). Read by
+  // overview (workspace note) and changes (actionable no-repo error).
+  get childGitRepos(): readonly string[] {
+    return this.childRepos;
+  }
+
   get generation(): number {
     return this.generationValue;
   }
@@ -255,10 +280,31 @@ export class GitService {
       if (this.closed) return;
       const kind = err instanceof GitError ? err.kind : null;
       if (kind === 'exit') {
-        // Plain exit-128 non-repo is a normal deployment, debug only.
-        this.stateValue = 'no-repo';
-        log.debug('git: no repository detected; enrichment off');
+        // Order matters — do all async work while stateValue is still
+        // 'unknown', flip it LAST. (1) Clear persisted enrichment first so a
+        // concurrent overview can never render the workspace note alongside a
+        // stale warm-cache Hotspots/Freshness block. (2) Populate childRepos
+        // before the terminal state is observable so a concurrent `changes`
+        // call in the detect window sees 'unknown' → the honest "not detected
+        // yet" message, never a no-repo variant with an empty child list.
         await this.clearPersistedGitData('no repository');
+        const children = await this.detectChildRepos();
+        if (children.length > 0) {
+          // A folder-of-repos root reads as "working" (structural tools are
+          // fine) while every behavioral surface is off — warn, don't debug.
+          log.warn(
+            `git: ${this.config.projectRoot} is not a git repository but contains ` +
+              `${children.length} child git ${children.length === 1 ? 'repo' : 'repos'} ` +
+              `(${formatRepoList(children)}); behavioral enrichment (branch, hotspots, ` +
+              'risk, changes) is off at this root — run one codedeep server per repository ' +
+              '(--project <path> or CODEDEEP_ROOT)',
+          );
+        } else {
+          // Plain exit-128 non-repo is a normal deployment, debug only.
+          log.debug('git: no repository detected; enrichment off');
+        }
+        this.childRepos = children;
+        this.stateValue = 'no-repo';
       } else if (kind === 'git-missing' || kind === 'disabled') {
         // ENOENT already session-disabled the runner (with one warn).
         this.stateValue = 'disabled';
@@ -290,6 +336,39 @@ export class GitService {
     this.stateValue = 'ready';
     this.startHeadWatcher();
     await this.ensureFreshAnalysis();
+  }
+
+  // One-level scan for <child>/.git (dir OR file — worktrees/submodules use
+  // a .git file). Runs only on the no-repo detection path, so the cost is one
+  // readdir plus one async access() per child directory (probed concurrently
+  // to stay off the event-loop critical path — a wide root, e.g. --project at
+  // $HOME, must not block concurrent tool calls). Never throws — a scan
+  // failure just means no workspace warning. Symlinked children are skipped
+  // (withFileTypes dirents don't follow links), like the scanner.
+  private async detectChildRepos(): Promise<readonly string[]> {
+    try {
+      const entries = await readdir(this.config.projectRoot, {
+        withFileTypes: true,
+      });
+      const dirs = entries.filter((e) => e.isDirectory());
+      const hasGit = await Promise.all(
+        dirs.map(async (e) => {
+          try {
+            await access(join(this.config.projectRoot, e.name, '.git'));
+            return true;
+          } catch {
+            return false;
+          }
+        }),
+      );
+      return dirs
+        .filter((_, i) => hasGit[i])
+        .map((e) => e.name)
+        .sort();
+    } catch (err) {
+      log.debug(`git: child-repo scan failed: ${errMsg(err)}`);
+      return [];
+    }
   }
 
   // Persisted enrichment from an earlier enabled session must not keep
@@ -394,10 +473,17 @@ export class GitService {
     }
     let stdout: string;
     try {
-      stdout = await this.runner.run(buildLogArgs(this.config.gitWindow), {
-        timeoutMs: ANALYSIS_TIMEOUT_MS,
-        maxBuffer: ANALYSIS_MAX_BUFFER,
-      });
+      // Scope the bulk log to the subtree when the root is a monorepo
+      // subdirectory (pathPrefix non-empty) — keeps co-change partners inside
+      // the indexed tree and skips the redundant whole-repo walk.
+      const scopeToSubtree = this.pathPrefix.length > 0;
+      stdout = await this.runner.run(
+        buildLogArgs(this.config.gitWindow, undefined, scopeToSubtree),
+        {
+          timeoutMs: ANALYSIS_TIMEOUT_MS,
+          maxBuffer: ANALYSIS_MAX_BUFFER,
+        },
+      );
     } catch (err) {
       const kind = err instanceof GitError ? err.kind : null;
       if (kind === 'aborted') {

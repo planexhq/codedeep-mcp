@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, realpathSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 
 import {
@@ -8,7 +8,7 @@ import {
   isClassMember,
   zeroSymbolsByKind,
 } from '../indexer/code-index.js';
-import type { BranchSummary, GitService } from '../git/git-service.js';
+import { formatRepoList, type BranchSummary, type GitService } from '../git/git-service.js';
 import type { Indexer } from '../indexer/pipeline.js';
 import { compareShallowFirst } from '../indexer/scanner.js';
 import { errMsg, log } from '../logger.js';
@@ -40,7 +40,7 @@ export interface OverviewDeps {
   index: CodeIndex;
   indexer: Pick<Indexer, 'ready'>;
   config: CodedeepConfig;
-  git: Pick<GitService, 'branchSummary'>;
+  git: Pick<GitService, 'branchSummary' | 'childGitRepos'>;
   // Counts-only knowledge-layer surface (see the Knowledge section) — no
   // staleness hashing on the always-first call.
   notes: NoteStore;
@@ -95,7 +95,12 @@ export async function runOverview(
 ): Promise<ToolResponse> {
   try {
     const projectRoot = deps.config.projectRoot;
-    if (args.path && resolve(args.path) !== projectRoot) {
+    // projectRoot is realpath-canonicalized when set via --project/CODEDEEP_ROOT,
+    // so canonicalize the arg the same way before comparing — otherwise a
+    // client passing the symlink form of a canonicalized root would spuriously
+    // fail this sanity check. Accept a match on either the canonical or the
+    // plain-resolved form (the path may not exist on disk).
+    if (args.path && !pathMatchesRoot(args.path, projectRoot)) {
       return textResponse(
         `Error: path "${args.path}" does not match configured project root "${projectRoot}". Multi-root workspaces are not yet supported.`,
       );
@@ -252,6 +257,10 @@ interface OverviewGitData {
   // Provenance of the persisted git analysis (analyzed HEAD + timestamp);
   // drives the freshness banner. Null off-git / before the first analysis.
   gitMeta: GitMeta | null;
+  // Non-empty only at a folder-of-repos root (no repo HERE, child repos
+  // below) — renders the workspace note instead of the usual silent
+  // omission, since that layout loses every behavioral surface at once.
+  childRepos: readonly string[];
 }
 
 // Defensive catch at the tool boundary: GitService promises not to
@@ -276,6 +285,7 @@ async function collectGitData(deps: OverviewDeps): Promise<OverviewGitData> {
     // keep their true label until the re-analysis lands.
     windowDays: gitMeta?.windowDays ?? deps.config.gitWindow,
     gitMeta,
+    childRepos: deps.git.childGitRepos,
   };
 }
 
@@ -284,6 +294,20 @@ async function collectGitData(deps: OverviewDeps): Promise<OverviewGitData> {
 // placeholder. Hotspots come from the persisted index, so a warm start
 // shows them immediately, even while the indexing banner is up.
 function appendGitSections(lines: string[], data: OverviewGitData): void {
+  // Folder-of-repos root: the one deliberate exception to silent omission.
+  // childRepos is only populated in the 'no-repo' state, so this note and
+  // the git sections below are mutually exclusive in practice — without it,
+  // a workspace root looks healthy while every behavioral surface is off.
+  if (data.childRepos.length > 0) {
+    lines.push(
+      '',
+      `Note: this root is not a git repository but contains ${data.childRepos.length} ` +
+        `child git ${data.childRepos.length === 1 ? 'repository' : 'repositories'} ` +
+        `(${formatRepoList(data.childRepos)}). Behavioral signals (branch, hotspots, ` +
+        'risk, changes) are off at this root — run one codedeep server per repository ' +
+        '(--project <path> or CODEDEEP_ROOT).',
+    );
+  }
   // Freshness banner: the analyzed HEAD and how long ago the git analysis ran,
   // all from gitMeta (no extra git spawn). Tag-less — it's provenance, not a
   // behavioral signal. Gated on a git analysis having run (gitMeta !== null),
@@ -372,6 +396,21 @@ function topUnknownExtensions(files: FileInfo[], limit: number): string[] {
 
 function capitalize(s: string): string {
   return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
+}
+
+// The overview `path` arg is a sanity check against the configured root.
+// projectRoot may be realpath-canonicalized (a --project/CODEDEEP_ROOT
+// symlink is resolved), so accept the arg in either canonical or plain
+// form. realpathSync throws when the path doesn't exist — that's fine, the
+// plain-resolved comparison still applies.
+function pathMatchesRoot(argPath: string, projectRoot: string): boolean {
+  const resolved = resolve(argPath);
+  if (resolved === projectRoot) return true;
+  try {
+    return realpathSync(resolved) === projectRoot;
+  } catch {
+    return false;
+  }
 }
 
 function pluralKind(kind: SymbolKind, count: number): string {

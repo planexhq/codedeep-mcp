@@ -178,7 +178,47 @@ All fields are optional. Works with no config file.
 
 Add `.codedeep/` to your `.gitignore` — the index cache is stored there.
 
-Environment variables: `CODEDEEP_CACHE_DIR`, `CODEDEEP_EXCLUDE`, `CODEDEEP_GIT`, `CODEDEEP_GIT_WINDOW`, `CODEDEEP_WATCH`, `CODEDEEP_DEBUG`.
+Environment variables: `CODEDEEP_ROOT`, `CODEDEEP_CACHE_DIR`, `CODEDEEP_EXCLUDE`, `CODEDEEP_GIT`, `CODEDEEP_GIT_WINDOW`, `CODEDEEP_WATCH`, `CODEDEEP_DEBUG`.
+
+### Project Root
+
+By default the server indexes the directory it is launched from. Point it
+elsewhere with `--project <path>` (or the `CODEDEEP_ROOT` env var — the CLI
+flag wins). The path is validated (must be an existing directory) and
+symlink-resolved; a bad path fails at startup instead of serving an empty
+index. Prefer an absolute path — MCP clients don't reliably control a stdio
+server's working directory.
+
+### Monorepos & Multi-Repo Workspaces
+
+**One server indexes one root.** For a workspace folder that holds several
+repos (say `workspace/` containing `backend/` and `frontend/`), run one server
+per repo so each gets its own index, cache, and git signals with no cross-repo
+noise:
+
+```json
+{
+  "mcpServers": {
+    "codedeep-backend": {
+      "command": "npx",
+      "args": ["codedeep-mcp", "--project", "/abs/path/workspace/backend"]
+    },
+    "codedeep-frontend": {
+      "command": "npx",
+      "args": ["codedeep-mcp", "--project", "/abs/path/workspace/frontend"]
+    }
+  }
+}
+```
+
+Pointing a server at the workspace folder itself still works for the
+structural tools, but the workspace is not a git repository — every
+behavioral surface (branch, hotspots, risk ranking, `changes`) is off, and
+the server tells you so at startup and in `overview`.
+
+A true monorepo (one `.git` at the top) is one root: launch at the repo root,
+or use `--project <repo>/packages/foo` to scope a server to one package —
+git enrichment follows the subtree correctly.
 
 ## Development
 

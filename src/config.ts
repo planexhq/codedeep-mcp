@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { constants as fsConstants, readFileSync } from 'node:fs';
+import { constants as fsConstants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { access, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -11,6 +11,9 @@ const DEFAULT_EXCLUDES: readonly string[] = [
   'node_modules',
   '.git',
   '.codedeep',
+  // MCP tool-artifact directory (Playwright MCP screenshots/traces) — never
+  // source, and its dot prefix does NOT exempt it (picomatch runs {dot:true}).
+  '.playwright-mcp',
   '__pycache__',
   '.venv',
   'dist',
@@ -134,6 +137,83 @@ function computeCacheDirExcludes(root: string, cacheDir: string): string[] {
   if (isAbsolute(rel)) return [];
   const posixRel = toPosix(rel);
   return [posixRel, `${posixRel}/**`];
+}
+
+// Resolves the project root the server should index: `--project <path>` /
+// `--project=<path>` (last occurrence wins) beats CODEDEEP_ROOT beats
+// process.cwd(). MCP clients don't reliably honor a per-server working
+// directory, so an explicit override is the only dependable way to root a
+// server at a workspace sub-repo (one server = one repo). Overrides are
+// resolved against cwd, then realpath-canonicalized — git resolves symlinks
+// when answering `rev-parse --show-prefix`, so a symlinked projectRoot would
+// mismatch the prefix and silently kill enrichment — and must name an
+// existing directory: resolveCacheDir's mkdir({recursive}) would otherwise
+// materialize a typo'd root and serve a working-but-empty index with zero
+// diagnostics. Fails loud (throw; index.ts exits) — never mkdir-discovers.
+// The no-override path stays exactly process.cwd(): getcwd() is already
+// symlink-free on POSIX, and re-canonicalizing it could shift projectRoot
+// under existing caches (load() deletes on projectRoot mismatch).
+export function resolveProjectRoot(
+  argv: readonly string[] = process.argv.slice(2),
+): string {
+  let cli: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--project') {
+      const next = argv[i + 1];
+      // A following flag is a missing value, not a path — resolving it
+      // would produce a confusing "--foo does not exist" error.
+      if (next === undefined || next.startsWith('--')) {
+        throw new Error('--project requires a path argument');
+      }
+      cli = next;
+      i++;
+    } else if (arg.startsWith('--project=')) {
+      cli = arg.slice('--project='.length);
+    }
+  }
+
+  let override: string;
+  let source: string;
+  if (cli !== undefined) {
+    // An explicit flag with a blank value is a misconfig, not "unset".
+    if (cli.trim().length === 0) {
+      throw new Error('--project requires a non-empty path');
+    }
+    override = cli;
+    source = '--project';
+  } else {
+    const env = asNonBlankString(process.env.CODEDEEP_ROOT);
+    if (env === undefined) return process.cwd();
+    override = env;
+    source = 'CODEDEEP_ROOT';
+  }
+
+  const resolved = resolve(override);
+  let root: string;
+  try {
+    root = realpathSync(resolved);
+  } catch (err) {
+    // realpath(3) throws for more than a typo — name the real fault so the
+    // operator doesn't hunt for a misspelling of a path that actually exists.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP') {
+      throw new Error(`${source} path "${resolved}" has a symlink cycle`);
+    }
+    if (code === 'EACCES') {
+      throw new Error(`${source} path "${resolved}" is not accessible`);
+    }
+    // ENOENT (and ENOTDIR on a non-terminal component) both read as "does
+    // not exist" to the operator; anything else surfaces the raw message.
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      throw new Error(`${source} path "${resolved}" does not exist`);
+    }
+    throw new Error(`${source} path "${resolved}" could not be resolved: ${errMsg(err)}`);
+  }
+  if (!statSync(root).isDirectory()) {
+    throw new Error(`${source} path "${resolved}" is not a directory`);
+  }
+  return root;
 }
 
 export function loadConfig(projectRoot: string = process.cwd()): CodedeepConfig {

@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-import { loadConfig, resolveCacheDir } from "./config.js";
+import { loadConfig, resolveCacheDir, resolveProjectRoot } from "./config.js";
 import { GitService } from "./git/git-service.js";
 import { CodeIndex } from "./indexer/code-index.js";
 import { Indexer } from "./indexer/pipeline.js";
@@ -15,7 +15,9 @@ import type { CodedeepConfig } from "./types.js";
 
 let initial: CodedeepConfig;
 try {
-  initial = loadConfig();
+  // --project / CODEDEEP_ROOT beat cwd (validated + realpath'd); a bad
+  // override throws here rather than degrading to an empty index.
+  initial = loadConfig(resolveProjectRoot());
 } catch (err) {
   log.error(`codedeep-mcp: invalid config: ${errMsg(err)}`);
   process.exit(1);

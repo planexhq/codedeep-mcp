@@ -113,6 +113,16 @@ describe('runChanges — git failure modes (load-bearing, in-band)', () => {
     expect(r.content[0].text).toMatch(pattern);
   });
 
+  it('no-repo at a folder-of-repos root points at per-repo servers', async () => {
+    const deps = makeDeps(new CodeIndex(tmpRoot), { kind: 'no-repo' });
+    deps.git = { ...deps.git, childGitRepos: ['backend', 'frontend'] };
+    const text = (await runChanges({}, deps)).content[0].text;
+    expect(text).toMatch(/^Error:/);
+    expect(text).toContain('workspace containing 2 child git repos (backend, frontend)');
+    expect(text).toContain('--project');
+    expect(text).not.toContain('has no repo');
+  });
+
   it('says the working tree is clean when there are no changes', async () => {
     const r = await runChanges({}, makeDeps(new CodeIndex(tmpRoot), okSet([])));
     expect(r.content[0].text).toContain('Working tree clean');

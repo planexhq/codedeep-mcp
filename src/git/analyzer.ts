@@ -43,9 +43,29 @@ export const HOTSPOTS_KEPT = 50;
 // keep incrementing existing ones.
 const PAIR_MAP_CAP = 250_000;
 
-export function buildLogArgs(windowDays: number, now: number = Date.now()): string[] {
+// `scopeToSubtree` appends a `-- .` pathspec (cwd-relative — the runner runs
+// git with cwd = projectRoot). Set it only when the project root is a
+// SUBDIRECTORY of the git toplevel (pathPrefix non-empty): it filters the
+// `--name-only` output to files under the subtree, so a monorepo package's
+// co-change partners can never be a sibling package's file (`../frontend/x`),
+// and it bounds the walk to subtree-touching commits instead of the whole
+// repo. Paths stay repo-root-relative (diff.relative is pinned off), so
+// analyzeLog's pathPrefix stripping is unaffected. At the repo root
+// (pathPrefix empty) `-- .` is a no-op, but it is gated off there anyway to
+// keep the dominant case's args byte-identical.
+//   NOTE: because `--name-only` then lists only subtree files, the
+//   MAX_FILES_PER_COMMIT mega-commit gate (analyzeLog below) also counts the
+//   subtree-LOCAL file count — so a repo-wide sweep touching few subtree files
+//   is now KEPT (was dropped whole-repo). In-subtree churn/co-change tallies
+//   are therefore monotonically >= the whole-repo run — intended: the subtree
+//   behaves like a standalone repo, and MIN_SHARED_COMMITS still bounds pairs.
+export function buildLogArgs(
+  windowDays: number,
+  now: number = Date.now(),
+  scopeToSubtree = false,
+): string[] {
   const since = new Date(now - windowDays * 86_400_000).toISOString();
-  return [
+  const args = [
     'log',
     '--no-merges',
     // Rename detection is heuristic and git-version-dependent; with it
@@ -57,6 +77,9 @@ export function buildLogArgs(windowDays: number, now: number = Date.now()): stri
     `--since=${since}`,
     '--pretty=format:%x00%ct',
   ];
+  // The pathspec must be last (after the `--` terminator).
+  if (scopeToSubtree) args.push('--', '.');
+  return args;
 }
 
 export interface GitAnalysis {
