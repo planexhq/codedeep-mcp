@@ -26,6 +26,32 @@ const VERDICT_MARK: Record<AnchorVerdict, string> = {
   missing: '✗',
 };
 
+// Compact one-line form for summary surfaces (the `changes` tool's per-file
+// note list): same verdict grammar as renderNote, but one line — mark+word,
+// truncated text, id (so forget/recall can target it). Full detail lives one
+// recall away.
+const NOTE_LINE_TEXT_CAP = 90;
+export function renderNoteLine(note: Note, status: NoteStatus): string {
+  // Flatten FIRST (newlines collapse to single spaces), then cap — measuring
+  // the raw text would needlessly truncate a multi-line note whose flattened
+  // form fits, and could land the cut on collapsed whitespace.
+  let flat = note.text.replace(/\s*\n\s*/g, ' ').trim();
+  // A whitespace-only / empty note (hand-edited or migrated store) must not
+  // render as a bare `"…"` or quoted blanks — say what it is.
+  if (flat.length === 0) flat = '(empty)';
+  else if (flat.length > NOTE_LINE_TEXT_CAP) {
+    let cut = flat.slice(0, NOTE_LINE_TEXT_CAP - 1);
+    // Never split a surrogate pair: a cut landing mid-astral-char (emoji,
+    // CJK extensions) would emit a lone high surrogate (mojibake, and invalid
+    // if the response is re-encoded).
+    const last = cut.charCodeAt(cut.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+    cut = cut.trimEnd();
+    flat = cut.length > 0 ? `${cut}…` : '(empty)';
+  }
+  return `- ${VERDICT_TAG[status.overall]} — "${flat}" (note ${note.id})`;
+}
+
 export function renderNote(note: Note, status: NoteStatus): string {
   // Guard a hand-edited / non-ISO createdAt that parses to NaN (isValidNote only
   // checks it's a string) so the header never reads "NaNd ago".

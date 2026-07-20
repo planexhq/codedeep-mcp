@@ -49,6 +49,92 @@ export interface RecentCommit {
   subject: string;
 }
 
+// One working-set entry for the `changes` tool. `path` is PROJECT-relative
+// (the index's path space); `status` is a coarse human word, not raw XY codes.
+// A rename carries `origPath` so the consumer can surface knowledge anchored
+// to the PRE-rename path — exactly the notes the rename just orphaned.
+export interface ChangedFile {
+  path: string;
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted' | 'changed';
+  origPath?: string;
+}
+
+// `status -uall` enumerates the whole worktree + every untracked file — far
+// heavier than the quick plumbing probes, and a deterministic timeout would
+// disable the tool on exactly the big dirty repos where a working-set summary
+// matters most. Same story for the ref-mode diff.
+const WORKING_SET_TIMEOUT_MS = 15_000;
+const WORKING_SET_MAX_BUFFER = 32 * 1024 * 1024;
+
+// changedFiles() result. Unlike the enrichment surfaces (null/empty = omit the
+// section), the `changes` tool CANNOT answer without git — each failure kind
+// maps to a distinct, honest in-band message.
+export type WorkingSetResult =
+  | { kind: 'ok'; files: ChangedFile[]; scope: string }
+  | { kind: 'no-repo' }
+  | { kind: 'unavailable' } // git disabled/missing, or detection unsettled
+  | { kind: 'transient' } // probe failed; retrying next call may succeed
+  | { kind: 'bad-ref'; detail: string };
+
+// Refname allowlist for the `changes` tool's user-supplied ref. execFile means
+// no shell, so a leading '-' (flag smuggling) is the injection surface; the
+// rest of git's refname grammar can stay loose — an invalid-but-safe ref just
+// fails rev-parse verification with a clean 'bad-ref'.
+const SAFE_REF_RE = /^[A-Za-z0-9_][A-Za-z0-9._/^~@{}-]*$/;
+function isSafeRef(ref: string): boolean {
+  return ref.length > 0 && ref.length <= 200 && SAFE_REF_RE.test(ref);
+}
+
+// `status --porcelain -z` entries: `XY <path>` NUL-terminated; a rename/copy
+// (X of R/C) is followed by the ORIGINAL path as its own NUL field. Paths are
+// repo-root-relative (porcelain ignores cwd), so `prefix` (rev-parse
+// --show-prefix) re-bases them onto the project root; entries outside the
+// project subtree are dropped (belt — the `-- .` pathspec already scopes).
+function parsePorcelainStatus(out: string, prefix: string): ChangedFile[] {
+  const files: ChangedFile[] = [];
+  // Porcelain can list one path twice (`git rm --cached f` → 'D  f' AND
+  // '?? f'); the FIRST entry carries the tracked-state signal, so later
+  // duplicates are dropped rather than rendered as two blocks for one file.
+  const seen = new Set<string>();
+  const tokens = out.split('\0');
+  for (let i = 0; i < tokens.length; i++) {
+    const entry = tokens[i];
+    if (entry.length < 4) continue; // 'XY path' minimum; skips the trailing ''
+    const xy = entry.slice(0, 2);
+    const rawPath = entry.slice(3);
+    // A rename/copy in EITHER column ('R  new', ' R new' for worktree/
+    // intent-to-add renames) is followed by the ORIGINAL path as its own NUL
+    // field — failing to consume it would emit a phantom mangled entry.
+    const isRename = xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C';
+    let origPath: string | undefined;
+    if (isRename) {
+      const orig = tokens[++i]; // consume unconditionally to stay in sync
+      if (orig !== undefined && (prefix.length === 0 || orig.startsWith(prefix))) {
+        origPath = prefix.length > 0 ? orig.slice(prefix.length) : orig;
+      }
+    }
+    if (prefix.length > 0 && !rawPath.startsWith(prefix)) continue;
+    const path = prefix.length > 0 ? rawPath.slice(prefix.length) : rawPath;
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const file: ChangedFile = { path, status: statusWord(xy) };
+    if (origPath !== undefined && origPath !== path) file.origPath = origPath;
+    files.push(file);
+  }
+  return files;
+}
+
+function statusWord(xy: string): ChangedFile['status'] {
+  if (xy === '??') return 'untracked';
+  // Both-sides conflict states (UU/AA/DD and any U) need resolution before
+  // the file's content is meaningful.
+  if (xy.includes('U') || xy === 'AA' || xy === 'DD') return 'conflicted';
+  if (xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') return 'renamed';
+  if (xy[0] === 'D' || xy[1] === 'D') return 'deleted';
+  if (xy[0] === 'A' || xy[1] === 'A') return 'added';
+  return 'modified';
+}
+
 // The bulk pass gets generous limits (whole-window history of a large
 // repo); per-call queries stay snappy and just degrade on timeout.
 const ANALYSIS_TIMEOUT_MS = 30_000;
@@ -412,6 +498,85 @@ export class GitService {
     // generation could serve a wrong branch all session.
     if (value !== null && !degraded) this.branchMemo = { gen, value };
     return value;
+  }
+
+  // The `changes` tool's working set. Unlike every other git surface, this is
+  // LOAD-BEARING (no repo → no working set to compute), so the result is a
+  // discriminated union the tool renders as honest in-band messages rather
+  // than a silently-omitted section. NEVER memoized: the working tree changes
+  // between any two calls by definition.
+  //
+  // ref === undefined → UNCOMMITTED changes: `status --porcelain -z -uall`
+  // scoped to the project subtree (`-- .`). Porcelain paths are repo-root-
+  // relative even in a monorepo subdirectory, so they are re-based onto the
+  // project root via `rev-parse --show-prefix` — the index's path space.
+  //
+  // ref given → files this branch changed vs the ref: the same triple-dot
+  // `diff --name-only` computeBranchSummary uses (committed changes since the
+  // merge base; the DEFAULT mode covers uncommitted work). The ref is
+  // VALIDATED before reaching argv — a leading '-' could smuggle a git flag
+  // (execFile means no shell, so flag injection is the whole surface) — and
+  // verified to resolve, so a typo'd ref reports 'bad-ref', not an empty set.
+  async changedFiles(ref?: string): Promise<WorkingSetResult> {
+    if (this.closed) return { kind: 'transient' };
+    this.maybeRetryStartup();
+    if (this.stateValue === 'no-repo') return { kind: 'no-repo' };
+    if (this.stateValue !== 'ready') return { kind: 'unavailable' };
+    const q = { timeoutMs: QUICK_TIMEOUT_MS };
+    // status/diff enumerate the worktree — a dedicated, more generous budget
+    // than the quick single-ref probes (see WORKING_SET_TIMEOUT_MS).
+    const heavy = {
+      timeoutMs: WORKING_SET_TIMEOUT_MS,
+      maxBuffer: WORKING_SET_MAX_BUFFER,
+    };
+
+    if (ref !== undefined) {
+      const trimmed = ref.trim();
+      if (!isSafeRef(trimmed)) {
+        return { kind: 'bad-ref', detail: 'not a valid ref name' };
+      }
+      const verifyR = await this.probe(
+        ['rev-parse', '--verify', '-q', `${trimmed}^{commit}`],
+        q,
+      );
+      if (verifyR.transient) return { kind: 'transient' };
+      if (verifyR.out === null) {
+        return { kind: 'bad-ref', detail: 'does not resolve to a commit' };
+      }
+      const diffR = await this.probe(
+        ['diff', '--name-only', '-z', '--relative', `${trimmed}...HEAD`, '--', '.'],
+        heavy,
+      );
+      if (diffR.transient) return { kind: 'transient' };
+      if (diffR.out === null) {
+        // A CLEAN non-zero exit is a permanent answer, not a retryable one —
+        // the classic case is an orphan/shallow ref with no merge base for the
+        // triple-dot diff. 'try again' would be a lie forever.
+        return {
+          kind: 'bad-ref',
+          detail:
+            'resolves to a commit, but `git diff` failed against it (no merge base with HEAD?)',
+        };
+      }
+      const files = diffR.out
+        .split('\0')
+        .filter((p) => p.length > 0)
+        .map((path) => ({ path, status: 'changed' as const }));
+      return { kind: 'ok', files, scope: `vs ${trimmed} (committed)` };
+    }
+
+    const statusR = await this.probe(
+      ['status', '--porcelain', '-z', '--untracked-files=all', '--', '.'],
+      heavy,
+    );
+    if (statusR.transient || statusR.out === null) return { kind: 'transient' };
+    // pathPrefix was captured by the detection probe's --show-prefix line
+    // ('' at the repo root, 'sub/dir/' in a monorepo subtree) — no extra spawn.
+    return {
+      kind: 'ok',
+      files: parsePorcelainStatus(statusR.out, this.pathPrefix),
+      scope: 'uncommitted',
+    };
   }
 
   // Heals startup and mid-session races from tool calls, at most one

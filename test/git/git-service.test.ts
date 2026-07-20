@@ -964,3 +964,225 @@ describe('GitService scoped-pass hardening (whole-file review)', () => {
     expect(index.getGitMeta()?.head).toBe(HEAD_A); // retried and healed
   });
 });
+
+describe('GitService.changedFiles (the `changes` tool working set)', () => {
+  // Extends the standard repo script with status/diff/show-prefix/verify
+  // handling; individual tests override pieces via the `extra` handler.
+  function wsScript(
+    extra: (args: string[]) => string | GitError | null = () => null,
+  ): (args: string[]) => string | GitError {
+    const base = repoScript();
+    return (args) => {
+      const custom = extra(args);
+      if (custom !== null) return custom;
+      if (args[0] === 'status') {
+        // modified, untracked, rename (with orig-path field), worktree-deleted
+        return [
+          ' M src/a.ts',
+          '?? src/new.ts',
+          'R  src/renamed.ts',
+          'src/old.ts', // the rename's ORIGINAL path (own NUL field)
+          ' D src/gone.ts',
+          '',
+        ].join('\0');
+      }
+      if (args[0] === 'rev-parse' && args.includes('--verify')) {
+        return args.some((a) => a.startsWith('main^')) 
+          ? `${HEAD_A}\n`
+          : new GitError('exit', 'unknown ref', { exitCode: 1 });
+      }
+      if (args[0] === 'diff' && args.includes('--name-only')) {
+        return 'src/x.ts\0src/y.ts\0';
+      }
+      return base(args);
+    };
+  }
+
+  async function readyService(
+    script: (args: string[]) => string | GitError,
+  ): Promise<{ service: GitService; runner: FakeRunner }> {
+    const runner = new FakeRunner(script);
+    const service = new GitService(cfg(), track(makeIndex()), cachePath, runner);
+    await service.start();
+    expect(service.state).toBe('ready');
+    return { service, runner };
+  }
+
+  it('parses porcelain -z: statuses, untracked, rename orig-path consumption', async () => {
+    const { service } = await readyService(wsScript());
+    const ws = await service.changedFiles();
+    expect(ws.kind).toBe('ok');
+    if (ws.kind !== 'ok') return;
+    expect(ws.scope).toBe('uncommitted');
+    expect(ws.files).toEqual([
+      { path: 'src/a.ts', status: 'modified' },
+      { path: 'src/new.ts', status: 'untracked' },
+      // The orig-path NUL field is consumed AND carried, so the consumer can
+      // surface notes anchored to the pre-rename path.
+      { path: 'src/renamed.ts', status: 'renamed', origPath: 'src/old.ts' },
+      { path: 'src/gone.ts', status: 'deleted' },
+    ]);
+  });
+
+  it('re-bases repo-root-relative paths onto a monorepo project subtree', async () => {
+    const { service } = await readyService(
+      wsScript((args) => {
+        // The detection probe's 3rd line IS the subtree prefix.
+        if (args[0] === 'rev-parse' && args.includes('--is-inside-work-tree')) {
+          return 'true\n.git\npkg/app/';
+        }
+        if (args[0] === 'status') {
+          return [' M pkg/app/src/a.ts', ' M other/unrelated.ts', ''].join('\0');
+        }
+        return null;
+      }),
+    );
+    const ws = await service.changedFiles();
+    expect(ws.kind).toBe('ok');
+    if (ws.kind !== 'ok') return;
+    // In-subtree path re-based to the project root; outside path dropped.
+    expect(ws.files).toEqual([{ path: 'src/a.ts', status: 'modified' }]);
+  });
+
+  it('ref mode: verifies the ref then triple-dot diffs, project-relative', async () => {
+    const { service, runner } = await readyService(wsScript());
+    const ws = await service.changedFiles('main');
+    expect(ws.kind).toBe('ok');
+    if (ws.kind !== 'ok') return;
+    expect(ws.scope).toBe('vs main (committed)');
+    expect(ws.files).toEqual([
+      { path: 'src/x.ts', status: 'changed' },
+      { path: 'src/y.ts', status: 'changed' },
+    ]);
+    const diffCall = runner.calls.find((c) => c[0] === 'diff');
+    expect(diffCall).toContain('main...HEAD');
+    expect(diffCall).toContain('--relative');
+  });
+
+  it('rejects a flag-smuggling ref WITHOUT spawning git for it', async () => {
+    const { service, runner } = await readyService(wsScript());
+    const before = runner.calls.length;
+    const ws = await service.changedFiles('--upload-pack=/evil');
+    expect(ws.kind).toBe('bad-ref');
+    expect(runner.calls.length).toBe(before); // validation is pre-argv
+  });
+
+  it("reports 'bad-ref' for a ref that does not resolve", async () => {
+    const { service } = await readyService(wsScript());
+    const ws = await service.changedFiles('no-such-branch');
+    expect(ws.kind).toBe('bad-ref');
+  });
+
+  it("reports 'no-repo' outside a repository", async () => {
+    const runner = new FakeRunner((args) => {
+      if (args[0] === 'rev-parse' && args.includes('--is-inside-work-tree')) {
+        return new GitError('exit', 'not a repo', { exitCode: 128 });
+      }
+      return new GitError('exit', 'unexpected', { exitCode: 1 });
+    });
+    const service = new GitService(cfg(), track(makeIndex()), cachePath, runner);
+    await service.start();
+    const ws = await service.changedFiles();
+    expect(ws.kind).toBe('no-repo');
+  });
+
+  it("reports 'transient' when the status probe times out", async () => {
+    const { service } = await readyService(
+      wsScript((args) =>
+        args[0] === 'status'
+          ? new GitError('timeout', 'timed out', {})
+          : null,
+      ),
+    );
+    const ws = await service.changedFiles();
+    expect(ws.kind).toBe('transient');
+  });
+});
+
+describe('GitService.changedFiles — review-round hardening', () => {
+  function wsService(
+    extra: (args: string[]) => string | GitError | null,
+  ): Promise<{ service: GitService; runner: FakeRunner }> {
+    const base = repoScript();
+    const runner = new FakeRunner((args) => {
+      const custom = extra(args);
+      if (custom !== null) return custom;
+      return base(args);
+    });
+    const service = new GitService(cfg(), track(makeIndex()), cachePath, runner);
+    return service.start().then(() => {
+      expect(service.state).toBe('ready');
+      return { service, runner };
+    });
+  }
+
+  it('consumes the orig-path field for WORKTREE-side renames (no phantom entry)', async () => {
+    // ' R' (Y-column rename: mv + git add -N) also carries an orig-path field;
+    // failing to consume it produced a mangled phantom '### -name.ts' block.
+    const { service } = await wsService((args) =>
+      args[0] === 'status'
+        ? [' R src/new-name.ts', 'src/old-name.ts', ''].join('\0')
+        : null,
+    );
+    const ws = await service.changedFiles();
+    expect(ws.kind).toBe('ok');
+    if (ws.kind !== 'ok') return;
+    expect(ws.files).toEqual([
+      { path: 'src/new-name.ts', status: 'renamed', origPath: 'src/old-name.ts' },
+    ]);
+  });
+
+  it('dedupes a path porcelain lists twice (rm --cached → D + ??)', async () => {
+    const { service } = await wsService((args) =>
+      args[0] === 'status' ? ['D  f.txt', '?? f.txt', ''].join('\0') : null,
+    );
+    const ws = await service.changedFiles();
+    expect(ws.kind).toBe('ok');
+    if (ws.kind !== 'ok') return;
+    expect(ws.files).toEqual([{ path: 'f.txt', status: 'deleted' }]);
+  });
+
+  it("reports a clean diff failure (no merge base) as 'bad-ref', never 'transient'", async () => {
+    const { service } = await wsService((args) => {
+      if (args[0] === 'rev-parse' && args.includes('--verify')) return `${HEAD_A}\n`;
+      if (args[0] === 'diff') {
+        return new GitError('exit', 'no merge base', { exitCode: 128 });
+      }
+      return null;
+    });
+    const ws = await service.changedFiles('orphan-branch');
+    expect(ws.kind).toBe('bad-ref');
+    if (ws.kind !== 'bad-ref') return;
+    expect(ws.detail).toContain('no merge base');
+  });
+
+  it('runs BOTH status AND the ref-mode diff under the dedicated working-set budget', async () => {
+    const opts: Record<string, GitRunOptions | undefined> = {};
+    const base = repoScript();
+    const runner = new (class extends FakeRunner {
+      override async run(args: string[], o?: GitRunOptions): Promise<string> {
+        if (args[0] === 'status') {
+          opts.status = o;
+          return ' M src/a.ts\0';
+        }
+        if (args[0] === 'diff') {
+          opts.diff = o;
+          return 'src/x.ts\0';
+        }
+        if (args[0] === 'rev-parse' && args.includes('--verify')) return `${HEAD_A}\n`;
+        return super.run(args, o);
+      }
+    })((args) => base(args));
+    const service = new GitService(cfg(), track(makeIndex()), cachePath, runner);
+    await service.start();
+    await service.changedFiles(); // status path
+    await service.changedFiles('main'); // diff path
+
+    // Neither worktree-enumerating probe may share the quick 3s/default budget —
+    // that made the tool unusable on big dirty repos / large ranges.
+    for (const o of [opts.status, opts.diff]) {
+      expect(o?.timeoutMs).toBeGreaterThan(3_000);
+      expect(o?.maxBuffer).toBeGreaterThan(10 * 1024 * 1024);
+    }
+  });
+});

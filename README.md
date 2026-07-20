@@ -10,7 +10,7 @@ An MCP server that gives AI coding agents structural understanding of codebases.
 
 **One tool call replaces 5-10 Grep-Read cycles.**
 
-codedeep-mcp parses your code with [tree-sitter](https://tree-sitter.github.io/tree-sitter/), builds a symbol index, and exposes 9 tools over the [Model Context Protocol](https://modelcontextprotocol.io/): 6 read-only structural tools that answer questions directly (find symbols, trace callers, assess blast radius, search by structure) plus a 3-tool agent-curated knowledge layer (`remember` / `recall` / `forget`) whose notes are **staleness-tracked** against your source — when anchored code changes, the note is flagged instead of rotting silently.
+codedeep-mcp parses your code with [tree-sitter](https://tree-sitter.github.io/tree-sitter/), builds a symbol index, and exposes 10 tools over the [Model Context Protocol](https://modelcontextprotocol.io/): 6 read-only structural tools that answer questions directly (find symbols, trace callers, assess blast radius, search by structure), a 3-tool agent-curated knowledge layer (`remember` / `recall` / `forget`) whose notes are **staleness-tracked** against your source — when anchored code changes, the note is flagged instead of rotting silently — and `changes`, which reviews your git working set in one call: what breaks, and which of your notes just went stale.
 
 ## Why
 
@@ -35,6 +35,7 @@ codedeep-mcp solves this by parsing code into symbols and relationships, then an
 | `remember` | Store a durable, anchored note | Cross-file invariants, footguns, decisions — anchored to files/symbols |
 | `recall` | Retrieve notes with freshness | Each note tagged ✓ fresh / ⚠ stale by re-checking its anchors |
 | `forget` | Delete a note | Remove superseded or wrong knowledge |
+| `changes` | Working-set review | What breaks + which notes went stale, per changed file |
 
 ## Quick Start
 

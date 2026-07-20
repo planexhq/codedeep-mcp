@@ -11,6 +11,7 @@ import type { CodeIndex } from "./indexer/code-index.js";
 import type { Indexer } from "./indexer/pipeline.js";
 import { errMsg, log } from "./logger.js";
 import type { NoteStore } from "./notes/note-store.js";
+import { runChanges } from "./tools/changes.js";
 import { runFindReferences } from "./tools/find-references.js";
 import { runFindSymbol } from "./tools/find-symbol.js";
 import { runForget } from "./tools/forget.js";
@@ -243,6 +244,36 @@ export function createServer(deps: ServerDeps): McpServer {
       annotations: SHARED_ANNOTATIONS,
     },
     async (args) => runImpact(args, deps),
+  );
+
+  server.registerTool(
+    "changes",
+    {
+      description:
+        "'I changed these files — what breaks, and which of my notes are now suspect?' One call over the git working set (uncommitted by default; pass `ref` for committed changes vs a branch/commit). Per changed file: the highest fan-in symbols with their transitive blast radius, staleness-flagged anchored notes, and usual co-change partners missing from the changeset. Requires a git repository. For one symbol's full caller tree use impact; for full note text use recall.",
+      inputSchema: {
+        ref: z
+          .string()
+          .optional()
+          .describe(
+            "Compare committed changes against this ref (e.g. 'main'). Omit for the uncommitted working tree.",
+          ),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max changed files rendered (default: 10, max: 30)"),
+        max_tokens: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Soft response budget (default: 3000)"),
+      },
+      annotations: SHARED_ANNOTATIONS,
+    },
+    async (args) => runChanges(args, deps),
   );
 
   server.registerTool(
